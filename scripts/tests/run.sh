@@ -46,6 +46,10 @@ make_fake_binary() {
     mkdir -p "$(dirname -- "$_test_binary")"
     cat >"$_test_binary" <<'EOF'
 #!/bin/sh
+[ -z "${CANDIDATE_SECRET_SENTINEL:-}" ] || {
+    printf '%s\n' 'candidate binary inherited ambient sentinel secret' >&2
+    exit 97
+}
 case ${1:-} in
     -v|-V|--version)
         printf '%s\n' 'grok-openai-test 1.0'
@@ -222,10 +226,14 @@ make_fixture() {
     printf '%s\n' base >"$SEED/base.txt"
     git -C "$SEED" add .
     git -C "$SEED" commit -m base >/dev/null
+    UPSTREAM_BASE=$(git -C "$SEED" rev-parse HEAD)
     git -C "$SEED" remote add origin "$ORIGIN"
     git -C "$SEED" remote add upstream "$UPSTREAM"
-    git -C "$SEED" push origin main >/dev/null
     git -C "$SEED" push upstream main >/dev/null
+    printf '%s\n' "$UPSTREAM_BASE" >"$SEED/.grok-openai-upstream"
+    git -C "$SEED" add .grok-openai-upstream
+    git -C "$SEED" commit -m 'track integrated upstream snapshot' >/dev/null
+    git -C "$SEED" push origin main >/dev/null
     git --git-dir="$ORIGIN" symbolic-ref HEAD refs/heads/main
     git --git-dir="$UPSTREAM" symbolic-ref HEAD refs/heads/main
 
@@ -237,6 +245,31 @@ make_fixture() {
     git -C "$UPSTREAM_WORK" config user.name 'Upstream Test'
     git -C "$UPSTREAM_WORK" config user.email 'upstream-test@example.invalid'
     make_fake_binary "$FAKE_BINARY"
+}
+
+# Model an upstream force rewrite without rewriting any fork history. The new
+# root commit intentionally has no parents but reuses the current upstream
+# index as its complete snapshot tree.
+force_rewrite_upstream() {
+    _test_rewritten_tree=$(git -C "$UPSTREAM_WORK" write-tree)
+    REWRITTEN_UPSTREAM_COMMIT=$(
+        printf '%s\n' 'rewritten upstream root' |
+            git -C "$UPSTREAM_WORK" commit-tree "$_test_rewritten_tree"
+    )
+    git -C "$UPSTREAM_WORK" push --force origin \
+        "$REWRITTEN_UPSTREAM_COMMIT:refs/heads/main" >/dev/null
+}
+
+rewrite_upstream_from_parent() {
+    _test_rewritten_parent=$1
+    _test_rewritten_tree=$(git -C "$UPSTREAM_WORK" write-tree)
+    REWRITTEN_UPSTREAM_COMMIT=$(
+        printf '%s\n' 'rebased upstream snapshot' |
+            git -C "$UPSTREAM_WORK" commit-tree "$_test_rewritten_tree" \
+                -p "$_test_rewritten_parent"
+    )
+    git -C "$UPSTREAM_WORK" push --force origin \
+        "$REWRITTEN_UPSTREAM_COMMIT:refs/heads/main" >/dev/null
 }
 
 run_updater() {
@@ -255,6 +288,33 @@ run_updater() {
             "$@" \
             ./scripts/update-from-upstream.sh
     ) >"$_test_output" 2>&1
+}
+
+run_updater_accept_pair() {
+    _test_output=$1
+    _test_accept_pair=$2
+    shift 2
+    (
+        cd "$WORK"
+        env \
+            HOME="$HOME_DIR" \
+            TMPDIR="$FIXTURE/tmp" \
+            GROK_OPENAI_WORKFLOW_TEST_MODE=1 \
+            GROK_OPENAI_EXPECTED_ORIGIN_URL="$ORIGIN" \
+            GROK_OPENAI_EXPECTED_UPSTREAM_URL="$UPSTREAM" \
+            GROK_OPENAI_PREBUILT="$FAKE_BINARY" \
+            GROK_OPENAI_GATE_CMD="${GROK_OPENAI_GATE_CMD_TEST:-true}" \
+            "$@" \
+            ./scripts/update-from-upstream.sh \
+                "--accept-upstream-rewrite=$_test_accept_pair"
+    ) >"$_test_output" 2>&1
+}
+
+run_updater_accept_rewrite() {
+    _test_output=$1
+    shift
+    _test_accept_pair=$(git -C "$WORK" show HEAD:.grok-openai-upstream)..$(git --git-dir="$UPSTREAM" rev-parse refs/heads/main)
+    run_updater_accept_pair "$_test_output" "$_test_accept_pair" "$@"
 }
 
 test_bypasses_require_explicit_test_mode() {
@@ -289,6 +349,14 @@ test_update_success_and_noop() {
     git -C "$UPSTREAM_WORK" add upstream.txt
     git -C "$UPSTREAM_WORK" commit -m upstream-update >/dev/null
     git -C "$UPSTREAM_WORK" push origin main >/dev/null
+    _test_upstream_commit=$(git -C "$UPSTREAM_WORK" rev-parse HEAD)
+
+    _test_normal_pair=$(git -C "$WORK" show HEAD:.grok-openai-upstream)..$_test_upstream_commit
+    if run_updater_accept_pair "$FIXTURE/normal-pin-refusal.out" "$_test_normal_pair"; then
+        fail 'normal update unexpectedly accepted a rewrite pin'
+    fi
+    grep -q 'valid only when upstream no longer descends' "$FIXTURE/normal-pin-refusal.out" || \
+        fail 'normal update rewrite-pin refusal was not actionable'
 
     GROK_OPENAI_GATE_CMD_TEST='test -f upstream.txt'
     export GROK_OPENAI_GATE_CMD_TEST
@@ -300,11 +368,162 @@ test_update_success_and_noop() {
     assert_absent "$HOME_DIR/.grok"
     assert_eq "$(git -C "$WORK" rev-parse HEAD)" "$(git --git-dir="$ORIGIN" rev-parse refs/heads/main)"
     assert_eq "$(git -C "$WORK" remote get-url --push upstream)" DISABLED
+    assert_eq "$(sed -n '1p' "$WORK/.grok-openai-upstream")" "$_test_upstream_commit"
+    git -C "$WORK" show --format= --name-only HEAD | grep -q '^\.grok-openai-upstream$' || \
+        fail 'successful merge commit did not update the upstream marker'
 
     _test_before=$(git -C "$WORK" rev-parse HEAD)
     run_updater "$FIXTURE/noop.out"
     assert_eq "$_test_before" "$(git -C "$WORK" rev-parse HEAD)"
     grep -q 'Already up to date' "$FIXTURE/noop.out" || fail 'no-op update was not reported'
+}
+
+test_update_accepts_unrelated_rewritten_upstream() {
+    make_fixture update-unrelated-success
+    _test_fork_before=$(git -C "$WORK" rev-parse HEAD)
+    _test_previous_upstream=$(sed -n '1p' "$WORK/.grok-openai-upstream")
+
+    printf '%s\n' rewritten >"$UPSTREAM_WORK/rewritten.txt"
+    git -C "$UPSTREAM_WORK" add rewritten.txt
+    force_rewrite_upstream
+    _test_rewritten_upstream=$REWRITTEN_UPSTREAM_COMMIT
+
+    if run_updater "$FIXTURE/unrelated-refusal.out"; then
+        fail 'rewritten upstream succeeded without explicit acceptance'
+    fi
+    assert_eq "$_test_fork_before" "$(git -C "$WORK" rev-parse HEAD)"
+    assert_absent "$HOME_DIR/.local/bin/grok-openai"
+    grep -q -- '--accept-upstream-rewrite' "$FIXTURE/unrelated-refusal.out" || \
+        fail 'rewritten upstream refusal did not explain explicit acceptance'
+    if run_updater_accept_pair "$FIXTURE/unrelated-stale-pin.out" \
+        "$_test_previous_upstream..$_test_previous_upstream"; then
+        fail 'rewritten upstream unexpectedly accepted a stale pin'
+    fi
+    grep -Fq -- "--accept-upstream-rewrite=$_test_previous_upstream..$_test_rewritten_upstream" \
+        "$FIXTURE/unrelated-stale-pin.out" || fail 'stale rewrite pin refusal omitted the exact current pair'
+
+    GROK_OPENAI_GATE_CMD_TEST="test -f rewritten.txt && grep -qx $_test_rewritten_upstream .grok-openai-upstream"
+    export GROK_OPENAI_GATE_CMD_TEST
+    run_updater_accept_rewrite "$FIXTURE/unrelated.out"
+    unset GROK_OPENAI_GATE_CMD_TEST
+
+    assert_file "$WORK/rewritten.txt"
+    assert_eq "$(sed -n '1p' "$WORK/.grok-openai-upstream")" "$_test_rewritten_upstream"
+    git -C "$WORK" merge-base --is-ancestor "$_test_fork_before" HEAD || \
+        fail 'unrelated update rewrote fork history instead of appending'
+    git -C "$WORK" merge-base --is-ancestor "$_test_rewritten_upstream" HEAD || \
+        fail 'rewritten upstream is not an ancestor of the successful merge'
+
+    _test_bridge=$(git -C "$WORK" rev-parse HEAD^2)
+    assert_eq "$(git -C "$WORK" rev-parse "$_test_bridge^1")" "$_test_previous_upstream"
+    assert_eq "$(git -C "$WORK" rev-parse "$_test_bridge^2")" "$_test_rewritten_upstream"
+    assert_eq "$(git -C "$WORK" rev-parse "$_test_bridge^{tree}")" \
+        "$(git -C "$WORK" rev-parse "$_test_rewritten_upstream^{tree}")"
+    grep -q 'synthesizing an append-only bridge' "$FIXTURE/unrelated.out" || \
+        fail 'unrelated-history bridge was not reported'
+}
+
+test_update_bridges_same_root_rebase() {
+    make_fixture update-same-root-rebase
+    printf '%s\n' old-upstream >"$UPSTREAM_WORK/upstream.txt"
+    git -C "$UPSTREAM_WORK" add upstream.txt
+    git -C "$UPSTREAM_WORK" commit -m old-upstream >/dev/null
+    git -C "$UPSTREAM_WORK" push origin main >/dev/null
+    run_updater "$FIXTURE/integrate-old.out"
+    _test_previous_upstream=$(sed -n '1p' "$WORK/.grok-openai-upstream")
+
+    printf '%s\n' rebased-upstream >"$UPSTREAM_WORK/upstream.txt"
+    git -C "$UPSTREAM_WORK" add upstream.txt
+    rewrite_upstream_from_parent "$UPSTREAM_BASE"
+    _test_rebased_upstream=$REWRITTEN_UPSTREAM_COMMIT
+    _test_fork_before=$(git -C "$WORK" rev-parse HEAD)
+
+    if run_updater "$FIXTURE/rebase-refusal.out"; then
+        fail 'same-root rebase succeeded without explicit acceptance'
+    fi
+    assert_eq "$_test_fork_before" "$(git -C "$WORK" rev-parse HEAD)"
+    grep -q -- '--accept-upstream-rewrite' "$FIXTURE/rebase-refusal.out" || \
+        fail 'same-root rebase refusal did not explain explicit acceptance'
+
+    run_updater_accept_rewrite "$FIXTURE/rebase.out"
+    _test_bridge=$(git -C "$WORK" rev-parse HEAD^2)
+    assert_eq "$(git -C "$WORK" rev-parse "$_test_bridge^1")" "$_test_previous_upstream"
+    assert_eq "$(git -C "$WORK" rev-parse "$_test_bridge^2")" "$_test_rebased_upstream"
+    assert_eq "$(git -C "$WORK" rev-parse "$_test_bridge^{tree}")" \
+        "$(git -C "$WORK" rev-parse "$_test_rebased_upstream^{tree}")"
+    assert_eq "$(sed -n '1p' "$WORK/.grok-openai-upstream")" "$_test_rebased_upstream"
+}
+
+test_update_requires_acceptance_for_rollback() {
+    make_fixture update-rollback
+    printf '%s\n' upstream >"$UPSTREAM_WORK/rollback.txt"
+    git -C "$UPSTREAM_WORK" add rollback.txt
+    git -C "$UPSTREAM_WORK" commit -m upstream-before-rollback >/dev/null
+    git -C "$UPSTREAM_WORK" push origin main >/dev/null
+    run_updater "$FIXTURE/integrate-before-rollback.out"
+    _test_previous_upstream=$(sed -n '1p' "$WORK/.grok-openai-upstream")
+    _test_fork_before=$(git -C "$WORK" rev-parse HEAD)
+
+    git -C "$UPSTREAM_WORK" push --force origin \
+        "$UPSTREAM_BASE:refs/heads/main" >/dev/null
+    if run_updater "$FIXTURE/rollback-refusal.out"; then
+        fail 'upstream rollback succeeded without explicit acceptance'
+    fi
+    assert_eq "$_test_fork_before" "$(git -C "$WORK" rev-parse HEAD)"
+    grep -q -- '--accept-upstream-rewrite' "$FIXTURE/rollback-refusal.out" || \
+        fail 'rollback refusal did not explain explicit acceptance'
+
+    GROK_OPENAI_GATE_CMD_TEST='test ! -e rollback.txt'
+    export GROK_OPENAI_GATE_CMD_TEST
+    run_updater_accept_rewrite "$FIXTURE/rollback.out"
+    unset GROK_OPENAI_GATE_CMD_TEST
+    assert_absent "$WORK/rollback.txt"
+    _test_bridge=$(git -C "$WORK" rev-parse HEAD^2)
+    assert_eq "$(git -C "$WORK" rev-parse "$_test_bridge^1")" "$_test_previous_upstream"
+    assert_eq "$(git -C "$WORK" rev-parse "$_test_bridge^2")" "$UPSTREAM_BASE"
+    assert_eq "$(git -C "$WORK" rev-parse "$_test_bridge^{tree}")" \
+        "$(git -C "$WORK" rev-parse "$UPSTREAM_BASE^{tree}")"
+    assert_eq "$(sed -n '1p' "$WORK/.grok-openai-upstream")" "$UPSTREAM_BASE"
+}
+
+test_update_rejects_malformed_marker() {
+    make_fixture update-malformed-marker
+    printf '%s\n' 'NOT-A-FULL-LOWERCASE-SHA' >"$WORK/.grok-openai-upstream"
+    git -C "$WORK" add .grok-openai-upstream
+    git -C "$WORK" commit -m 'malformed marker fixture' >/dev/null
+    git -C "$WORK" push origin main >/dev/null
+    _test_origin_before=$(git --git-dir="$ORIGIN" rev-parse refs/heads/main)
+
+    if run_updater "$FIXTURE/malformed-marker.out"; then
+        fail 'malformed upstream marker unexpectedly succeeded'
+    fi
+    assert_eq "$_test_origin_before" "$(git --git-dir="$ORIGIN" rev-parse refs/heads/main)"
+    assert_absent "$HOME_DIR/.local/bin/grok-openai"
+    grep -q 'must contain exactly one full lowercase commit SHA' "$FIXTURE/malformed-marker.out" || \
+        fail 'malformed marker refusal was not actionable'
+}
+
+test_update_rejects_nonancestor_marker() {
+    make_fixture update-nonancestor-marker
+    printf '%s\n' upstream >"$UPSTREAM_WORK/upstream.txt"
+    git -C "$UPSTREAM_WORK" add upstream.txt
+    git -C "$UPSTREAM_WORK" commit -m upstream-update >/dev/null
+    git -C "$UPSTREAM_WORK" push origin main >/dev/null
+    _test_nonancestor=$(git -C "$UPSTREAM_WORK" rev-parse HEAD)
+
+    printf '%s\n' "$_test_nonancestor" >"$WORK/.grok-openai-upstream"
+    git -C "$WORK" add .grok-openai-upstream
+    git -C "$WORK" commit -m 'nonancestor marker fixture' >/dev/null
+    git -C "$WORK" push origin main >/dev/null
+    _test_origin_before=$(git --git-dir="$ORIGIN" rev-parse refs/heads/main)
+
+    if run_updater "$FIXTURE/nonancestor-marker.out"; then
+        fail 'nonancestor upstream marker unexpectedly succeeded'
+    fi
+    assert_eq "$_test_origin_before" "$(git --git-dir="$ORIGIN" rev-parse refs/heads/main)"
+    assert_absent "$HOME_DIR/.local/bin/grok-openai"
+    grep -q 'commit is not an ancestor of fork HEAD' "$FIXTURE/nonancestor-marker.out" || \
+        fail 'nonancestor marker refusal was not actionable'
 }
 
 test_update_rejects_dirty_main() {
@@ -342,6 +561,119 @@ test_update_preserves_state_on_conflict() {
     grep -q 'Candidate retained for inspection' "$FIXTURE/conflict.out" || fail 'conflict recovery path was not reported'
 }
 
+test_unrelated_update_preserves_state_on_conflict() {
+    make_fixture update-unrelated-conflict
+    _test_previous_upstream=$(sed -n '1p' "$WORK/.grok-openai-upstream")
+    printf '%s\n' fork >"$WORK/conflict.txt"
+    git -C "$WORK" add conflict.txt
+    git -C "$WORK" commit -m fork-conflict >/dev/null
+    git -C "$WORK" push origin main >/dev/null
+
+    printf '%s\n' rewritten-upstream >"$UPSTREAM_WORK/conflict.txt"
+    git -C "$UPSTREAM_WORK" add conflict.txt
+    force_rewrite_upstream
+
+    _test_local_before=$(git -C "$WORK" rev-parse HEAD)
+    _test_origin_before=$(git --git-dir="$ORIGIN" rev-parse refs/heads/main)
+    if run_updater_accept_rewrite "$FIXTURE/unrelated-conflict.out"; then
+        fail 'conflicting unrelated update unexpectedly succeeded'
+    fi
+    assert_eq "$_test_local_before" "$(git -C "$WORK" rev-parse HEAD)"
+    assert_eq "$_test_origin_before" "$(git --git-dir="$ORIGIN" rev-parse refs/heads/main)"
+    assert_eq "$_test_previous_upstream" "$(sed -n '1p' "$WORK/.grok-openai-upstream")"
+    assert_absent "$HOME_DIR/.local/bin/grok-openai"
+    grep -q 'synthesizing an append-only bridge' "$FIXTURE/unrelated-conflict.out" || \
+        fail 'unrelated conflict did not enter the bridge path'
+    grep -q 'Candidate retained for inspection' "$FIXTURE/unrelated-conflict.out" || \
+        fail 'unrelated conflict candidate was not retained'
+}
+
+test_update_detects_upstream_race() {
+    make_fixture update-upstream-race
+    printf '%s\n' first >"$UPSTREAM_WORK/race.txt"
+    git -C "$UPSTREAM_WORK" add race.txt
+    git -C "$UPSTREAM_WORK" commit -m first-upstream >/dev/null
+    git -C "$UPSTREAM_WORK" push origin main >/dev/null
+
+    printf '%s\n' second >"$UPSTREAM_WORK/race.txt"
+    git -C "$UPSTREAM_WORK" add race.txt
+    git -C "$UPSTREAM_WORK" commit -m second-upstream >/dev/null
+    _test_second_upstream=$(git -C "$UPSTREAM_WORK" rev-parse HEAD)
+    git -C "$UPSTREAM_WORK" push origin HEAD:refs/heads/race-next >/dev/null
+
+    _test_local_before=$(git -C "$WORK" rev-parse HEAD)
+    _test_origin_before=$(git --git-dir="$ORIGIN" rev-parse refs/heads/main)
+    GROK_OPENAI_GATE_CMD_TEST="git --git-dir=$UPSTREAM update-ref refs/heads/main $_test_second_upstream"
+    export GROK_OPENAI_GATE_CMD_TEST
+    if run_updater "$FIXTURE/upstream-race.out"; then
+        unset GROK_OPENAI_GATE_CMD_TEST
+        fail 'upstream race unexpectedly published the stale candidate'
+    fi
+    unset GROK_OPENAI_GATE_CMD_TEST
+    assert_eq "$_test_local_before" "$(git -C "$WORK" rev-parse HEAD)"
+    assert_eq "$_test_origin_before" "$(git --git-dir="$ORIGIN" rev-parse refs/heads/main)"
+    assert_absent "$HOME_DIR/.local/bin/grok-openai"
+    grep -q 'upstream/main changed during validation' "$FIXTURE/upstream-race.out" || \
+        fail 'upstream race refusal was not actionable'
+    grep -q 'Candidate retained for inspection' "$FIXTURE/upstream-race.out" || \
+        fail 'validated stale candidate was not retained for inspection'
+}
+
+test_candidate_gate_sanitizes_ambient_credentials() {
+    make_fixture update-sanitized-gate
+    printf '%s\n' upstream >"$UPSTREAM_WORK/upstream.txt"
+    git -C "$UPSTREAM_WORK" add upstream.txt
+    git -C "$UPSTREAM_WORK" commit -m upstream-update >/dev/null
+    git -C "$UPSTREAM_WORK" push origin main >/dev/null
+
+    _test_sanitized_gate=$FIXTURE/sanitized-gate.sh
+    cat >"$_test_sanitized_gate" <<'EOF'
+#!/bin/sh
+case ${HOME:-} in
+    */validation-home) ;;
+    *) exit 1 ;;
+esac
+if env | grep -Eq '^(OPENAI_API_KEY|XAI_API_KEY|SUPABASE_MCP_BEARER_TOKEN|CANDIDATE_SECRET_SENTINEL)='; then
+    exit 1
+fi
+EOF
+    chmod 755 "$_test_sanitized_gate"
+    GROK_OPENAI_GATE_CMD_TEST=$_test_sanitized_gate
+    export GROK_OPENAI_GATE_CMD_TEST
+    run_updater "$FIXTURE/sanitized-gate.out" \
+        OPENAI_API_KEY=must-not-reach-candidate \
+        XAI_API_KEY=must-not-reach-candidate \
+        SUPABASE_MCP_BEARER_TOKEN=must-not-reach-candidate \
+        CANDIDATE_SECRET_SENTINEL=must-not-reach-candidate
+    unset GROK_OPENAI_GATE_CMD_TEST
+    assert_file "$HOME_DIR/.local/bin/grok-openai"
+}
+
+test_update_rejects_gate_mutated_commit() {
+    make_fixture update-mutated-candidate
+    printf '%s\n' upstream >"$UPSTREAM_WORK/upstream.txt"
+    git -C "$UPSTREAM_WORK" add upstream.txt
+    git -C "$UPSTREAM_WORK" commit -m upstream-update >/dev/null
+    git -C "$UPSTREAM_WORK" push origin main >/dev/null
+
+    _test_local_before=$(git -C "$WORK" rev-parse HEAD)
+    _test_origin_before=$(git --git-dir="$ORIGIN" rev-parse refs/heads/main)
+    GROK_OPENAI_GATE_CMD_TEST='git -c commit.gpgSign=false -c core.hooksPath=/dev/null commit --allow-empty --no-verify -m gate-mutated >/dev/null'
+    export GROK_OPENAI_GATE_CMD_TEST
+    if run_updater "$FIXTURE/mutated-candidate.out"; then
+        unset GROK_OPENAI_GATE_CMD_TEST
+        fail 'gate-mutated candidate commit unexpectedly published'
+    fi
+    unset GROK_OPENAI_GATE_CMD_TEST
+    assert_eq "$_test_local_before" "$(git -C "$WORK" rev-parse HEAD)"
+    assert_eq "$_test_origin_before" "$(git --git-dir="$ORIGIN" rev-parse refs/heads/main)"
+    assert_absent "$HOME_DIR/.local/bin/grok-openai"
+    grep -q 'candidate HEAD changed during validation' "$FIXTURE/mutated-candidate.out" || \
+        fail 'gate-mutated candidate refusal was not actionable'
+    grep -q 'Candidate retained for inspection' "$FIXTURE/mutated-candidate.out" || \
+        fail 'gate-mutated candidate was not retained'
+}
+
 test_update_preserves_state_on_gate_failure() {
     make_fixture update-gate-failure
     printf '%s\n' upstream >"$UPSTREAM_WORK/upstream.txt"
@@ -367,8 +699,17 @@ test_update_preserves_state_on_gate_failure() {
 test_install_isolation
 test_bypasses_require_explicit_test_mode
 test_update_success_and_noop
+test_update_accepts_unrelated_rewritten_upstream
+test_update_bridges_same_root_rebase
+test_update_requires_acceptance_for_rollback
+test_update_rejects_malformed_marker
+test_update_rejects_nonancestor_marker
 test_update_rejects_dirty_main
 test_update_preserves_state_on_conflict
+test_unrelated_update_preserves_state_on_conflict
+test_update_detects_upstream_race
+test_candidate_gate_sanitizes_ambient_credentials
+test_update_rejects_gate_mutated_commit
 test_update_preserves_state_on_gate_failure
 
 printf '%s\n' 'OpenAI shell workflow tests passed.'

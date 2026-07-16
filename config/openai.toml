@@ -28,6 +28,7 @@ feedback = false
 managed_config = false
 remote_fetch = false
 video_gen = false
+voice_mode = false
 
 # Hosted search remains off until the OpenAI web-search wire shape has its own
 # provider-isolation acceptance test. Local tools and MCP servers are unchanged.

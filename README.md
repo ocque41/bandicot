@@ -149,7 +149,12 @@ From a clean `main` branch, the complete update is one command:
 The updater fetches `origin` and `upstream`, integrates upstream in an isolated
 candidate worktree, runs the fork's checks and release build, and only then
 pushes the tested candidate to `origin/main` and fast-forwards local `main` to
-that same commit. It never force-pushes or pushes to upstream. See
+that same commit. A tracked upstream-snapshot marker supports an explicitly
+accepted append-only bridge if upstream force-rewrites, rebases, rewinds, or
+rolls back history; the refusal prints an exact
+`--accept-upstream-rewrite=<previous-sha>..<fetched-sha>` pin to use only after
+inspecting that unexpected history change. The updater never force-pushes,
+resets, rebases, stashes, or pushes to upstream. See
 [docs/UPDATING.md](docs/UPDATING.md) for prerequisites and failure recovery.
 
 ## Stop line

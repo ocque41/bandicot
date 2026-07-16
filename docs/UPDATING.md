@@ -12,6 +12,10 @@ fork and never in the other direction.
 
 - The checked-out branch is `main`, has no staged, modified, or untracked
   files, and matches `origin/main` before the update starts.
+- `.grok-openai-upstream` is a non-executable regular tracked file, contains
+  exactly one full lowercase commit SHA, names a valid commit, and that commit
+  is an ancestor of the fork's current `HEAD`. It records the last upstream
+  snapshot integrated by a successful update; do not edit it by hand.
 - The current user is authenticated to push `origin/main` normally. The script
   never force-pushes and does not bypass branch protection.
 - Rust, `protoc`, Git, and the repository's build dependencies are available.
@@ -31,19 +35,25 @@ From the repository root:
 
 The script performs the following transaction:
 
-1. validates the clean branch and exact remote identities;
+1. validates the clean branch, exact remote identities, and trusted upstream
+   marker;
 2. fetches both `origin` and `upstream`;
 3. creates a temporary candidate branch/worktree from the fork's current
    `main`;
-4. merges `upstream/main` into that isolated candidate without rewriting
-   history;
-5. validates the OpenAI profile, focused tests, mock end-to-end flow, and
+4. integrates `upstream/main` in that isolated candidate using a normal merge,
+   or the explicitly accepted append-only bridge described below if upstream
+   was force-rewritten, rebased, rewound, or rolled back;
+5. records the fetched upstream SHA in `.grok-openai-upstream` as part of the
+   candidate merge commit;
+6. validates the OpenAI profile, focused tests, mock end-to-end flow, and
    release build inside the candidate;
-6. only after every gate passes, pushes the exact tested candidate SHA to
+7. re-fetches both remotes and refuses publication if either `origin/main` or
+   `upstream/main` moved during validation;
+8. only after every gate passes, pushes the exact tested candidate SHA to
    `origin/main` with a normal, non-force push;
-7. only after that push succeeds, fast-forwards local `main` to the same tested
+9. only after that push succeeds, fast-forwards local `main` to the same tested
    commit and installs the validated build through `install-openai.sh`;
-8. only after the installation succeeds, removes the temporary candidate
+10. only after the installation succeeds, removes the temporary candidate
    worktree and branch.
 
 If fetch fails before a candidate exists, the script exits non-zero and leaves
@@ -53,6 +63,68 @@ unchanged; the failed candidate worktree and branch are intentionally retained,
 and their locations are reported so the failure can be inspected without
 recreating it. There is no force push, destructive reset, xAI release download,
 shell startup edit, or push to upstream.
+
+## If upstream rewrote, rebased, or rolled back history
+
+The tracked `.grok-openai-upstream` marker lets the updater handle a fetched
+`upstream/main` that no longer descends from the last integrated snapshot while
+preserving append-only fork history. This test is deliberately stricter than
+checking for any common ancestor: a rebase or rewind may share old history but
+still omit the marker. The updater refuses this path unless the marker is a
+full lowercase SHA for a valid commit already contained in fork `HEAD`.
+
+On refusal, the updater prints the exact marker/fetched pair it observed. After
+inspecting those two commits and deciding that the new upstream tree is the
+intended source snapshot, rerun with that exact pair, for example:
+
+```sh
+./scripts/update-from-upstream.sh \
+  --accept-upstream-rewrite=<previous-full-sha>..<fetched-full-sha>
+```
+
+The no-argument command remains the normal path. It will never silently accept
+a rewrite or rollback. A stale/mismatched pair is rejected, as is supplying the
+option for normal descendant history. The pin therefore accepts only the exact
+snapshot that was inspected; it does not weaken any validation, race, push, or
+installation gate.
+
+Only inside the temporary candidate, the updater synthesizes a bridge commit:
+
+- its tree is exactly the fetched rewritten upstream tree;
+- its first parent is the marker's previously integrated upstream commit;
+- its second parent is the fetched rewritten upstream commit.
+
+Merging that bridge into the fork applies the tree delta from the last trusted
+upstream snapshot to the rewritten snapshot, while making the new upstream
+commit an ancestor of the result. The merge commit then advances the marker to
+the fetched SHA. This adds commits; it does not force-push, reset, rebase,
+stash, replace refs, or discard fork history.
+
+The synthetic bridge is not created until the isolated candidate exists. Its
+tree and both parent object IDs are verified immediately after creation. If
+the delta conflicts with fork changes, the candidate and conflict are retained
+for inspection while local `main`, `origin/main`, the marker on `main`, and the
+installed binary remain unchanged. A malformed, missing, untracked, unknown,
+or nonancestor marker stops before any candidate is created.
+
+## Candidate-code trust boundary
+
+The updater clears the ambient environment before every candidate-derived
+script or executable, including candidate validation, release `--version`, the
+staged installer, and the final validated installer. Prepublication processes
+receive a disposable `HOME`, so API keys, bearer tokens, cloud variables, and
+implicit user Git/auth configuration are not inherited. It explicitly supplies
+only basic process paths plus the existing Cargo and rustup roots needed for the
+public Rust toolchain and dependency cache. The final installer receives the
+real installation paths but still does not inherit ambient credentials.
+
+This is environment isolation, not an operating-system sandbox. Candidate
+source, build scripts, proc macros, and test binaries still run as the local
+user and can access files that user can read, including explicitly supplied
+Cargo/rustup directories. Treat upstream source as executable code: inspect an
+unexpected rewrite before accepting it, and run the updater in a stronger
+external sandbox if the source itself is not trusted. Never weaken the updater
+by exporting account credentials into the candidate gate.
 
 If installation fails after the tested candidate has been published, local
 `main` and `origin/main` already point to that candidate. The updater retains
@@ -77,13 +149,19 @@ updater refusing to proceed is the safe behavior.
 
 The updater reports the conflict, keeps `main` untouched, and retains the
 candidate worktree and branch at the paths shown in its output. Inspect and
-resolve the retained candidate directly, or reproduce the conflict in a normal
-review branch rather than weakening the updater:
+resolve the retained candidate directly. For a normal related-history update,
+you can instead reproduce the conflict in a review branch without weakening
+the updater:
 
 ```sh
 git switch -c review/upstream-update origin/main
 git merge upstream/main
 ```
+
+Do not use `--allow-unrelated-histories` when upstream was fully rewritten; it
+uses no trusted base and therefore does not model the intended delta. Start
+from the retained candidate/bridge or rerun the updater after deliberately
+resolving the retained conflict.
 
 Review every conflict, preserve `FORK-NOTICE.md`, `config/openai.toml`,
 provider-isolation behavior, secret redaction, and the OpenAI install/update
