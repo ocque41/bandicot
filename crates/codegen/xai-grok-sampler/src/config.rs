@@ -1,3 +1,4 @@
+// Modified in 2026 by the ocque41 OpenAI-support fork; see FORK-NOTICE.md.
 //! Sampler configuration types.
 //!
 //! [`SamplerConfig`] is the per-request configuration handed to the
@@ -56,9 +57,9 @@ pub struct SamplerConfig {
     pub api_backend: ApiBackend,
     #[serde(default)]
     pub auth_scheme: AuthScheme,
-    /// Extra request headers applied verbatim. The sampler never inspects
-    /// the URL to derive headers; callers (the session) inject proxy auth
-    /// and other access headers here before constructing the config.
+    /// Extra request headers supplied by the caller. The sampler does not
+    /// derive them, but strips xAI-only headers before sending to a non-xAI
+    /// base URL. Callers inject proxy auth and other access headers here.
     pub extra_headers: IndexMap<String, String>,
     /// Total context window size in tokens. The sampler does not enforce
     /// it; it is informational metadata used by the session for compaction
@@ -79,9 +80,10 @@ pub struct SamplerConfig {
     pub user_id: Option<String>,
     pub client_version: Option<String>,
 
-    /// Optional hook invoked at every UNAUTHORIZED (401) response
-    /// site. The sampler passes the bearer that was actually sent on
-    /// the wire to the callback; the implementation is free to do
+    /// Optional hook invoked at UNAUTHORIZED (401) response sites for verified
+    /// first-party xAI URLs. The sampler passes a truncated prefix of the
+    /// bearer that was actually sent; non-xAI credentials are never passed.
+    /// The implementation is free to do
     /// whatever it wants with it (typically: join it with a live
     /// credential source and emit an attribution event for diagnosis
     /// of stale-token vs. server-rejected-live-token 401s). `None`
@@ -113,11 +115,9 @@ pub struct SamplerConfig {
     pub compaction_at_tokens: Option<CompactionAtTokens>,
 
     /// Server-side doom-loop check policy; `None` disables it. When set, the
-    /// client itself sends the opt-in `x-grok-doom-loop-check` header on
-    /// streaming Responses API requests and absorbs the reported trigger
-    /// events (unlike the environment headers in [`Self::extra_headers`],
-    /// this header gates the client's own decode behavior, so it lives with
-    /// the decoder).
+    /// client sends the opt-in `x-grok-doom-loop-check` header on streaming
+    /// Responses API requests to verified first-party xAI URLs and absorbs
+    /// reported trigger events. Non-xAI/custom URLs ignore this setting.
     #[serde(default)]
     pub doom_loop_recovery: Option<DoomLoopRecoveryPolicy>,
 

@@ -1,3 +1,4 @@
+<!-- Modified in 2026 by the ocque41 OpenAI-support fork; see FORK-NOTICE.md. -->
 # Custom Models
 
 Grok connects to custom model endpoints for alternative providers, self-hosted models, and overriding built-in settings. This guide explains how to select models, configure endpoints, and integrate third-party providers.
@@ -95,8 +96,10 @@ Grok resolves the API key in this order:
 
 1. The `api_key` field in the model config
 2. The environment variable(s) named by `env_key` — a single string or an array of names. The first set, non-empty value wins (for example `env_key = ["ANTHROPIC_AUTH_TOKEN", "LC_ANTHROPIC_AUTH_TOKEN"]` for SSH `LC_*` forwarding)
-3. Your signed-in session token (from `grok login`), for a model with no `api_key`/`env_key` of its own
-4. The `XAI_API_KEY` environment variable (global fallback; Grok also accepts `GROK_CODE_XAI_API_KEY` for backward compatibility)
+3. Your signed-in session token (from `grok login`), but only for a verified HTTPS xAI endpoint whose model declares neither `api_key` nor `env_key`
+4. The `XAI_API_KEY` environment variable (global fallback; Grok also accepts `GROK_CODE_XAI_API_KEY` for backward compatibility), under the same first-party-endpoint and undeclared-provider-credential conditions
+
+Declaring `api_key` or `env_key` opts that model into fail-closed provider isolation. If the configured value is missing or empty, Grok reports missing credentials instead of borrowing an xAI session or `XAI_API_KEY` for a different provider. Prefer `env_key`; never commit a real provider key in `config.toml`.
 
 ### Context Window
 
@@ -176,30 +179,43 @@ extra_headers = { "x-api-key" = "sk-ant-...", "anthropic-version" = "2023-06-01"
 
 The `messages` backend uses the Anthropic Messages protocol. Anthropic authenticates with an `x-api-key` header rather than `Authorization: Bearer`, so pass your key through `extra_headers`, which Grok sends verbatim.
 
-### OpenAI (Chat Completions)
+### OpenAI Platform (Responses API)
 
 ```toml
-[model.gpt-4o]
-model = "gpt-4o"
+[model.openai-latest]
+model = "gpt-5.6"
 base_url = "https://api.openai.com/v1"
-name = "GPT-4o"
+name = "OpenAI GPT-5.6 (latest alias)"
 env_key = "OPENAI_API_KEY"
-```
-
-`api_backend` defaults to `"chat_completions"`, so you don't need to set it explicitly for OpenAI.
-
-### OpenAI (Responses API)
-
-If your provider supports the newer Responses API:
-
-```toml
-[model.gpt-4o-responses]
-model = "gpt-4o"
-base_url = "https://api.openai.com/v1"
-name = "GPT-4o (Responses)"
 api_backend = "responses"
-env_key = "OPENAI_API_KEY"
+context_window = 1050000
+max_completion_tokens = 128000
+agent_type = "codex"
+reasoning_efforts = ["none", "low", "medium", "high", "xhigh", "max"]
+supports_backend_search = false
 ```
+
+Use an OpenAI **Platform API key** supplied through `OPENAI_API_KEY`; a ChatGPT subscription or Codex sign-in does not provide this API credential. Do not put the key in the TOML file. The explicit `env_key` fails closed if the variable is missing, so Grok cannot substitute an xAI credential.
+
+This fork's complete secret-free profile is at [`config/openai.toml`](../../../../../config/openai.toml), with setup instructions in [`docs/OPENAI.md`](../../../../../docs/OPENAI.md). It includes `gpt-5.6`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, and `gpt-5.3-codex`. The curated OpenAI route is Responses-only; do not rely on the default Chat Completions backend.
+
+For a pinned high-capability profile:
+
+```toml
+[model.openai-sol]
+model = "gpt-5.6-sol"
+base_url = "https://api.openai.com/v1"
+name = "OpenAI GPT-5.6 Sol"
+env_key = "OPENAI_API_KEY"
+api_backend = "responses"
+context_window = 1050000
+max_completion_tokens = 128000
+agent_type = "codex"
+reasoning_efforts = ["none", "low", "medium", "high", "xhigh", "max"]
+supports_backend_search = false
+```
+
+Temperature and `top_p` are intentionally omitted for these reasoning models. `supports_backend_search` remains `false` until the OpenAI hosted-search request and tool lifecycle have a dedicated provider-isolation acceptance test.
 
 ### Ollama (Local Models)
 

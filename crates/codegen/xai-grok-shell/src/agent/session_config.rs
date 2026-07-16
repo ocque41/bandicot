@@ -1,3 +1,4 @@
+// Modified in 2026 by the ocque41 OpenAI-support fork; see FORK-NOTICE.md.
 use agent_client_protocol as acp;
 use serde::Serialize;
 use xai_grok_sampling_types::{ReasoningEffort, ReasoningEffortOption};
@@ -59,6 +60,7 @@ fn effort_label(effort: ReasoningEffort) -> String {
         ReasoningEffort::Medium => "Medium",
         ReasoningEffort::High => "High",
         ReasoningEffort::Xhigh => "X-High",
+        ReasoningEffort::Max => "Max",
     }
     .to_string()
 }

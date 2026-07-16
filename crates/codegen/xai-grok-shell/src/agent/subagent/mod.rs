@@ -1,3 +1,4 @@
+// Modified in 2026 by the ocque41 OpenAI-support fork; see FORK-NOTICE.md.
 //! Subagent coordinator — spawns and tracks hidden child sessions.
 //!
 //! All subagent-specific types, tracking state, and orchestration logic live here.
@@ -854,15 +855,9 @@ async fn resolve_effective_model_config(
     }
     resolve_subagent_sampling_config(subagent_type, definition_model, ctx).await
 }
-/// Truncate an API key to a safe prefix for logging.
-fn key_prefix(key: &Option<String>) -> String {
-    match key {
-        Some(k) => {
-            let len = k.len().min(8);
-            k[..len].to_string()
-        }
-        None => "<none>".to_string(),
-    }
+/// Report credential presence without exposing any credential material.
+fn has_credential(key: &Option<String>) -> bool {
+    key.as_deref().is_some_and(|value| !value.is_empty())
 }
 /// Emit a unified log entry recording which model and credentials a subagent
 /// resolved to, and how they compare to the parent's.
@@ -873,8 +868,8 @@ fn log_subagent_model_resolution(
     resolved_id: &acp::ModelId,
     parent: &xai_grok_sampler::SamplerConfig,
 ) {
-    let child_key = key_prefix(&resolved.api_key);
-    let parent_key = key_prefix(&parent.api_key);
+    let child_has_credential = has_credential(&resolved.api_key);
+    let parent_has_credential = has_credential(&parent.api_key);
     let keys_match = resolved.api_key == parent.api_key;
     xai_grok_telemetry::unified_log::debug(
         "subagent model resolved",
@@ -882,8 +877,8 @@ fn log_subagent_model_resolution(
         Some(serde_json::json!(
             { "agent" : agent_name, "priority" : priority, "child_model" :
             resolved_id.0.as_ref(), "child_base_url" : & resolved.base_url,
-            "child_key_prefix" : child_key, "parent_model" : & parent.model,
-            "parent_base_url" : & parent.base_url, "parent_key_prefix" : parent_key,
+            "child_has_credential" : child_has_credential, "parent_model" : & parent.model,
+            "parent_base_url" : & parent.base_url, "parent_has_credential" : parent_has_credential,
             "keys_match" : keys_match, }
         )),
     );
@@ -951,7 +946,7 @@ async fn read_parent_sampling_config(
                 None,
                 Some(serde_json::json!(
                     { "parent_model" : & inherited.model, "parent_base_url" : &
-                    inherited.base_url, "parent_key_prefix" : key_prefix(& inherited
+                    inherited.base_url, "parent_has_credential" : has_credential(& inherited
                     .api_key), "session_model_id" : model_id.0.as_ref(),
                     "global_model_id" : global_model_id.0.as_ref(), "source" :
                     "chat_state", }
@@ -969,7 +964,7 @@ async fn read_parent_sampling_config(
         None,
         Some(serde_json::json!(
             { "parent_model" : & ctx.sampling_config.model, "parent_base_url" : & ctx
-            .sampling_config.base_url, "parent_key_prefix" : key_prefix(& ctx
+            .sampling_config.base_url, "parent_has_credential" : has_credential(& ctx
             .sampling_config.api_key), "source" : "spawn_context_baseline",
             "has_chat_state" : ctx.parent_chat_state.is_some(), }
         )),
@@ -987,15 +982,19 @@ async fn read_parent_sampling_config(
     (fallback, ctx.model_id.clone())
 }
 /// `AuthType` for a subagent: BYOK ⇒ `ApiKey` (don't overwrite the BYOK
-/// key); session-based ACP method ⇒ `SessionToken` (keep refresh wired);
-/// otherwise `ApiKey`.
+/// key); a verified first-party xAI model with a session-based ACP method ⇒
+/// `SessionToken` (keep refresh wired); otherwise `ApiKey`. Third-party models
+/// must never become session-token routes because refresh would attach an xAI
+/// bearer to their endpoint.
 fn subagent_auth_type(
     model: Option<&crate::agent::config::ModelEntry>,
     auth_method_id: &acp::AuthMethodId,
 ) -> xai_chat_state::AuthType {
     if model.is_some_and(|m| m.has_own_credentials()) {
         xai_chat_state::AuthType::ApiKey
-    } else if crate::agent::auth_method::is_session_based_method(auth_method_id) {
+    } else if model.is_none_or(|m| crate::util::is_first_party_xai_url(&m.info().base_url))
+        && crate::agent::auth_method::is_session_based_method(auth_method_id)
+    {
         xai_chat_state::AuthType::SessionToken
     } else {
         xai_chat_state::AuthType::ApiKey
@@ -1033,7 +1032,7 @@ fn resolve_model_override_to_config(
         Some(serde_json::json!(
             { "model_id" : model_id, "canonical_model" : canonical_model_id.0
             .as_ref(), "resolved_model_raw" : & config.model, "base_url" : & config
-            .base_url, "key_prefix" : key_prefix(& config.api_key),
+            .base_url, "has_credential" : has_credential(& config.api_key),
             "has_own_credentials" : entry.has_own_credentials(), "has_session_key" :
             has_session_key, "auth_type" : format!("{:?}", resolved_auth_type),
             "auth_method_id" : ctx.auth_method_id.0.as_ref(), }

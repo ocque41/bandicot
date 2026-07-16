@@ -1,3 +1,4 @@
+// Modified in 2026 by the ocque41 OpenAI-support fork; see FORK-NOTICE.md.
 use super::*;
 /// Build an unsigned JWT with a `tier` claim (header.payload.sig base64url).
 fn jwt_with_tier(tier: u64) -> String {
@@ -2332,6 +2333,111 @@ async fn auth_type_session_based_with_current_returns_session_token() {
     assert!(agent.auth_manager.current().is_some());
     assert_eq!(agent.auth_type(), xai_chat_state::AuthType::SessionToken,);
 }
+/// Security regression: selecting OIDC must not make a custom provider
+/// eligible for the current xAI session bearer. This exercises both the live
+/// session-selection seam and the later auth-type override guards.
+#[tokio::test(flavor = "current_thread")]
+async fn prepare_sampling_config_custom_provider_rejects_xai_session() {
+    use crate::agent::config::{EndpointsConfig, ModelEntry};
+    use crate::auth::{GrokAuth, PreferredAuthMethod};
+    let agent = build_minimal_agent_for_tests();
+    agent.set_auth_method(acp::AuthMethodId::new(
+        crate::agent::auth_method::OIDC_METHOD_ID,
+    ));
+    agent.cfg.borrow_mut().grok_com_config.preferred_method = Some(PreferredAuthMethod::Oidc);
+    let auth = GrokAuth::test_default();
+    let xai_bearer = auth.key.clone();
+    agent.auth_manager.hot_swap(auth);
+    let mut model = ModelEntry::fallback("custom-provider", &EndpointsConfig::default());
+    model.info.base_url = "https://api.openai.com/v1".to_owned();
+
+    assert!(!MvpAgent::model_accepts_xai_session(&model));
+    let sampling = agent.prepare_sampling_config_for_model(&model, None);
+    assert_eq!(sampling.base_url, "https://api.openai.com/v1");
+    assert!(
+        sampling.api_key.is_none(),
+        "custom provider must not inherit the live xAI bearer",
+    );
+    assert_ne!(sampling.api_key.as_deref(), Some(xai_bearer.as_str()));
+}
+
+/// Positive baseline: a genuine xAI API route remains eligible for a live
+/// OIDC session, so the provider guard does not disable supported xAI use.
+#[tokio::test(flavor = "current_thread")]
+async fn prepare_sampling_config_first_party_xai_accepts_session() {
+    use crate::agent::config::{EndpointsConfig, ModelEntry};
+    use crate::auth::{GrokAuth, PreferredAuthMethod};
+    let agent = build_minimal_agent_for_tests();
+    agent.set_auth_method(acp::AuthMethodId::new(
+        crate::agent::auth_method::OIDC_METHOD_ID,
+    ));
+    agent.cfg.borrow_mut().grok_com_config.preferred_method = Some(PreferredAuthMethod::Oidc);
+    let auth = GrokAuth::test_default();
+    let xai_bearer = auth.key.clone();
+    agent.auth_manager.hot_swap(auth);
+    let mut model = ModelEntry::fallback("first-party-xai", &EndpointsConfig::default());
+    model.info.base_url = "https://api.x.ai/v1".to_owned();
+
+    assert!(MvpAgent::model_accepts_xai_session(&model));
+    let sampling = agent.prepare_sampling_config_for_model(&model, None);
+    assert_eq!(sampling.api_key.as_deref(), Some(xai_bearer.as_str()));
+}
+/// A declared but missing provider env var is an explicit fail-closed choice;
+/// preferred OIDC must not override it even when the destination is xAI.
+#[tokio::test(flavor = "current_thread")]
+#[serial_test::serial]
+async fn prepare_sampling_config_missing_declared_key_rejects_session_fallback() {
+    use crate::agent::config::{EndpointsConfig, EnvKeys, ModelEntry};
+    use crate::auth::{GrokAuth, PreferredAuthMethod};
+    use xai_grok_test_support::EnvGuard;
+    let provider_env = "GROK_TEST_MISSING_DECLARED_MODEL_KEY";
+    let _provider = EnvGuard::unset(provider_env);
+    let agent = build_minimal_agent_for_tests();
+    agent.set_auth_method(acp::AuthMethodId::new(
+        crate::agent::auth_method::OIDC_METHOD_ID,
+    ));
+    agent.cfg.borrow_mut().grok_com_config.preferred_method = Some(PreferredAuthMethod::Oidc);
+    agent.auth_manager.hot_swap(GrokAuth::test_default());
+    let mut model = ModelEntry::fallback("missing-provider-key", &EndpointsConfig::default());
+    model.info.base_url = "https://api.x.ai/v1".to_owned();
+    model.env_key = Some(EnvKeys::single(provider_env));
+    agent
+        .models_manager
+        .insert_test_entry("missing-provider-key", model.clone());
+
+    assert!(!MvpAgent::model_accepts_xai_session(&model));
+    let sampling = agent.prepare_sampling_config_for_model(&model, None);
+    assert!(
+        sampling.api_key.is_none(),
+        "missing declared provider credential must not borrow the xAI session",
+    );
+    *agent.sampling_config.borrow_mut() = sampling;
+    agent.seed_client_config_auth_if_available();
+    assert!(
+        agent.sampling_config.borrow().api_key.is_none(),
+        "post-auth seeding must preserve the missing-key failure",
+    );
+}
+/// The post-auth global-config seeding path is a separate credential seam from
+/// per-model preparation and must enforce the same provider boundary.
+#[tokio::test(flavor = "current_thread")]
+async fn seed_client_config_does_not_attach_xai_session_to_custom_provider() {
+    use crate::auth::GrokAuth;
+    let agent = build_minimal_agent_for_tests();
+    let auth = GrokAuth::test_default();
+    let xai_bearer = auth.key.clone();
+    agent.auth_manager.hot_swap(auth);
+    {
+        let mut sampling = agent.sampling_config.borrow_mut();
+        sampling.base_url = "https://api.openai.com/v1".to_owned();
+        sampling.api_key = None;
+    }
+
+    agent.seed_client_config_auth_if_available();
+    let sampling = agent.sampling_config.borrow();
+    assert!(sampling.api_key.is_none());
+    assert_ne!(sampling.api_key.as_deref(), Some(xai_bearer.as_str()));
+}
 /// Defensive case: no `auth_method_id` selected yet (pre-`authenticate`
 /// state) and no live credential. We default to `ApiKey` so callers
 /// that key off this value (e.g. `resolve_chat_state_auth_type` for chat
@@ -2464,7 +2570,11 @@ async fn prepare_video_gen_config_disabled_when_zdr_flag_set() {
         }
     }
     let agent = build_minimal_agent_for_tests();
-    agent.sampling_config.borrow_mut().api_key = Some("test-key".to_string());
+    {
+        let mut sampling = agent.sampling_config.borrow_mut();
+        sampling.base_url = "https://api.x.ai/v1".to_owned();
+        sampling.api_key = Some("test-key".to_owned());
+    }
     assert!(matches!(
         agent.prepare_video_gen_config(),
         VideoGenConfig::Enabled { .. }
@@ -2505,7 +2615,11 @@ async fn prepare_video_gen_config_disabled_when_zdr_flag_set() {
 async fn prepare_image_gen_config_fails_open_without_auth() {
     use xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig;
     let agent = build_minimal_agent_for_tests();
-    agent.sampling_config.borrow_mut().api_key = Some("test-key".to_string());
+    {
+        let mut sampling = agent.sampling_config.borrow_mut();
+        sampling.base_url = "https://api.x.ai/v1".to_owned();
+        sampling.api_key = Some("test-key".to_owned());
+    }
     let ImageGenConfig::Enabled {
         tier_restricted, ..
     } = agent.prepare_image_gen_config()
@@ -2516,6 +2630,50 @@ async fn prepare_image_gen_config_fails_open_without_auth() {
         !tier_restricted,
         "no resolved auth ⇒ fail open (tools not tier-restricted)"
     );
+}
+/// Security regression: media clients always target xAI's dedicated API, so an
+/// active OpenAI/custom-provider credential must be rejected before either
+/// client can be constructed. Image edit shares `ImageGenConfig`, so the image
+/// assertion covers both generation and edit.
+#[tokio::test(flavor = "current_thread")]
+async fn xai_media_configs_reject_non_xai_active_provider() {
+    use xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig;
+    use xai_grok_tools::implementations::grok_build::video_gen::VideoGenConfig;
+    let agent = build_minimal_agent_for_tests();
+    {
+        let mut sampling = agent.sampling_config.borrow_mut();
+        sampling.base_url = "https://api.openai.com/v1".to_owned();
+        sampling.api_key = Some("custom-provider-test-key".to_owned());
+    }
+    assert!(matches!(
+        agent.prepare_image_gen_config(),
+        ImageGenConfig::Disabled
+    ));
+    assert!(matches!(
+        agent.prepare_video_gen_config(),
+        VideoGenConfig::Disabled
+    ));
+}
+
+/// A lookalike hostname must not bypass the provider boundary.
+#[tokio::test(flavor = "current_thread")]
+async fn xai_media_configs_reject_xai_suffix_attack() {
+    use xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig;
+    use xai_grok_tools::implementations::grok_build::video_gen::VideoGenConfig;
+    let agent = build_minimal_agent_for_tests();
+    {
+        let mut sampling = agent.sampling_config.borrow_mut();
+        sampling.base_url = "https://api.x.ai.attacker.example/v1".to_owned();
+        sampling.api_key = Some("attacker-controlled-provider-key".to_owned());
+    }
+    assert!(matches!(
+        agent.prepare_image_gen_config(),
+        ImageGenConfig::Disabled
+    ));
+    assert!(matches!(
+        agent.prepare_video_gen_config(),
+        VideoGenConfig::Disabled
+    ));
 }
 #[tokio::test]
 async fn data_collection_enabled_for_normal_user() {

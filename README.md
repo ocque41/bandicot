@@ -1,52 +1,76 @@
+<!-- Modified in 2026 by the ocque41 OpenAI-support fork; see FORK-NOTICE.md. -->
 <div align="center">
 
-<h1>
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://media.x.ai/v1/website/spacexai-symbol-white-transparent-0c31957f.png">
-    <source media="(prefers-color-scheme: light)" srcset="https://media.x.ai/v1/website/spacexai-symbol-black-transparent-6435cf42.png">
-    <img alt="SpaceXAI logo" src="https://media.x.ai/v1/website/spacexai-symbol-black-transparent-6435cf42.png" width="96">
-  </picture>
-  <br>
-  Grok Build (<code>grok</code>)
-</h1>
+<h1>Grok Build for OpenAI</h1>
 
-**Grok Build** is SpaceXAI's terminal-based AI coding agent. It runs as a
-full-screen TUI that understands your codebase, edits files, executes shell
-commands, searches the web, and manages long-running tasks — interactively,
-headlessly for scripting/CI, or embedded in editors via the Agent Client
-Protocol (ACP).
+**An unofficial, source-built fork of SpaceXAI's Grok Build coding agent, with
+a secret-free OpenAI Platform profile and an isolated `grok-openai` launcher.**
 
-[Installing the released binary](#installing-the-released-binary) ·
+[OpenAI quick start](#openai-quick-start) ·
+[Assumptions](#assumptions) ·
 [Building from source](#building-from-source) ·
 [Documentation](#documentation) ·
-[Repository layout](#repository-layout) ·
-[Development](#development) ·
-[Contributing](#contributing) ·
+[Updating the fork](#updating-the-fork) ·
+[Stop line](#stop-line) ·
 [License](#license)
-
-![Grok Build TUI](https://media.x.ai/v1/website/universe-tui-screenshot-6f7a0837.png)
-
-**Learn more about Grok Build at [x.ai/cli](https://x.ai/cli)**
-
-This repository contains the Rust source for the `grok` CLI/TUI and its agent
-runtime. It is synced periodically from the SpaceXAI monorepo.
 
 </div>
 
----
+> [!IMPORTANT]
+> This is a user-maintained fork. It is not affiliated with, endorsed by, or
+> supported by SpaceXAI/xAI or OpenAI. `Grok Build`, `Grok`, `xAI`, and
+> `OpenAI` remain their respective owners' names and marks. See
+> [FORK-NOTICE.md](FORK-NOTICE.md) for the change and attribution notice.
 
-## Installing the released binary
+The upstream project is SpaceXAI's terminal-based AI coding agent. This fork
+retains the Rust CLI/TUI and agent runtime while adding a first-class OpenAI
+Responses API distribution. The upstream source lives at
+[`xai-org/grok-build`](https://github.com/xai-org/grok-build).
 
-Prebuilt binaries are published for macOS, Linux, and Windows:
+## OpenAI quick start
+
+Do **not** use the xAI release installer for this fork: it installs xAI's
+prebuilt binary and does not contain these OpenAI changes. Build and install
+the fork itself:
 
 ```sh
-curl -fsSL https://x.ai/cli/install.sh | bash   # macOS / Linux / Git Bash
-irm https://x.ai/cli/install.ps1 | iex          # Windows PowerShell
-grok --version
+./scripts/setup-openai-key.sh
+./scripts/install-openai.sh
+~/.local/bin/grok-openai
 ```
 
-See the [changelog](https://x.ai/build/changelog) for the latest fixes,
-features, and improvements in each release.
+The key setup delegates the secret prompt and storage to macOS Keychain. The
+installer creates an isolated launcher at `~/.local/bin/grok-openai`, installs
+the compiled binary under `~/.local/libexec/grok-openai/`, and uses
+`~/.grok-openai` as `GROK_HOME`. It does not edit `PATH`, shell startup files,
+terminal settings, or an existing `~/.grok` installation. If `~/.local/bin`
+is not already on `PATH`, keep using the full path shown above.
+
+On other platforms, or for a temporary session, supply an OpenAI Platform key
+through the environment and run the installer/launcher normally:
+
+```sh
+OPENAI_API_KEY="${OPENAI_API_KEY:?set it through your secret manager}" \
+  ~/.local/bin/grok-openai
+```
+
+The tracked [OpenAI profile](config/openai.toml) contains no secret. Detailed
+setup, model choices, security boundaries, and troubleshooting are in
+[docs/OPENAI.md](docs/OPENAI.md).
+
+## Assumptions
+
+- "OpenAI account" means an OpenAI Platform project with API access, billing,
+  and an API key. A ChatGPT subscription or Codex sign-in does not by itself
+  grant Platform API access, and this fork never copies Codex OAuth tokens.
+- "Latest models" means the floating `gpt-5.6` alias by default, plus curated
+  `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, and `gpt-5.3-codex`
+  selections. Availability still depends on the user's OpenAI project.
+- macOS is the primary one-command installation target because the key helper
+  uses Keychain. Source builds and environment-key launches remain available
+  on Linux; Windows is still upstream best-effort.
+- The fork is intentionally installed alongside any official `grok` binary.
+  It does not replace, authenticate, or reconfigure the official installation.
 
 ## Building from source
 
@@ -66,11 +90,18 @@ cargo build -p xai-grok-pager-bin --release  # release binary: target/release/xa
 cargo check -p xai-grok-pager-bin            # fast validation
 ```
 
-The binary artifact is named `xai-grok-pager`; official installs ship it as
-`grok`. On first launch it opens your browser to authenticate — see the
-[authentication guide](crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md).
+The binary artifact is named `xai-grok-pager`; this fork's installer exposes it
+as `grok-openai`. The fork does not use the upstream browser login for OpenAI:
+it requires `OPENAI_API_KEY`, supplied by the environment or its isolated
+Keychain-backed launcher.
 
 ## Documentation
+
+Fork-specific documents:
+
+- [OpenAI setup and operation](docs/OPENAI.md)
+- [One-command upstream updates](docs/UPDATING.md)
+- [Fork change and attribution notice](FORK-NOTICE.md)
 
 Full online documentation is available at
 [docs.x.ai/build/overview](https://docs.x.ai/build/overview).
@@ -106,6 +137,31 @@ cargo test -p xai-grok-config # per-crate tests
 cargo clippy -p <crate>       # lint config: clippy.toml at the repo root
 cargo fmt --all               # rustfmt.toml at the repo root
 ```
+
+## Updating the fork
+
+From a clean `main` branch, the complete update is one command:
+
+```sh
+./scripts/update-from-upstream.sh
+```
+
+The updater fetches `origin` and `upstream`, integrates upstream in an isolated
+candidate worktree, runs the fork's checks and release build, and only then
+pushes the tested candidate to `origin/main` and fast-forwards local `main` to
+that same commit. It never force-pushes or pushes to upstream. See
+[docs/UPDATING.md](docs/UPDATING.md) for prerequisites and failure recovery.
+
+## Stop line
+
+This fork's implementation is considered complete when all of the following
+are true: the OpenAI profile parses, provider-isolation and Responses API tests
+pass, a release `grok-openai` binary builds, a keyless/mock end-to-end prompt
+passes without contacting xAI, install/update scripts pass their fail-closed
+tests, and the exact tested commit is published to the fork. A live paid API
+request is a separate account-acceptance check because it requires the user's
+private key and project quota; it must never be silently substituted with a
+ChatGPT/Codex session token.
 
 ## Contributing
 

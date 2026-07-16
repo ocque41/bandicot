@@ -1,3 +1,4 @@
+// Modified in 2026 by the ocque41 OpenAI-support fork; see FORK-NOTICE.md.
 //! API-agnostic conversation representation.
 //!
 //! This module provides types that can be converted to either:
@@ -344,6 +345,20 @@ pub enum BackendToolKind {
     XSearch(rs::CustomToolCall),
     /// Server-side code interpreter execution.
     CodeInterpreter(rs::CodeInterpreterToolCall),
+}
+
+/// Return whether an OpenAI-compatible `CustomToolCall` name is one of the
+/// xAI backend's documented X-search result variants.
+///
+/// `CustomToolCall` is a provider-neutral Responses API item. Treating every
+/// instance as X search can persist an OpenAI custom-tool invocation as an
+/// xAI backend result and replay it after a provider switch. Keep this list
+/// exact and fail closed for unknown names.
+pub fn is_x_search_custom_tool_name(name: &str) -> bool {
+    matches!(
+        name,
+        "x_keyword_search" | "x_semantic_search" | "x_user_search" | "x_thread_fetch"
+    )
 }
 
 // ============================================================================
@@ -1412,7 +1427,9 @@ pub fn upgrade_legacy_reasoning(
                     }
                 }
                 rs::OutputItem::CustomToolCall(ct) => {
-                    if sibling_btc_ids_seen.insert(ct.id.clone()) {
+                    if is_x_search_custom_tool_name(&ct.name)
+                        && sibling_btc_ids_seen.insert(ct.id.clone())
+                    {
                         siblings.push(ConversationItem::BackendToolCall(BackendToolCallItem {
                             kind: BackendToolKind::XSearch(ct),
                         }));
@@ -1664,8 +1681,8 @@ fn sanitize_tool_arguments(id: &str, name: &str, arguments: Arc<str>) -> Arc<str
         tracing::warn!(
             tool_call_id = id,
             tool_name = name,
-            args_preview = truncate_bytes(&arguments, 200),
-            "Tool call has invalid JSON arguments; replacing with {{}} to prevent provider 400"
+            argument_bytes = arguments.len(),
+            "Tool call has invalid JSON arguments; redacted arguments replaced with {{}} to prevent provider 400"
         );
         Arc::<str>::from("{}")
     } else {
@@ -1912,6 +1929,35 @@ impl From<ChatResponseMessage> for ConversationItem {
 // Conversion: rs::Response (Responses API) -> ConversationItem
 // ============================================================================
 
+/// Process-local metadata bridge used when an older async-openai version
+/// cannot represent an effort token returned by the server. This key is added
+/// only while parsing inbound responses; it is never added to outbound request
+/// metadata.
+pub const CANONICAL_REASONING_EFFORT_METADATA_KEY: &str = "__grok_build_canonical_reasoning_effort";
+
+/// Recover the canonical effort echoed by a Responses API response.
+///
+/// async-openai 0.33 cannot deserialize the distinct `max` token. The sampler
+/// normalizes that typed field to `xhigh` and records the original token in
+/// process-local metadata, which takes precedence here. Other values continue
+/// to use the SDK's typed field directly.
+pub fn response_reasoning_effort(response: &rs::Response) -> Option<crate::ReasoningEffort> {
+    if response
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get(CANONICAL_REASONING_EFFORT_METADATA_KEY))
+        .is_some_and(|effort| effort == "max")
+    {
+        return Some(crate::ReasoningEffort::Max);
+    }
+
+    response
+        .reasoning
+        .as_ref()
+        .and_then(|reasoning| reasoning.effort.clone())
+        .map(crate::ReasoningEffort::from_responses_api)
+}
+
 /// Convert a Responses API `Response` into a flat ordered list of
 /// `ConversationItem`s, mirroring the shape of `response.output`.
 ///
@@ -1934,11 +1980,7 @@ pub fn response_to_conversation_items(response: rs::Response) -> Vec<Conversatio
         .filter(|s| !s.is_empty());
     // The server echoes the applied reasoning config; record the effort with
     // the same per-response provenance as `model`/`system_fingerprint`.
-    let reasoning_effort = response
-        .reasoning
-        .as_ref()
-        .and_then(|r| r.effort.clone())
-        .map(crate::ReasoningEffort::from_responses_api);
+    let reasoning_effort = response_reasoning_effort(&response);
 
     let mut items: Vec<ConversationItem> = Vec::with_capacity(response.output.len() + 1);
     let mut content = String::new();
@@ -1948,14 +1990,26 @@ pub fn response_to_conversation_items(response: rs::Response) -> Vec<Conversatio
     for item in response.output {
         match item {
             rs::OutputItem::Message(msg) => {
-                // Accumulate output text into the trailing Assistant item;
-                // there is at most one Message per response in practice.
+                // Accumulate all user-visible output (normal text and refusal
+                // explanations) into the trailing Assistant item; there is at
+                // most one Message per response in practice.
                 for content_part in msg.content {
-                    if let rs::OutputMessageContent::OutputText(text_content) = content_part {
+                    let visible_text = match content_part {
+                        rs::OutputMessageContent::OutputText(text_content) => text_content.text,
+                        // A Responses refusal is still user-visible assistant
+                        // content. Dropping it turns a deterministic safety
+                        // response into an apparently empty generation, which
+                        // can incorrectly enter the sampler's empty-response
+                        // retry path.
+                        rs::OutputMessageContent::Refusal(refusal_content) => {
+                            refusal_content.refusal
+                        }
+                    };
+                    if !visible_text.is_empty() {
                         if !content.is_empty() {
                             content.push('\n');
                         }
-                        content.push_str(&text_content.text);
+                        content.push_str(&visible_text);
                     }
                 }
             }
@@ -1987,10 +2041,17 @@ pub fn response_to_conversation_items(response: rs::Response) -> Vec<Conversatio
                 }));
             }
             rs::OutputItem::CustomToolCall(ct) => {
-                backend_tool_count += 1;
-                items.push(ConversationItem::BackendToolCall(BackendToolCallItem {
-                    kind: BackendToolKind::XSearch(ct),
-                }));
+                if is_x_search_custom_tool_name(&ct.name) {
+                    backend_tool_count += 1;
+                    items.push(ConversationItem::BackendToolCall(BackendToolCallItem {
+                        kind: BackendToolKind::XSearch(ct),
+                    }));
+                } else {
+                    tracing::warn!(
+                        custom_tool_name = %ct.name,
+                        "ignoring provider-neutral CustomToolCall; it is not an xAI X-search result"
+                    );
+                }
             }
             rs::OutputItem::CodeInterpreterCall(ci) => {
                 backend_tool_count += 1;
@@ -2149,7 +2210,10 @@ impl From<&ConversationRequest> for rs::CreateResponse {
             prompt_cache_retention: None,
             reasoning: Some(rs::Reasoning {
                 effort: req.reasoning_effort.map(|e| e.to_responses_api()),
-                summary: Some(rs::ReasoningSummary::Concise),
+                // `auto` is supported across the current OpenAI reasoning
+                // model family and lets the model choose the appropriate
+                // summary detail. xAI Responses accepts the same wire value.
+                summary: Some(rs::ReasoningSummary::Auto),
             }),
             safety_identifier: None,
             service_tier: None,
@@ -2164,6 +2228,18 @@ impl From<&ConversationRequest> for rs::CreateResponse {
             top_p: req.top_p,
             truncation: None,
         }
+    }
+}
+
+impl From<&ConversationRequest> for crate::types::CreateResponseWrapper {
+    fn from(req: &ConversationRequest) -> Self {
+        // Capture the canonical value before converting through async-openai:
+        // its 0.33 type cannot distinguish our `Max` from `Xhigh`.
+        let canonical_reasoning_effort = req.reasoning_effort;
+        let inner: rs::CreateResponse = req.into();
+        let mut wrapper = crate::types::CreateResponseWrapper::new(inner);
+        wrapper.reasoning_effort = canonical_reasoning_effort;
+        wrapper
     }
 }
 
@@ -2315,6 +2391,13 @@ fn conversation_item_to_input_items(item: &ConversationItem) -> Vec<rs::InputIte
                     rs::InputItem::Item(rs::Item::WebSearchCall(ws.clone()))
                 }
                 BackendToolKind::XSearch(ct) => {
+                    if !is_x_search_custom_tool_name(&ct.name) {
+                        tracing::warn!(
+                            custom_tool_name = %ct.name,
+                            "dropping non-X-search CustomToolCall from Responses history replay"
+                        );
+                        return Vec::new();
+                    }
                     rs::InputItem::Item(rs::Item::CustomToolCall(ct.clone()))
                 }
                 BackendToolKind::CodeInterpreter(ci) => {
@@ -5078,6 +5161,7 @@ mod tests {
             (crate::ReasoningEffort::Medium, "medium"),
             (crate::ReasoningEffort::High, "high"),
             (crate::ReasoningEffort::Xhigh, "max"),
+            (crate::ReasoningEffort::Max, "max"),
         ] {
             let req = messages_test_request(Some(variant));
             let msgs = build_messages_request(&req);
@@ -5126,6 +5210,7 @@ mod tests {
             (crate::ReasoningEffort::Medium, "medium"),
             (crate::ReasoningEffort::High, "high"),
             (crate::ReasoningEffort::Xhigh, "xhigh"),
+            (crate::ReasoningEffort::Max, "max"),
         ] {
             let req = ConversationRequest::from_items(vec![ConversationItem::user("hi")])
                 .with_model("test");
@@ -5190,6 +5275,37 @@ mod tests {
         assert!(
             json.pointer("/reasoning/effort").is_none(),
             "reasoning.effort must be absent when unset; got: {json:#}",
+        );
+    }
+
+    #[test]
+    fn responses_wrapper_preserves_canonical_max_before_sdk_conversion() {
+        let req = ConversationRequest {
+            reasoning_effort: Some(crate::ReasoningEffort::Max),
+            ..ConversationRequest::from_items(vec![ConversationItem::user("hi")]).with_model("test")
+        };
+        let wrapper: crate::types::CreateResponseWrapper = (&req).into();
+        assert_eq!(wrapper.reasoning_effort, Some(crate::ReasoningEffort::Max));
+
+        let json = serde_json::to_value(&wrapper.inner).unwrap();
+        assert_eq!(
+            json.pointer("/reasoning/effort")
+                .and_then(serde_json::Value::as_str),
+            Some("xhigh"),
+            "async-openai 0.33 is only a typed staging layer; the wrapper must retain Max for the final wire patch",
+        );
+    }
+
+    #[test]
+    fn test_responses_request_uses_auto_reasoning_summary() {
+        let req =
+            ConversationRequest::from_items(vec![ConversationItem::user("hi")]).with_model("test");
+        let resp: crate::rs::CreateResponse = (&req).into();
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(
+            json.pointer("/reasoning/summary").and_then(|v| v.as_str()),
+            Some("auto"),
+            "Responses requests must use the model-compatible auto summary; got: {json:#}",
         );
     }
 
@@ -8547,6 +8663,38 @@ mod tests {
             "synthetic assistant carries no tool calls"
         );
         assert_eq!(msg.reasoning_content.as_deref(), None);
+    }
+
+    fn test_custom_tool_call(name: &str) -> rs::CustomToolCall {
+        serde_json::from_value(serde_json::json!({
+            "call_id": "custom_call_1",
+            "input": "example input",
+            "name": name,
+            "id": "custom_item_1"
+        }))
+        .expect("valid custom tool call")
+    }
+
+    #[test]
+    fn x_search_history_replay_is_exact_name_allowlisted() {
+        let unknown = ConversationItem::BackendToolCall(BackendToolCallItem {
+            kind: BackendToolKind::XSearch(test_custom_tool_call("python")),
+        });
+        assert!(
+            conversation_item_to_input_items(&unknown).is_empty(),
+            "provider-neutral custom tools must not replay as xAI X-search history"
+        );
+
+        let known = ConversationItem::BackendToolCall(BackendToolCallItem {
+            kind: BackendToolKind::XSearch(test_custom_tool_call("x_keyword_search")),
+        });
+        let replay = conversation_item_to_input_items(&known);
+        assert_eq!(replay.len(), 1);
+        assert!(matches!(
+            &replay[0],
+            rs::InputItem::Item(rs::Item::CustomToolCall(call))
+                if call.name == "x_keyword_search"
+        ));
     }
 
     #[test]
