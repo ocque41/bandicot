@@ -45,9 +45,10 @@ Codex OAuth login. To use direct Platform billing instead, first run
 storage to macOS Keychain. The
 installer creates an isolated launcher at `~/.local/bin/grok-openai`, installs
 the compiled binary under `~/.local/libexec/grok-openai/`, and uses
-`~/.grok-openai` as `GROK_HOME`. It does not edit `PATH`, shell startup files,
-terminal settings, or an existing `~/.grok` installation. If `~/.local/bin`
-is not already on `PATH`, keep using the full path shown above.
+`~/.grok-openai` for Platform mode and `~/.grok-codex-plan` for plan mode. It
+does not edit `PATH`, shell startup files, terminal settings, or an existing
+`~/.grok` installation. If `~/.local/bin` is not already on `PATH`, keep using
+the full path shown above.
 
 On other platforms, or for a temporary session, supply an OpenAI Platform key
 through the environment and run the installer/launcher normally:
@@ -67,9 +68,9 @@ setup, model choices, security boundaries, and troubleshooting are in
   CLIProxyAPI compatibility layer on `127.0.0.1`. CLIProxyAPI owns Codex OAuth;
   the launcher reads only its protected local client token and never copies the
   OAuth credential or treats it as a Platform API key.
-- "Latest models" means the floating `gpt-5.6` alias by default, plus curated
-  `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, and `gpt-5.3-codex`
-  selections. Availability still depends on the user's OpenAI project.
+- In Codex-plan mode, `gpt-5.6-sol` is the default and the picker follows the
+  models exposed by the local proxy. In direct Platform mode, `gpt-5.6` remains
+  the floating default. Actual availability follows the authenticated account.
 - macOS is the primary one-command installation target because the key helper
   uses Keychain. Source builds and environment-key launches remain available
   on Linux; Windows is still upstream best-effort.
