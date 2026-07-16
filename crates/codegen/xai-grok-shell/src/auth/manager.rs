@@ -734,11 +734,6 @@ impl AuthManager {
             .is_some_and(|a| !a.is_data_collection_disabled())
     }
 
-    /// The current auth mode, if any credential exists.
-    pub(crate) fn auth_mode(&self) -> Option<crate::auth::AuthMode> {
-        self.current_or_expired().map(|a| a.auth_mode)
-    }
-
     /// Expired in-memory entry (for its `refresh_token`).
     pub(crate) fn expired_auth(&self) -> Option<GrokAuth> {
         let auth = self
