@@ -1,3 +1,4 @@
+// Modified in 2026 by the ocque41 OpenAI-support fork; see FORK-NOTICE.md.
 pub(crate) mod attribution;
 mod config;
 pub mod credential_provider;
@@ -33,7 +34,7 @@ pub use flow::{
 pub use jwt::{is_jwt_expired_or_near, parse_jwt_expiration};
 mod meta;
 pub use error::{AuthError, RefreshTokenError, RefreshTokenFailedReason};
-pub use manager::{AuthManager, shared_api_key_provider};
+pub use manager::{AuthManager, shared_api_key_provider, shared_xai_service_api_key_provider};
 pub use meta::{AuthMeta, GateInfo};
 pub use model::{AuthMode, GrokAuth, lookup_auth};
 pub(crate) use model::{TOKEN_TTL, UserInfo, is_expired, token_suffix};

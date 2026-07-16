@@ -1,3 +1,4 @@
+// Modified in 2026 by the ocque41 OpenAI-support fork; see FORK-NOTICE.md.
 //! `AuthManager` -- single source of truth for `auth.json` + the
 //! in-memory bearer cache. Mutations go through `refresh_chain` or `update`; lock
 //! and enrichment helpers live in submodules.
@@ -732,11 +733,6 @@ impl AuthManager {
     pub(crate) fn allows_data_collection(&self) -> bool {
         self.current_or_expired()
             .is_some_and(|a| !a.is_data_collection_disabled())
-    }
-
-    /// The current auth mode, if any credential exists.
-    pub(crate) fn auth_mode(&self) -> Option<crate::auth::AuthMode> {
-        self.current_or_expired().map(|a| a.auth_mode)
     }
 
     /// Expired in-memory entry (for its `refresh_token`).
@@ -2231,10 +2227,11 @@ impl xai_grok_tools::types::ApiKeyProvider for SharedAuthKeyProvider {
 /// Build a refreshing [`ApiKeyProvider`](xai_grok_tools::types::ApiKeyProvider)
 /// from an `Arc<AuthManager>`.
 ///
-/// This is the public, supported way for out-of-crate consumers (e.g. the
-/// pager's voice channel) to obtain a bearer that follows the same refresh
-/// chain as chat / tool traffic, rather than snapshotting a token at startup
-/// (the static-snapshot bug class). The returned
+/// This is the public, supported way for generic out-of-crate consumers to
+/// obtain a bearer that follows the same refresh chain as chat / tool traffic,
+/// rather than snapshotting a token at startup (the static-snapshot bug class).
+/// xAI-only service surfaces must use [`shared_xai_service_api_key_provider`]
+/// so third-party external credentials are reclassified. The returned
 /// provider resolves a fresh bearer per call via
 /// [`current_api_key_async`](xai_grok_tools::types::ApiKeyProvider::current_api_key_async),
 /// so it works for both OAuth/session (refreshes) and API-key auth.
@@ -2242,6 +2239,48 @@ pub fn shared_api_key_provider(
     auth_manager: Arc<AuthManager>,
 ) -> xai_grok_tools::types::SharedApiKeyProvider {
     Arc::new(SharedAuthKeyProvider(auth_manager))
+}
+
+/// Bearer provider for services hosted by xAI rather than the selected model
+/// provider. External credentials are eligible only when their declared
+/// issuer is first-party xAI; this prevents a third-party external bearer from
+/// being forwarded to xAI voice or other xAI-only service endpoints.
+pub(crate) struct SharedXaiServiceKeyProvider(pub Arc<AuthManager>);
+
+fn is_xai_service_auth(auth: &GrokAuth) -> bool {
+    match &auth.auth_mode {
+        AuthMode::ApiKey | AuthMode::WebLogin | AuthMode::Oidc => true,
+        AuthMode::External => auth.is_xai_auth(),
+    }
+}
+
+impl xai_grok_tools::types::ApiKeyProvider for SharedXaiServiceKeyProvider {
+    fn current_api_key(&self) -> Option<String> {
+        self.0
+            .current_or_expired()
+            .filter(is_xai_service_auth)
+            .map(|auth| auth.key)
+    }
+
+    fn current_api_key_async(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<String>> + Send + '_>> {
+        let am = self.0.clone();
+        Box::pin(async move {
+            am.auth()
+                .await
+                .ok()
+                .filter(is_xai_service_auth)
+                .map(|auth| auth.key)
+        })
+    }
+}
+
+/// Build a refreshing bearer provider for xAI-hosted service surfaces.
+pub fn shared_xai_service_api_key_provider(
+    auth_manager: Arc<AuthManager>,
+) -> xai_grok_tools::types::SharedApiKeyProvider {
+    Arc::new(SharedXaiServiceKeyProvider(auth_manager))
 }
 
 /// Compile-time check that `AuthManager` is `Send + Sync` (so the

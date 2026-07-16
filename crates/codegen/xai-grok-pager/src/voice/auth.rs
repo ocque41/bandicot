@@ -44,7 +44,7 @@ impl VoiceAuthProvider for AuthManagerVoiceAuth {
 /// inaccessible here.
 pub fn build_voice_auth(auth_manager: Arc<xai_grok_shell::auth::AuthManager>) -> SharedVoiceAuth {
     Arc::new(AuthManagerVoiceAuth(
-        xai_grok_shell::auth::shared_api_key_provider(auth_manager),
+        xai_grok_shell::auth::shared_xai_service_api_key_provider(auth_manager),
     ))
 }
 

@@ -179,6 +179,16 @@ test_install_isolation() {
     )
     grep -q '^OPENAI_API_KEY_SET=0$' "$_test_capture" || fail 'offline models command unexpectedly required a key'
 
+    # Upstream leader management is local socket/process inspection. It must
+    # remain usable before an OpenAI key is configured.
+    (
+        unset OPENAI_API_KEY
+        HOME=$_test_home \
+        GROK_OPENAI_TEST_CAPTURE=$_test_capture \
+            "$_test_home/.local/bin/grok-openai" leader list --json
+    )
+    grep -q '^OPENAI_API_KEY_SET=0$' "$_test_capture" || fail 'local leader command unexpectedly required a key'
+
     # An untouched generated profile follows installer upgrades, while a user
     # edit is preserved and the new canonical profile remains available.
     printf '%s\n' '# profile-v2' >>"$_test_profile"
