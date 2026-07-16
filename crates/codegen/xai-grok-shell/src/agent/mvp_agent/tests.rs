@@ -2361,6 +2361,38 @@ async fn prepare_sampling_config_custom_provider_rejects_xai_session() {
     assert_ne!(sampling.api_key.as_deref(), Some(xai_bearer.as_str()));
 }
 
+/// A first-party external xAI session remains an xAI session, but endpoint
+/// provenance still wins: its bearer must never authenticate OpenAI.
+#[tokio::test(flavor = "current_thread")]
+async fn prepare_sampling_config_custom_provider_rejects_xai_external_session() {
+    use crate::agent::config::{EndpointsConfig, ModelEntry};
+    use crate::auth::{AuthMode, GrokAuth, XAI_OAUTH2_ISSUER};
+
+    let agent = build_minimal_agent_for_tests();
+    agent.set_auth_method(acp::AuthMethodId::new(
+        crate::agent::auth_method::CACHED_TOKEN_AUTH_METHOD_ID,
+    ));
+    let auth = GrokAuth {
+        key: "external-xai-bearer".into(),
+        auth_mode: AuthMode::External,
+        oidc_issuer: Some(XAI_OAUTH2_ISSUER.into()),
+        ..GrokAuth::test_default()
+    };
+    assert!(auth.is_xai_auth());
+    assert!(auth.is_session_auth());
+    let xai_bearer = auth.key.clone();
+    agent.auth_manager.hot_swap(auth);
+
+    let mut model = ModelEntry::fallback("openai-external-boundary", &EndpointsConfig::default());
+    model.info.base_url = "https://api.openai.com/v1".to_owned();
+    let sampling = agent.prepare_sampling_config_for_model(&model, None);
+
+    assert_eq!(sampling.base_url, "https://api.openai.com/v1");
+    assert!(sampling.api_key.is_none());
+    assert!(sampling.bearer_resolver.is_none());
+    assert_ne!(sampling.api_key.as_deref(), Some(xai_bearer.as_str()));
+}
+
 /// Positive baseline: a genuine xAI API route remains eligible for a live
 /// OIDC session, so the provider guard does not disable supported xAI use.
 #[tokio::test(flavor = "current_thread")]
@@ -2750,12 +2782,46 @@ async fn data_collection_enabled_for_non_zdr_team_with_unrelated_blocks() {
         "non-ZDR blocked reasons must not disable data collection"
     );
 }
+fn enable_product_telemetry(agent: &MvpAgent) {
+    agent.cfg.borrow_mut().features.telemetry = Some(crate::agent::config::TelemetryMode::Enabled);
+}
 /// Enable trace uploads via config so only the auth-level privacy gate
 /// can disable collection in the tests below.
 fn enable_trace_upload_config(agent: &MvpAgent) {
     let mut cfg = agent.cfg.borrow_mut();
     cfg.features.telemetry = Some(crate::agent::config::TelemetryMode::Enabled);
     cfg.telemetry.trace_upload = Some(true);
+}
+#[tokio::test]
+async fn product_analytics_enabled_for_normal_user_with_telemetry_on() {
+    let agent = build_agent_with_auth(crate::auth::GrokAuth::test_default());
+    enable_product_telemetry(&agent);
+    assert!(agent.product_analytics_enabled());
+}
+#[tokio::test]
+async fn product_analytics_enabled_despite_coding_retention_opt_out() {
+    let agent = build_agent_with_auth(crate::auth::GrokAuth {
+        coding_data_retention_opt_out: true,
+        ..crate::auth::GrokAuth::test_default()
+    });
+    enable_product_telemetry(&agent);
+    assert!(agent.is_data_collection_disabled());
+    assert!(agent.product_analytics_enabled());
+}
+#[tokio::test]
+async fn product_analytics_disabled_for_zdr_team() {
+    let agent = build_agent_with_auth(crate::auth::GrokAuth {
+        team_blocked_reasons: vec!["BLOCKED_REASON_NO_LOGS".into()],
+        ..crate::auth::GrokAuth::test_default()
+    });
+    enable_product_telemetry(&agent);
+    assert!(!agent.product_analytics_enabled());
+}
+#[tokio::test]
+async fn product_analytics_disabled_when_telemetry_off() {
+    let agent = build_agent_with_auth(crate::auth::GrokAuth::test_default());
+    agent.cfg.borrow_mut().features.telemetry = Some(crate::agent::config::TelemetryMode::Disabled);
+    assert!(!agent.product_analytics_enabled());
 }
 /// Counting HTTP stub: any request increments the counter and gets a
 /// storage-proxy-shaped 200 so the client does not retry.
@@ -2792,7 +2858,7 @@ async fn diagnostic_upload_skipped_for_opted_out_user() {
     let uploader = agent
         .diagnostic_upload_config()
         .expect("uploader is wired whenever trace upload config is on");
-    uploader(b"log".to_vec(), "tok".into(), "user@example.com".into()).await;
+    uploader(b"log".to_vec(), "tok".into(), "user-id-1".into()).await;
     assert_eq!(
         count.load(std::sync::atomic::Ordering::SeqCst),
         0,
@@ -2808,7 +2874,7 @@ async fn diagnostic_upload_sent_for_normal_user() {
     let uploader = agent
         .diagnostic_upload_config()
         .expect("uploader is wired whenever trace upload config is on");
-    uploader(b"log".to_vec(), "tok".into(), "user@example.com".into()).await;
+    uploader(b"log".to_vec(), "tok".into(), "user-id-1".into()).await;
     assert!(
         count.load(std::sync::atomic::Ordering::SeqCst) >= 1,
         "positive control: diagnostics upload reaches the proxy for a \
@@ -2827,7 +2893,7 @@ async fn diagnostic_upload_skipped_without_credentials() {
     let uploader = agent
         .diagnostic_upload_config()
         .expect("uploader is wired whenever trace upload config is on");
-    uploader(b"log".to_vec(), "tok".into(), "user@example.com".into()).await;
+    uploader(b"log".to_vec(), "tok".into(), "user-id-1".into()).await;
     assert_eq!(
         count.load(std::sync::atomic::Ordering::SeqCst),
         0,
@@ -2853,7 +2919,7 @@ async fn diagnostic_upload_skipped_after_mid_session_trace_upload_kill_switch() 
         cfg.telemetry.trace_upload = Some(false);
     }
     agent.sync_collection_config_gate();
-    uploader(b"log".to_vec(), "tok".into(), "user@example.com".into()).await;
+    uploader(b"log".to_vec(), "tok".into(), "user-id-1".into()).await;
     assert_eq!(
         count.load(std::sync::atomic::Ordering::SeqCst),
         0,

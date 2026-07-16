@@ -237,7 +237,7 @@ pub(crate) async fn handle_subagent_request(
         request.runtime_overrides.model_override_provenance,
         resume_source.is_some(),
         &ctx.available_models,
-        ctx.auth_manager.auth_mode().is_some_and(|mode| mode.is_session_auth()),
+        ctx.auth_manager.current_or_expired().is_some_and(|a| a.is_session_auth()),
     ) {
         pending_guard.set_error(error.clone());
         send_failure(request, &error);

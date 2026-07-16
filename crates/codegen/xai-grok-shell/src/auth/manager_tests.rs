@@ -1,3 +1,4 @@
+// Modified in 2026 by the ocque41 OpenAI-support fork; see FORK-NOTICE.md.
 //! Unit tests for [`super::manager::AuthManager`]. Extracted from
 //! `manager.rs` so the implementation reads top-to-bottom; wired in
 //! via `#[path = "manager_tests.rs"] mod tests;` in manager.rs.
@@ -3387,6 +3388,48 @@ async fn shared_api_key_provider_resolves_live_bearer() {
         provider.current_api_key(),
         Some("rotated-token".to_string()),
         "provider must follow the manager's refresh chain rather than snapshot at startup"
+    );
+}
+
+#[tokio::test]
+async fn shared_xai_service_provider_rejects_third_party_external() {
+    use xai_grok_tools::types::ApiKeyProvider;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mgr = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+    mgr.hot_swap(GrokAuth {
+        key: "third-party-external-bearer".into(),
+        auth_mode: AuthMode::External,
+        oidc_issuer: Some("https://idp.example".into()),
+        ..GrokAuth::test_default()
+    });
+    let provider = SharedXaiServiceKeyProvider(mgr);
+
+    assert_eq!(provider.current_api_key(), None);
+    assert_eq!(provider.current_api_key_async().await, None);
+}
+
+#[tokio::test]
+async fn shared_xai_service_provider_accepts_xai_external() {
+    use xai_grok_tools::types::ApiKeyProvider;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mgr = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
+    mgr.hot_swap(GrokAuth {
+        key: "xai-external-bearer".into(),
+        auth_mode: AuthMode::External,
+        oidc_issuer: Some(crate::auth::XAI_OAUTH2_ISSUER.into()),
+        ..GrokAuth::test_default()
+    });
+    let provider = SharedXaiServiceKeyProvider(mgr);
+
+    assert_eq!(
+        provider.current_api_key().as_deref(),
+        Some("xai-external-bearer")
+    );
+    assert_eq!(
+        provider.current_api_key_async().await.as_deref(),
+        Some("xai-external-bearer")
     );
 }
 

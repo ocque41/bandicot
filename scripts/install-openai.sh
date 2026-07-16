@@ -187,7 +187,7 @@ esac
 grok_openai_needs_key=1
 for grok_openai_arg do
     case \$grok_openai_arg in
-        -h|--help|-v|-V|--version|models) grok_openai_needs_key=0 ;;
+        -h|--help|-v|-V|--version|models|leader) grok_openai_needs_key=0 ;;
     esac
 done
 

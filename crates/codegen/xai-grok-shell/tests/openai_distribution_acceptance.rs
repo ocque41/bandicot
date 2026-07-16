@@ -133,6 +133,7 @@ fn checked_in_openai_profile_is_complete_secret_free_and_warning_free() {
         EnvGuard::unset("GROK_SESSION_SUMMARY_MODEL"),
         EnvGuard::unset("GROK_IMAGE_DESCRIPTION_MODEL"),
         EnvGuard::unset("GROK_PROMPT_SUGGESTIONS_MODEL"),
+        EnvGuard::unset("GROK_VOICE_MODE"),
         EnvGuard::unset("OPENAI_API_KEY"),
         EnvGuard::set("XAI_API_KEY", "xai-credential-must-not-cross-provider"),
         EnvGuard::set(
@@ -197,7 +198,10 @@ fn checked_in_openai_profile_is_complete_secret_free_and_warning_free() {
     assert_eq!(config.features.managed_config, Some(false));
     assert_eq!(config.features.remote_fetch, Some(false));
     assert_eq!(config.features.video_gen, Some(false));
+    assert_eq!(config.features.voice_mode, Some(false));
+    assert!(!config.is_voice_mode_enabled());
     assert_eq!(config.features.backend_tools, Some(false));
+    assert!(!config.is_telemetry_enabled());
     assert_eq!(config.telemetry.trace_upload, Some(false));
     assert!(!config.telemetry.mixpanel_enabled);
     assert_eq!(config.telemetry.otel_enabled, Some(false));

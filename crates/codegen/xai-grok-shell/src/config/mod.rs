@@ -1061,6 +1061,7 @@ fn apply_requirements_inner(
     pin_requirement_only!(image_edit);
     pin_feature!(video_gen);
     pin_feature!(write_file);
+    pin_feature!(voice_mode);
     pin_requirement_only!(remote_fetch);
     if let Some(val) = req_bool(req, "telemetry", "trace_upload") {
         config.requirements.trace_upload.pin(val, source.clone());
@@ -1310,7 +1311,6 @@ pub fn apply_sandbox(
             None => {}
         }
     }
-    xai_grok_sandbox::warn_sandbox_profile_conflicts(&workspace);
     if sandbox_profile != xai_grok_sandbox::ProfileName::Off {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         let is_custom = matches!(sandbox_profile, xai_grok_sandbox::ProfileName::Custom(_));
