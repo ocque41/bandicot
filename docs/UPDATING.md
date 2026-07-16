@@ -56,13 +56,15 @@ The script performs the following transaction:
 10. only after the installation succeeds, removes the temporary candidate
    worktree and branch.
 
-If fetch fails before a candidate exists, the script exits non-zero and leaves
-all state unchanged. If merge, test, build, or another pre-publication gate
-fails, the real `main`, installed `grok-openai`, and remote fork remain
-unchanged; the failed candidate worktree and branch are intentionally retained,
-and their locations are reported so the failure can be inspected without
-recreating it. There is no force push, destructive reset, xAI release download,
-shell startup edit, or push to upstream.
+If fetch fails before a candidate exists, the script exits non-zero without
+changing repository refs, the worktree, the installed `grok-openai`, or the
+remote fork. On a first run it may still create or repair the read-only
+`upstream` remote before that fetch. If merge, test, build, or another
+pre-publication gate fails, the real `main`, installed `grok-openai`, and remote
+fork remain unchanged; the failed candidate worktree and branch are
+intentionally retained, and their locations are reported so the failure can be
+inspected without recreating it. There is no force push, destructive reset, xAI
+release download, shell startup edit, or push to upstream.
 
 ## If upstream rewrote, rebased, or rolled back history
 
