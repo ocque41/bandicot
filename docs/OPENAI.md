@@ -11,10 +11,11 @@ official Grok Build installation.
   API keys, has billing or credits, and is permitted to use the selected model.
   ChatGPT Plus/Pro/Business and Codex sign-in are separate products and do not
   automatically provide Platform API quota.
-- The Grok Build runtime accepts only an `OPENAI_API_KEY` for OpenAI inference.
-  When that key is absent on macOS, the launcher may execute the official Codex
-  TUI after verifying it is signed in with ChatGPT. It never reads or translates
-  a ChatGPT cookie, Codex OAuth token, or xAI login session.
+- Direct Platform inference uses `OPENAI_API_KEY`. When it is absent, the Grok
+  Build runtime can instead use a loopback CLIProxyAPI Responses endpoint.
+  CLIProxyAPI owns and refreshes Codex OAuth; this launcher reads only the
+  proxy's protected local client token and never reads a ChatGPT cookie or
+  Codex OAuth token.
 - The supported wire protocol is the OpenAI **Responses API**. The curated
   profile intentionally does not use Chat Completions because the agent relies
   on Responses-style reasoning and function-call events.
@@ -58,9 +59,11 @@ The final command selects one of two supported modes:
 
 - with `OPENAI_API_KEY` (environment or Keychain), it starts this fork's Grok
   Build TUI against the OpenAI Responses API;
-- without a Platform key, it verifies the Codex binary bundled with ChatGPT.app
-  reports `Logged in using ChatGPT`, then starts the official Codex TUI. This
-  uses ChatGPT-plan access and does not expose or copy its OAuth credential.
+- without a Platform key, it starts the same Grok Build TUI using
+  `config/codex-plan.toml`, CLIProxyAPI on `127.0.0.1:8317`, and the protected
+  `~/.cli-proxy-api/client-token`. CLIProxyAPI must already be running and have
+  a valid credential created by `cliproxyapi -codex-login` or
+  `cliproxyapi -codex-device-login`.
 
 Run `./scripts/setup-openai-key.sh` before launching when Grok Build mode is
 required.
@@ -104,11 +107,11 @@ Do not add the key to `.env`, `.envrc`, `config/openai.toml`, shell startup
 files, or a checked-in CI definition. Use the CI provider's masked secret store
 or another process-level secret injector.
 
-If the profile declares `env_key = "OPENAI_API_KEY"` but the value is missing
-or empty, Grok Build mode is not started. The launcher may use the separately
-authenticated official Codex TUI; otherwise it fails closed. It never falls
-back to a cached xAI session or `XAI_API_KEY` and never sends either credential
-to `api.openai.com`.
+If no Platform key exists, the launcher accepts the CLIProxyAPI client token
+only from a regular, non-symlink file with mode `0400` or `0600`. It exposes
+that value only as `GROK_CODEX_PROXY_TOKEN` to the child Grok Build process and
+selects the loopback-only profile. It never falls back to a cached xAI session
+or `XAI_API_KEY`.
 
 ## Models
 

@@ -70,6 +70,11 @@ if [ -n "${GROK_OPENAI_TEST_CAPTURE:-}" ]; then
         else
             printf '%s\n' 'OPENAI_API_KEY_SET=0'
         fi
+        if [ -n "${GROK_CODEX_PROXY_TOKEN:-}" ]; then
+            printf '%s\n' 'GROK_CODEX_PROXY_TOKEN_SET=1'
+        else
+            printf '%s\n' 'GROK_CODEX_PROXY_TOKEN_SET=0'
+        fi
         if [ -n "${XAI_API_KEY:-}${GROK_CODE_XAI_API_KEY:-}${GROK_AUTH:-}${GROK_AUTH_PATH:-}${GROK_AUTH_PROVIDER_COMMAND:-}" ]; then
             printf '%s\n' 'XAI_AUTH_INPUT_SET=1'
         else
@@ -80,23 +85,6 @@ fi
 exit 0
 EOF
     chmod 755 "$_test_binary"
-}
-
-make_fake_codex() {
-    _test_codex=$1
-    mkdir -p "$(dirname -- "$_test_codex")"
-    cat >"$_test_codex" <<'EOF'
-#!/bin/sh
-if [ "${1:-}" = login ] && [ "${2:-}" = status ]; then
-    printf '%s\n' 'Logged in using ChatGPT'
-    exit 0
-fi
-if [ -n "${GROK_OPENAI_TEST_CODEX_CAPTURE:-}" ]; then
-    printf '%s\n' "$*" >"$GROK_OPENAI_TEST_CODEX_CAPTURE"
-fi
-exit 0
-EOF
-    chmod 755 "$_test_codex"
 }
 
 write_profile() {
@@ -135,8 +123,10 @@ test_install_isolation() {
 
     assert_file "$_test_home/.local/libexec/grok-openai/grok"
     assert_file "$_test_home/.local/libexec/grok-openai/openai.toml"
+    assert_file "$_test_home/.local/libexec/grok-openai/codex-plan.toml"
     assert_file "$_test_home/.local/bin/grok-openai"
     assert_file "$_test_home/.grok-openai/config.toml"
+    assert_file "$_test_home/.grok-codex-plan/config.toml"
     assert_eq "$(sed -n '1p' "$_test_home/.grok/config.toml")" legacy-sentinel
 
     if HOME=$_test_home \
@@ -207,19 +197,24 @@ test_install_isolation() {
     )
     grep -q '^OPENAI_API_KEY_SET=0$' "$_test_capture" || fail 'local leader command unexpectedly required a key'
 
-    # Without a Platform key, the one-command launcher falls back to the
-    # official Codex runtime only after confirming a ChatGPT-plan login.
-    _test_codex=$_test_case/fake-codex
-    _test_codex_capture=$_test_case/codex-capture
-    make_fake_codex "$_test_codex"
+    # Without a Platform key, the launcher selects the Grok Build profile for
+    # the local Codex OAuth proxy and reads only its protected client token.
+    _test_proxy_token=$_test_case/client-token
+    printf '%s\n' 'local-loopback-test-token' >"$_test_proxy_token"
+    chmod 600 "$_test_proxy_token"
     (
         unset OPENAI_API_KEY
         HOME=$_test_home \
-        GROK_OPENAI_CODEX_BIN=$_test_codex \
-        GROK_OPENAI_TEST_CODEX_CAPTURE=$_test_codex_capture \
+        GROK_CODEX_PROXY_TOKEN_FILE=$_test_proxy_token \
+        GROK_OPENAI_TEST_CAPTURE=$_test_capture \
             "$_test_home/.local/bin/grok-openai" 'hello from bandicot' >/dev/null 2>&1
     )
-    assert_eq "$(sed -n '1p' "$_test_codex_capture")" 'hello from bandicot'
+    grep -q "GROK_HOME=$_test_home/.grok-codex-plan" "$_test_capture" || fail 'launcher did not select the Codex-plan profile'
+    grep -q '^GROK_CODEX_PROXY_TOKEN_SET=1$' "$_test_capture" || fail 'launcher did not supply the local proxy token'
+    grep -q '^OPENAI_API_KEY_SET=0$' "$_test_capture" || fail 'Codex-plan mode synthesized an OpenAI Platform key'
+    if grep -q 'local-loopback-test-token' "$_test_capture"; then
+        fail 'test capture leaked the local proxy token value'
+    fi
 
     # An untouched generated profile follows installer upgrades, while a user
     # edit is preserved and the new canonical profile remains available.
@@ -264,6 +259,7 @@ make_fixture() {
     git -C "$SEED" config user.email 'script-test@example.invalid'
     cp -R "$REPO_ROOT/scripts" "$SEED/scripts"
     write_profile "$SEED/config/openai.toml"
+    cp "$REPO_ROOT/config/codex-plan.toml" "$SEED/config/codex-plan.toml"
     printf '%s\n' base >"$SEED/conflict.txt"
     printf '%s\n' base >"$SEED/base.txt"
     git -C "$SEED" add .
