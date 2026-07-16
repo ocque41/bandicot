@@ -11,8 +11,10 @@ official Grok Build installation.
   API keys, has billing or credits, and is permitted to use the selected model.
   ChatGPT Plus/Pro/Business and Codex sign-in are separate products and do not
   automatically provide Platform API quota.
-- The fork accepts only an `OPENAI_API_KEY` for OpenAI inference. It never reads
-  or translates a ChatGPT cookie, Codex OAuth token, or xAI login session.
+- The Grok Build runtime accepts only an `OPENAI_API_KEY` for OpenAI inference.
+  When that key is absent on macOS, the launcher may execute the official Codex
+  TUI after verifying it is signed in with ChatGPT. It never reads or translates
+  a ChatGPT cookie, Codex OAuth token, or xAI login session.
 - The supported wire protocol is the OpenAI **Responses API**. The curated
   profile intentionally does not use Chat Completions because the agent relies
   on Responses-style reasoning and function-call events.
@@ -47,11 +49,21 @@ or pass it as a command-line argument.
 From the repository root:
 
 ```sh
-./scripts/setup-openai-key.sh
 ./scripts/install-openai.sh
 ~/.local/bin/grok-openai --version
 ~/.local/bin/grok-openai
 ```
+
+The final command selects one of two supported modes:
+
+- with `OPENAI_API_KEY` (environment or Keychain), it starts this fork's Grok
+  Build TUI against the OpenAI Responses API;
+- without a Platform key, it verifies the Codex binary bundled with ChatGPT.app
+  reports `Logged in using ChatGPT`, then starts the official Codex TUI. This
+  uses ChatGPT-plan access and does not expose or copy its OAuth credential.
+
+Run `./scripts/setup-openai-key.sh` before launching when Grok Build mode is
+required.
 
 `setup-openai-key.sh` invokes `/usr/bin/security` so Keychain performs the
 interactive secret prompt. The script does not read the key itself and places
@@ -93,8 +105,10 @@ files, or a checked-in CI definition. Use the CI provider's masked secret store
 or another process-level secret injector.
 
 If the profile declares `env_key = "OPENAI_API_KEY"` but the value is missing
-or empty, startup fails closed. It must not fall back to a cached xAI session or
-`XAI_API_KEY` and must not send either credential to `api.openai.com`.
+or empty, Grok Build mode is not started. The launcher may use the separately
+authenticated official Codex TUI; otherwise it fails closed. It never falls
+back to a cached xAI session or `XAI_API_KEY` and never sends either credential
+to `api.openai.com`.
 
 ## Models
 

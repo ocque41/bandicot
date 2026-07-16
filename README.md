@@ -34,12 +34,14 @@ prebuilt binary and does not contain these OpenAI changes. Build and install
 the fork itself:
 
 ```sh
-./scripts/setup-openai-key.sh
 ./scripts/install-openai.sh
 ~/.local/bin/grok-openai
 ```
 
-The key setup delegates the secret prompt and storage to macOS Keychain. The
+With no Platform key, the launcher verifies the official Codex runtime bundled
+with ChatGPT.app is signed in, then starts its Codex TUI using the ChatGPT plan.
+To run the Grok Build TUI itself, first run `./scripts/setup-openai-key.sh`; the
+key setup delegates the secret prompt and storage to macOS Keychain. The
 installer creates an isolated launcher at `~/.local/bin/grok-openai`, installs
 the compiled binary under `~/.local/libexec/grok-openai/`, and uses
 `~/.grok-openai` as `GROK_HOME`. It does not edit `PATH`, shell startup files,
@@ -60,9 +62,9 @@ setup, model choices, security boundaries, and troubleshooting are in
 
 ## Assumptions
 
-- "OpenAI account" means an OpenAI Platform project with API access, billing,
-  and an API key. A ChatGPT subscription or Codex sign-in does not by itself
-  grant Platform API access, and this fork never copies Codex OAuth tokens.
+- ChatGPT-plan access uses the official Codex TUI and its existing login. Grok
+  Build inference means an OpenAI Platform project with an API key and billing.
+  The launcher never copies Codex OAuth tokens or treats them as API keys.
 - "Latest models" means the floating `gpt-5.6` alias by default, plus curated
   `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, and `gpt-5.3-codex`
   selections. Availability still depends on the user's OpenAI project.
@@ -91,9 +93,9 @@ cargo check -p xai-grok-pager-bin            # fast validation
 ```
 
 The binary artifact is named `xai-grok-pager`; this fork's installer exposes it
-as `grok-openai`. The fork does not use the upstream browser login for OpenAI:
-it requires `OPENAI_API_KEY`, supplied by the environment or its isolated
-Keychain-backed launcher.
+as `grok-openai`. Grok Build mode requires `OPENAI_API_KEY`, supplied by the
+environment or its isolated Keychain-backed launcher. Without that key, the
+launcher uses the signed-in official Codex TUI instead.
 
 ## Documentation
 

@@ -50,6 +50,7 @@ make_fake_binary() {
     printf '%s\n' 'candidate binary inherited ambient sentinel secret' >&2
     exit 97
 }
+
 case ${1:-} in
     -v|-V|--version)
         printf '%s\n' 'grok-openai-test 1.0'
@@ -79,6 +80,23 @@ fi
 exit 0
 EOF
     chmod 755 "$_test_binary"
+}
+
+make_fake_codex() {
+    _test_codex=$1
+    mkdir -p "$(dirname -- "$_test_codex")"
+    cat >"$_test_codex" <<'EOF'
+#!/bin/sh
+if [ "${1:-}" = login ] && [ "${2:-}" = status ]; then
+    printf '%s\n' 'Logged in using ChatGPT'
+    exit 0
+fi
+if [ -n "${GROK_OPENAI_TEST_CODEX_CAPTURE:-}" ]; then
+    printf '%s\n' "$*" >"$GROK_OPENAI_TEST_CODEX_CAPTURE"
+fi
+exit 0
+EOF
+    chmod 755 "$_test_codex"
 }
 
 write_profile() {
@@ -188,6 +206,20 @@ test_install_isolation() {
             "$_test_home/.local/bin/grok-openai" leader list --json
     )
     grep -q '^OPENAI_API_KEY_SET=0$' "$_test_capture" || fail 'local leader command unexpectedly required a key'
+
+    # Without a Platform key, the one-command launcher falls back to the
+    # official Codex runtime only after confirming a ChatGPT-plan login.
+    _test_codex=$_test_case/fake-codex
+    _test_codex_capture=$_test_case/codex-capture
+    make_fake_codex "$_test_codex"
+    (
+        unset OPENAI_API_KEY
+        HOME=$_test_home \
+        GROK_OPENAI_CODEX_BIN=$_test_codex \
+        GROK_OPENAI_TEST_CODEX_CAPTURE=$_test_codex_capture \
+            "$_test_home/.local/bin/grok-openai" 'hello from bandicot' >/dev/null 2>&1
+    )
+    assert_eq "$(sed -n '1p' "$_test_codex_capture")" 'hello from bandicot'
 
     # An untouched generated profile follows installer upgrades, while a user
     # edit is preserved and the new canonical profile remains available.
