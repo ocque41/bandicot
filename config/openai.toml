@@ -1,0 +1,107 @@
+# Secret-free OpenAI Platform profile for the unofficial grok-build fork.
+#
+# Do not add an API key here. The grok-openai launcher supplies OPENAI_API_KEY
+# from the current environment or the macOS Keychain.
+
+[cli]
+# The upstream updater downloads xAI release artifacts. This fork is updated by
+# scripts/update-from-upstream.sh instead.
+auto_update = false
+
+[models]
+default = "openai-latest"
+default_reasoning_effort = "medium"
+
+# Pin every auxiliary model slot so no compiled xAI model default is selected.
+web_search = "openai-luna"
+session_summary = "openai-luna"
+image_description = "openai-luna"
+prompt_suggestion = "openai-luna"
+
+# Keep the picker and explicit model selection inside this profile's catalog.
+allowed_models = ["openai-*"]
+
+[features]
+# Do not contact xAI service surfaces from the OpenAI distribution.
+telemetry = false
+feedback = false
+managed_config = false
+remote_fetch = false
+video_gen = false
+
+# Hosted search remains off until the OpenAI web-search wire shape has its own
+# provider-isolation acceptance test. Local tools and MCP servers are unchanged.
+backend_tools = false
+
+[telemetry]
+trace_upload = false
+mixpanel_enabled = false
+otel_enabled = false
+
+[diagnostics]
+error_reporting = false
+
+[model.openai-latest]
+model = "gpt-5.6"
+base_url = "https://api.openai.com/v1"
+name = "OpenAI GPT-5.6 (latest alias)"
+description = "OpenAI's floating GPT-5.6 alias"
+env_key = "OPENAI_API_KEY"
+api_backend = "responses"
+context_window = 1050000
+max_completion_tokens = 128000
+agent_type = "codex"
+reasoning_efforts = ["none", "low", "medium", "high", "xhigh", "max"]
+supports_backend_search = false
+
+[model.openai-sol]
+model = "gpt-5.6-sol"
+base_url = "https://api.openai.com/v1"
+name = "OpenAI GPT-5.6 Sol"
+description = "Highest-capability GPT-5.6 coding and reasoning profile"
+env_key = "OPENAI_API_KEY"
+api_backend = "responses"
+context_window = 1050000
+max_completion_tokens = 128000
+agent_type = "codex"
+reasoning_efforts = ["none", "low", "medium", "high", "xhigh", "max"]
+supports_backend_search = false
+
+[model.openai-terra]
+model = "gpt-5.6-terra"
+base_url = "https://api.openai.com/v1"
+name = "OpenAI GPT-5.6 Terra"
+description = "Balanced GPT-5.6 capability and cost profile"
+env_key = "OPENAI_API_KEY"
+api_backend = "responses"
+context_window = 1050000
+max_completion_tokens = 128000
+agent_type = "codex"
+reasoning_efforts = ["none", "low", "medium", "high", "xhigh", "max"]
+supports_backend_search = false
+
+[model.openai-luna]
+model = "gpt-5.6-luna"
+base_url = "https://api.openai.com/v1"
+name = "OpenAI GPT-5.6 Luna"
+description = "Cost-sensitive, high-volume GPT-5.6 profile"
+env_key = "OPENAI_API_KEY"
+api_backend = "responses"
+context_window = 1050000
+max_completion_tokens = 128000
+agent_type = "codex"
+reasoning_efforts = ["none", "low", "medium", "high", "xhigh", "max"]
+supports_backend_search = false
+
+[model.openai-codex]
+model = "gpt-5.3-codex"
+base_url = "https://api.openai.com/v1"
+name = "OpenAI GPT-5.3 Codex"
+description = "Specialized coding model; GPT-5.6 Sol is the current default for complex coding"
+env_key = "OPENAI_API_KEY"
+api_backend = "responses"
+context_window = 400000
+max_completion_tokens = 128000
+agent_type = "codex"
+reasoning_efforts = ["low", "medium", "high", "xhigh"]
+supports_backend_search = false

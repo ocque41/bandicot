@@ -1,3 +1,4 @@
+// Modified in 2026 by the ocque41 OpenAI-support fork; see FORK-NOTICE.md.
 //! Sampling error types.
 //!
 //! TODO: Move from xai-grok-shell/src/sampling/error.rs
@@ -351,7 +352,15 @@ pub fn parse_error_bytes(bytes: &[u8]) -> String {
         }
         return format!("{error_type}: {message}");
     }
-    String::from_utf8_lossy(bytes).trim().to_owned()
+    // An arbitrary non-JSON response may be an HTML proxy page, a credential
+    // echo, or user-derived content. Do not propagate it into SamplingError
+    // display strings, which are commonly traced by callers. Length is enough
+    // to distinguish an empty response from an intercepted/error page while
+    // keeping the provider payload private.
+    format!(
+        "Provider returned a non-JSON error response ({} bytes; body omitted)",
+        bytes.len()
+    )
 }
 
 pub fn try_parse_stream_error(data: &str) -> Option<SamplingError> {
@@ -526,6 +535,21 @@ mod tests {
             msg,
             "The service is currently unavailable: Service temporarily unavailable."
         );
+    }
+
+    #[test]
+    fn parse_error_bytes_omits_arbitrary_non_json_body() {
+        let body = b"<html>private provider echo: sk-secret-value</html>";
+        let msg = parse_error_bytes(body);
+        assert_eq!(
+            msg,
+            format!(
+                "Provider returned a non-JSON error response ({} bytes; body omitted)",
+                body.len()
+            )
+        );
+        assert!(!msg.contains("sk-secret-value"));
+        assert!(!msg.contains("private provider echo"));
     }
 
     /// Regression test: 403 Forbidden must NOT be classified as an auth

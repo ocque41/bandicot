@@ -1,3 +1,4 @@
+// Modified in 2026 by the ocque41 OpenAI-support fork; see FORK-NOTICE.md.
 use agent_client_protocol as acp;
 
 use crate::agent::config::ModelEntry;
@@ -334,11 +335,13 @@ pub fn is_session_based_method(method_id: &acp::AuthMethodId) -> bool {
     AuthMethodKind::from_id(method_id).is_session_based()
 }
 
-/// Per-model BYOK status: whether the selected model carries its own
-/// `[model.*]` `api_key`/`env_key`.
+/// Per-model provider-isolation status. Besides a usable per-model
+/// `[model.*]` `api_key`/`env_key`, `Byok` also covers a declared-but-missing
+/// provider credential and any non-xAI endpoint. Those routes must never be
+/// refreshed with an xAI session bearer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ModelByok {
-    /// Model has its own per-model key (not refreshable).
+    /// Provider-isolated route: per-model credentials or a non-xAI endpoint.
     Byok,
     /// Model has no per-model key (session auth governs).
     NotByok,
@@ -362,29 +365,23 @@ impl ModelByok {
 /// to `ApiKey` when the session-token cache is momentarily empty and
 /// `XAI_API_KEY` is set, which demoted live OIDC sessions to non-refreshable
 /// api-key mode and 401'd every prompt until restart. `model_byok` still
-/// excludes genuine per-model BYOK, whose keys are not refreshable.
+/// excludes provider-isolated routes, whose credentials are not refreshable.
 ///
 /// `Unknown` (BYOK status indeterminate — config currently unparseable, no
 /// sampling config yet, or the per-model memo was cleared) must **not** demote
 /// a live session to non-refreshable api-key mode: that re-sends the stale
 /// buffered token on every turn and 401s with `bad-credentials` until restart
 /// (the stale-token regression this gate addresses; fall back rather than
-/// demote on `Unknown`). It refreshes when `endpoint_is_first_party` — the
-/// request targets a first-party host (cli-chat-proxy / first-party API),
-/// where sending the session token cannot leak to a third-party BYOK
-/// endpoint. A definite `NotByok` always refreshes (it only ever routes to
-/// the session endpoint); a definite `Byok` never does.
+/// demote on `Unknown`). Every refresh also requires
+/// `endpoint_is_first_party`: even a stale cached `NotByok` classification must
+/// not send an xAI bearer after the same model id is repointed to a third-party
+/// host. A definite `Byok` never refreshes.
 pub fn session_token_auth_gate(
     is_session_based_method: bool,
     model_byok: ModelByok,
     endpoint_is_first_party: bool,
 ) -> bool {
-    is_session_based_method
-        && match model_byok {
-            ModelByok::NotByok => true,
-            ModelByok::Byok => false,
-            ModelByok::Unknown => endpoint_is_first_party,
-        }
+    is_session_based_method && endpoint_is_first_party && model_byok != ModelByok::Byok
 }
 
 pub const AUTH_ERROR_SESSION_EXPIRED: &str =

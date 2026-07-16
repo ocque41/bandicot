@@ -1,3 +1,4 @@
+// Modified in 2026 by the ocque41 OpenAI-support fork; see FORK-NOTICE.md.
 #![cfg_attr(rustfmt, rustfmt::skip)]
 #![allow(unused_imports)]
 //! Inherent [`MvpAgent`] helpers (MCP/clients/gateway, settings/models, session ops, spawn).
@@ -48,12 +49,20 @@ impl MvpAgent {
             Some(mut cfg) => {
                 cfg.client_identifier = primary.client_identifier.clone();
                 cfg.attribution_callback = primary.attribution_callback.clone();
-                cfg.bearer_resolver = primary.bearer_resolver.clone();
+                // A refreshable xAI session bearer may follow only an xAI
+                // auxiliary route. OpenAI/custom summary models keep their own
+                // static provider credential (or fail closed when absent).
+                cfg.bearer_resolver = crate::util::is_first_party_xai_url(&cfg.base_url)
+                    .then(|| primary.bearer_resolver.clone())
+                    .flatten();
                 cfg.max_retries = primary.max_retries;
                 cfg
             }
             None => {
                 let mut fallback = primary.clone();
+                if !crate::util::is_first_party_xai_url(&fallback.base_url) {
+                    fallback.bearer_resolver = None;
+                }
                 fallback.model = slug;
                 fallback
             }
@@ -1086,10 +1095,17 @@ impl MvpAgent {
         model: &ModelEntry,
         origin_client: Option<crate::http::OriginClientInfo>,
     ) -> SamplingConfig {
+        // Session/OIDC credentials belong only on verified xAI routes. Keep
+        // this guard local even though `resolve_credentials` also fails closed:
+        // the overrides below can otherwise turn a custom model back into a
+        // SessionToken and make the per-turn refresh gate eligible later.
+        let accepts_xai_session = Self::model_accepts_xai_session(model);
         let preferred = self.cfg.borrow().grok_com_config.preferred_method;
         let session = match preferred {
             Some(crate::auth::PreferredAuthMethod::ApiKey) => None,
-            _ if self.is_session_based_auth() => self.auth_manager.current_or_expired(),
+            _ if self.is_session_based_auth() && accepts_xai_session => {
+                self.auth_manager.current_or_expired()
+            }
             _ => None,
         };
         let has_session_key = session.is_some();
@@ -1098,6 +1114,7 @@ impl MvpAgent {
             session.as_ref().map(|a| a.key.as_str()),
         );
         if matches!(preferred, Some(crate ::auth::PreferredAuthMethod::Oidc))
+            && accepts_xai_session
             && !model.has_own_credentials()
             && credentials.auth_type == xai_chat_state::AuthType::ApiKey
         {
@@ -1110,7 +1127,8 @@ impl MvpAgent {
             session.as_ref().map(|a| a.key.as_str()),
         );
         if !has_session_key && credentials.auth_type == xai_chat_state::AuthType::ApiKey
-            && !model.has_own_credentials() && self.is_session_based_auth()
+            && accepts_xai_session && !model.has_own_credentials()
+            && self.is_session_based_auth()
         {
             tracing::info!(
                 model = model.info().model.as_str(),
@@ -1163,6 +1181,17 @@ impl MvpAgent {
         );
         config.origin_client = origin_client;
         config
+    }
+    /// Whether an xAI session/OIDC bearer may authenticate this model.
+    /// Host validation uses the shared suffix-safe first-party predicate, so
+    /// OpenAI, local gateways, and xAI-lookalike domains all fail closed. An
+    /// explicitly selected model credential source also fails closed when its
+    /// value is missing; session auth must not bypass that provider choice.
+    pub(super) fn model_accepts_xai_session(model: &ModelEntry) -> bool {
+        let declares_own_credentials = model.api_key.is_some()
+            || model.env_key.as_ref().is_some_and(|keys| !keys.is_empty());
+        !declares_own_credentials
+            && crate::util::is_first_party_xai_url(&model.info().base_url)
     }
     /// Resolve sampling config for a model by ID, falling back to the global
     /// default on resolution failure. This ensures API-key auth routes to
@@ -1236,9 +1265,22 @@ impl MvpAgent {
             .or_else(|| jwt_tier_claim(&auth.key));
         tier.as_deref().is_some_and(crate::tier::is_restricted_tier_name)
     }
+    /// Whether the active inference provider is allowed to use xAI-only media
+    /// services. This gate must run before reading the active model's API key:
+    /// image and video clients always target `xai_api_base_url`, so forwarding a
+    /// custom-provider credential there would cross a provider trust boundary.
+    fn active_provider_supports_xai_media(&self) -> bool {
+        if crate::util::is_first_party_xai_url(&self.sampling_config.borrow().base_url) {
+            return true;
+        }
+        tracing::info!("xAI-only image and video tools are unsupported for the active provider");
+        false
+    }
     /// Build image generation config.
     ///
-    /// Both BYOK and session (OAuth) users go direct to `xai_api_base_url`.
+    /// First-party xAI BYOK and session (OAuth) users go direct to
+    /// `xai_api_base_url`. Custom-provider sessions are disabled before their
+    /// credential is read, so their key can never be sent to an xAI endpoint.
     /// `sampling_config.api_key` carries the OAuth bearer for session users (the
     /// `api_key_provider` refreshes it per request), so IC authenticates and
     /// meters Imagine usage per-user.
@@ -1246,6 +1288,9 @@ impl MvpAgent {
         &self,
     ) -> xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig {
         use xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig;
+        if !self.active_provider_supports_xai_media() {
+            return ImageGenConfig::Disabled;
+        }
         let sampling_config = self.sampling_config.borrow();
         let Some(ref api_key) = sampling_config.api_key else {
             return ImageGenConfig::Disabled;
@@ -1288,6 +1333,9 @@ impl MvpAgent {
         &self,
     ) -> xai_grok_tools::implementations::grok_build::video_gen::VideoGenConfig {
         use xai_grok_tools::implementations::grok_build::video_gen::VideoGenConfig;
+        if !self.active_provider_supports_xai_media() {
+            return VideoGenConfig::Disabled;
+        }
         let Some(api_key) = self.sampling_config.borrow().api_key.clone() else {
             return VideoGenConfig::Disabled;
         };
@@ -2343,13 +2391,22 @@ impl MvpAgent {
     }
     /// Seed the global sampling config with login auth when available.
     ///
-    /// Only sets the `api_key` if missing. Does NOT resolve `base_url` from
+    /// Only sets the `api_key` if missing and the already-resolved destination
+    /// is verified first-party xAI. Does NOT resolve `base_url` from
     /// `current_model_id` — that's deferred to session creation time to avoid
     /// cross-client contamination in leader mode (where `current_model_id` is
-    /// shared mutable state).
+    /// shared mutable state). A custom-provider config stays keyless here.
     pub(super) fn seed_client_config_auth_if_available(&self) {
+        let models = self.models_manager.models();
         let mut sampling_config = self.sampling_config.borrow_mut();
-        if sampling_config.api_key.is_none() {
+        let active_model_accepts_xai_session =
+            crate::util::is_first_party_xai_url(&sampling_config.base_url)
+                && crate::agent::config::find_model_by_id(&models, &sampling_config.model)
+                    .map(Self::model_accepts_xai_session)
+                    .unwrap_or(true);
+        if sampling_config.api_key.is_none()
+            && active_model_accepts_xai_session
+        {
             if let Some(auth) = self.auth_manager.current_or_expired() {
                 sampling_config.api_key = Some(auth.key);
                 tracing::debug!("auth: seed_client_config set auth (SessionToken)");

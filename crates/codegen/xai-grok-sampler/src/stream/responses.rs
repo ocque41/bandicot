@@ -1,9 +1,10 @@
+// Modified in 2026 by the ocque41 OpenAI-support fork; see FORK-NOTICE.md.
 //! Layer-2 stream transform for the OpenAI Responses API.
 //!
 //! Consumes a raw `rs::ResponseStreamEvent` stream and produces
 //! [`SamplingEvent`]s. Pure: no I/O, no shell coupling.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
@@ -30,7 +31,9 @@ pub(crate) fn responses_event_has_meaningful_content(event: &rs::ResponseStreamE
         ResponseStreamEvent::ResponseOutputTextDelta(event) => !event.delta.is_empty(),
         ResponseStreamEvent::ResponseOutputTextDone(event) => !event.text.is_empty(),
         ResponseStreamEvent::ResponseRefusalDelta(event) => !event.delta.is_empty(),
-        ResponseStreamEvent::ResponseRefusalDone(event) => !event.refusal.is_empty(),
+        // The refusal event itself is a deterministic terminal signal even
+        // when a provider omits an explanation body.
+        ResponseStreamEvent::ResponseRefusalDone(_) => true,
         ResponseStreamEvent::ResponseFunctionCallArgumentsDelta(event) => !event.delta.is_empty(),
         ResponseStreamEvent::ResponseFunctionCallArgumentsDone(event) => {
             !event.arguments.is_empty() || event.name.as_ref().is_some_and(|name| !name.is_empty())
@@ -78,14 +81,182 @@ pub(crate) fn responses_event_has_meaningful_content(event: &rs::ResponseStreamE
     }
 }
 
+#[derive(Debug)]
+struct StreamedToolCall {
+    tool_index: u32,
+    call_id: Option<String>,
+    name: Option<String>,
+    streamed_arguments: String,
+    done_arguments: Option<String>,
+}
+
+fn nonempty(value: String) -> Option<String> {
+    (!value.trim().is_empty()).then_some(value)
+}
+
+fn valid_json(value: &str) -> bool {
+    serde_json::from_str::<serde::de::IgnoredAny>(value).is_ok()
+}
+
+/// Apply the authoritative `function_call_arguments.done` payload to the
+/// terminal response and discard calls that are not safe to execute.
+///
+/// A completed response is the agent loop's ToolUse boundary. Streaming
+/// deltas are useful UI progress, but must never turn a missing name/id or
+/// truncated JSON fragment into an executable call.
+fn finalize_function_calls(
+    response: &mut rs::Response,
+    streamed: &BTreeMap<u32, StreamedToolCall>,
+    allow_tool_calls: bool,
+) {
+    let output = std::mem::take(&mut response.output);
+    response.output = output
+        .into_iter()
+        .enumerate()
+        .filter_map(|(output_index, mut item)| {
+            let rs::OutputItem::FunctionCall(ref mut call) = item else {
+                return Some(item);
+            };
+
+            if !allow_tool_calls {
+                return None;
+            }
+
+            let mut arguments_done = false;
+            if let Some(state) = u32::try_from(output_index)
+                .ok()
+                .and_then(|index| streamed.get(&index))
+            {
+                if let Some(arguments) = &state.done_arguments {
+                    call.arguments.clone_from(arguments);
+                    arguments_done = true;
+                }
+                if call.call_id.trim().is_empty()
+                    && let Some(call_id) = &state.call_id
+                {
+                    call.call_id.clone_from(call_id);
+                }
+                if let Some(name) = &state.name {
+                    call.name.clone_from(name);
+                }
+            }
+
+            let complete = !call.call_id.trim().is_empty()
+                && !call.name.trim().is_empty()
+                && valid_json(&call.arguments)
+                && (arguments_done
+                    || call
+                        .status
+                        .is_none_or(|status| status == rs::OutputStatus::Completed));
+            if complete {
+                Some(item)
+            } else {
+                tracing::warn!(
+                    output_index,
+                    has_call_id = !call.call_id.trim().is_empty(),
+                    has_name = !call.name.trim().is_empty(),
+                    valid_arguments = valid_json(&call.arguments),
+                    "discarding incomplete Responses function call"
+                );
+                None
+            }
+        })
+        .collect();
+}
+
+fn incomplete_stop_reason(response: &rs::Response) -> StopReason {
+    match response
+        .incomplete_details
+        .as_ref()
+        .map(|details| details.reason.as_str())
+    {
+        Some("content_filter") => StopReason::ContentFilter,
+        // OpenAI currently documents `max_output_tokens`; some compatible
+        // gateways use the older `max_tokens` spelling.
+        Some("max_output_tokens" | "max_tokens") => StopReason::Length,
+        // Preserve the historical fail-closed behavior for a future
+        // incomplete reason: never let a partial tool call outrank it.
+        Some(_) | None => StopReason::Length,
+    }
+}
+
+fn response_contains_refusal(response: &rs::Response) -> bool {
+    response.output.iter().any(|item| {
+        let rs::OutputItem::Message(message) = item else {
+            return false;
+        };
+        message
+            .content
+            .iter()
+            .any(|content| matches!(content, rs::OutputMessageContent::Refusal(_)))
+    })
+}
+
+/// Translate an in-stream OpenAI error code to an HTTP-shaped sampler error.
+/// The retry loop already has well-tested behavior for these status classes,
+/// so keeping the mapping narrow avoids a second, divergent retry policy.
+fn response_stream_error(code: Option<&str>, message: &str) -> SamplingError {
+    let code = code.unwrap_or("error");
+    // Some compatible providers omit `code` but retain the standard class in
+    // the human-readable message, so classify over both fields.
+    let normalized = format!("{code} {message}").to_ascii_lowercase();
+    let status = if normalized.contains("auth")
+        || normalized.contains("api_key")
+        || normalized.contains("unauthorized")
+    {
+        reqwest::StatusCode::UNAUTHORIZED
+    } else if normalized.contains("permission") || normalized.contains("forbidden") {
+        reqwest::StatusCode::FORBIDDEN
+    } else if normalized.contains("insufficient_quota") || normalized.contains("billing") {
+        // A retry cannot change an account's quota or billing state.
+        reqwest::StatusCode::PAYMENT_REQUIRED
+    } else if normalized.contains("rate_limit") || normalized.contains("too_many_requests") {
+        reqwest::StatusCode::TOO_MANY_REQUESTS
+    } else if normalized.contains("server")
+        || normalized.contains("internal")
+        || normalized.contains("overload")
+        || normalized.contains("temporarily_unavailable")
+        || normalized.contains("service_unavailable")
+    {
+        reqwest::StatusCode::INTERNAL_SERVER_ERROR
+    } else if normalized.contains("context")
+        || normalized.contains("invalid")
+        || normalized.contains("unsupported")
+        || normalized.contains("not_found")
+        || normalized.contains("request")
+        || normalized.contains("content_filter")
+        || normalized.contains("moderation")
+        || normalized.contains("safety")
+        || normalized.contains("policy")
+        || normalized.contains("cancel")
+    {
+        reqwest::StatusCode::BAD_REQUEST
+    } else {
+        // Unknown in-stream errors historically retried as server failures;
+        // retain that forward-compatible behavior.
+        reqwest::StatusCode::INTERNAL_SERVER_ERROR
+    };
+
+    SamplingError::Api {
+        status,
+        message: format!("{code}: {message}"),
+        model_metadata: None,
+        retry_after_secs: None,
+        should_retry: Some(
+            status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS,
+        ),
+    }
+}
+
 /// Transform a raw Responses API event stream into a stream of
 /// [`SamplingEvent`]s.
 ///
 /// Yields exactly one terminal event ([`SamplingEvent::Completed`] or
 /// [`SamplingEvent::Failed`]) per request. Server-side `ResponseFailed`
-/// and `ResponseError` events are translated to
-/// `SamplingError::Api { status: 500, .. }` so the actor's retry loop
-/// treats them as retryable.
+/// and `ResponseError` events are translated to status-shaped
+/// [`SamplingError::Api`] values: authentication/client/context failures are
+/// fatal, while rate-limit/server failures retain the actor's normal retry
+/// behavior.
 ///
 /// `doom_loop` is the collector returned alongside `raw_stream` by
 /// `SamplingClient::conversation_stream_responses`; any signals the SSE
@@ -117,17 +288,21 @@ pub fn stream_responses<'a>(
         }
 
         let mut final_response: Option<rs::Response> = None;
+        let mut terminal_incomplete_reason: Option<StopReason> = None;
         let mut chunk_index: u64 = 0;
         let mut message_chunk_count: u64 = 0;
         let mut first_token_emitted = false;
         let mut reasoning_acc = String::new();
+        let mut reasoning_summaries: BTreeMap<(u32, u32), String> = BTreeMap::new();
+        let mut refusal_parts: BTreeMap<(u32, u32), String> = BTreeMap::new();
+        let mut refusal_seen = false;
         let mut last_content_chunk_at = Instant::now();
 
-        // Maps Responses API `output_index` to our tool-only `tool_index`.
-        // Populated when `ResponseOutputItemAdded` carries a `FunctionCall`;
-        // later `ResponseFunctionCallArgumentsDelta` events
-        // look up `output_index` here to find the matching `tool_index`.
-        let mut output_to_tool_index: BTreeMap<u32, u32> = BTreeMap::new();
+        // Maps Responses API `output_index` to streamed tool state. Populated
+        // by `ResponseOutputItemAdded`; argument deltas update it, and the
+        // authoritative done payload is applied to the terminal response.
+        let mut streamed_tool_calls: BTreeMap<u32, StreamedToolCall> = BTreeMap::new();
+        let mut x_search_item_ids: BTreeSet<String> = BTreeSet::new();
         let mut next_tool_index: u32 = 0;
 
         let mut stream = raw_stream;
@@ -203,9 +378,92 @@ pub fn stream_responses<'a>(
                     }
                 }
 
+                ResponseStreamEvent::ResponseContentPartAdded(content_event) => {
+                    if let rs::OutputContent::Refusal(refusal) = content_event.part {
+                        refusal_seen = true;
+                        if !refusal.refusal.is_empty() {
+                            refusal_parts
+                                .entry((content_event.output_index, content_event.content_index))
+                                .or_insert(refusal.refusal);
+                        }
+                    }
+                }
+
+                ResponseStreamEvent::ResponseContentPartDone(content_event) => {
+                    if let rs::OutputContent::Refusal(refusal) = content_event.part {
+                        refusal_seen = true;
+                        refusal_parts.insert(
+                            (content_event.output_index, content_event.content_index),
+                            refusal.refusal,
+                        );
+                    }
+                }
+
+                ResponseStreamEvent::ResponseRefusalDelta(refusal_event) => {
+                    let delta = refusal_event.delta;
+                    refusal_seen = true;
+                    if !delta.is_empty() {
+                        refusal_parts
+                            .entry((refusal_event.output_index, refusal_event.content_index))
+                            .or_default()
+                            .push_str(&delta);
+                        if !first_token_emitted {
+                            first_token_emitted = true;
+                            yield SamplingEvent::FirstToken {
+                                request_id: request_id.clone(),
+                            };
+                        }
+                        chunk_timestamps.push(Instant::now());
+                        chunk_index += 1;
+                        message_chunk_count += 1;
+                        yield SamplingEvent::ChannelToken {
+                            request_id: request_id.clone(),
+                            channel: SamplingChannel::Text,
+                            text: delta,
+                            chunk_index,
+                        };
+                    }
+                }
+
+                ResponseStreamEvent::ResponseRefusalDone(refusal_event) => {
+                    let key = (refusal_event.output_index, refusal_event.content_index);
+                    let refusal = refusal_event.refusal;
+                    refusal_seen = true;
+                    let suffix = {
+                        let streamed = refusal_parts.entry(key).or_default();
+                        let suffix = refusal
+                            .strip_prefix(streamed.as_str())
+                            .filter(|suffix| !suffix.is_empty())
+                            .map(str::to_owned);
+                        streamed.clone_from(&refusal);
+                        suffix
+                    };
+                    if let Some(suffix) = suffix {
+                        if !first_token_emitted {
+                            first_token_emitted = true;
+                            yield SamplingEvent::FirstToken {
+                                request_id: request_id.clone(),
+                            };
+                        }
+                        chunk_timestamps.push(Instant::now());
+                        chunk_index += 1;
+                        message_chunk_count += 1;
+                        yield SamplingEvent::ChannelToken {
+                            request_id: request_id.clone(),
+                            channel: SamplingChannel::Text,
+                            text: suffix,
+                            chunk_index,
+                        };
+                    }
+                }
+
                 ResponseStreamEvent::ResponseReasoningSummaryTextDelta(summary_event) => {
                     let delta = summary_event.delta;
                     if !delta.is_empty() {
+                        reasoning_summaries
+                            .entry((summary_event.output_index, summary_event.summary_index))
+                            .or_default()
+                            .push_str(&delta);
                         if !first_token_emitted {
                             first_token_emitted = true;
                             yield SamplingEvent::FirstToken {
@@ -217,6 +475,35 @@ pub fn stream_responses<'a>(
                             request_id: request_id.clone(),
                             channel: SamplingChannel::Reasoning,
                             text: delta,
+                            chunk_index,
+                        };
+                    }
+                }
+
+                ResponseStreamEvent::ResponseReasoningSummaryTextDone(summary_event) => {
+                    let key = (summary_event.output_index, summary_event.summary_index);
+                    let text = summary_event.text;
+                    let suffix = {
+                        let streamed = reasoning_summaries.entry(key).or_default();
+                        let suffix = text
+                            .strip_prefix(streamed.as_str())
+                            .filter(|suffix| !suffix.is_empty())
+                            .map(str::to_owned);
+                        streamed.clone_from(&text);
+                        suffix
+                    };
+                    if let Some(suffix) = suffix {
+                        if !first_token_emitted {
+                            first_token_emitted = true;
+                            yield SamplingEvent::FirstToken {
+                                request_id: request_id.clone(),
+                            };
+                        }
+                        chunk_index += 1;
+                        yield SamplingEvent::ChannelToken {
+                            request_id: request_id.clone(),
+                            channel: SamplingChannel::Reasoning,
+                            text: suffix,
                             chunk_index,
                         };
                     }
@@ -245,18 +532,42 @@ pub fn stream_responses<'a>(
                 // Start of a Responses FunctionCall — emit initial id+name
                 // and remember the output_index → tool_index mapping.
                 ResponseStreamEvent::ResponseOutputItemAdded(added_event) => {
-                    if let rs::OutputItem::FunctionCall(fc) = added_event.item {
-                        let tool_index = next_tool_index;
-                        next_tool_index += 1;
-                        output_to_tool_index.insert(added_event.output_index, tool_index);
+                    match added_event.item {
+                        rs::OutputItem::FunctionCall(fc) => {
+                            let tool_index = next_tool_index;
+                            next_tool_index += 1;
+                            let call_id = nonempty(fc.call_id);
+                            let name = nonempty(fc.name);
+                            let streamed_arguments = fc.arguments;
+                            streamed_tool_calls.insert(
+                                added_event.output_index,
+                                StreamedToolCall {
+                                    tool_index,
+                                    call_id: call_id.clone(),
+                                    name: name.clone(),
+                                    streamed_arguments,
+                                    done_arguments: None,
+                                },
+                            );
 
-                        yield SamplingEvent::ToolCallDelta {
-                            request_id: request_id.clone(),
-                            tool_index,
-                            id: Some(fc.call_id),
-                            name: Some(fc.name),
-                            arguments_delta: None,
-                        };
+                            if call_id.is_some() || name.is_some() {
+                                yield SamplingEvent::ToolCallDelta {
+                                    request_id: request_id.clone(),
+                                    tool_index,
+                                    id: call_id,
+                                    name,
+                                    arguments_delta: None,
+                                };
+                            }
+                        }
+                        rs::OutputItem::CustomToolCall(custom)
+                            if xai_grok_sampling_types::is_x_search_custom_tool_name(
+                                &custom.name,
+                            ) =>
+                        {
+                            x_search_item_ids.insert(custom.id);
+                        }
+                        _ => {}
                     }
                 }
 
@@ -264,10 +575,13 @@ pub fn stream_responses<'a>(
                 // Drop silently if no preceding OutputItemAdded mapped.
                 ResponseStreamEvent::ResponseFunctionCallArgumentsDelta(args_event) => {
                     let delta = args_event.delta;
-                    if !delta.is_empty()
-                        && let Some(&tool_index) =
-                            output_to_tool_index.get(&args_event.output_index)
-                    {
+                    let tool_index = streamed_tool_calls
+                        .get_mut(&args_event.output_index)
+                        .map(|state| {
+                            state.streamed_arguments.push_str(&delta);
+                            state.tool_index
+                        });
+                    if !delta.is_empty() && let Some(tool_index) = tool_index {
                         yield SamplingEvent::ToolCallDelta {
                             request_id: request_id.clone(),
                             tool_index,
@@ -278,29 +592,64 @@ pub fn stream_responses<'a>(
                     }
                 }
 
+                ResponseStreamEvent::ResponseFunctionCallArgumentsDone(args_event) => {
+                    let update = streamed_tool_calls
+                        .get_mut(&args_event.output_index)
+                        .and_then(|state| {
+                            let done_name = args_event.name.and_then(nonempty);
+                            if let Some(name) = &done_name {
+                                state.name.clone_from(&Some(name.clone()));
+                            }
+
+                            let duplicate = state.done_arguments.as_deref()
+                                == Some(args_event.arguments.as_str());
+                            let suffix = args_event
+                                .arguments
+                                .strip_prefix(state.streamed_arguments.as_str())
+                                .filter(|suffix| !suffix.is_empty())
+                                .map(str::to_owned);
+                            state.streamed_arguments.clone_from(&args_event.arguments);
+                            state.done_arguments = Some(args_event.arguments.clone());
+
+                            let complete = state.call_id.is_some()
+                                && state.name.is_some()
+                                && valid_json(&args_event.arguments);
+                            (!duplicate && complete).then_some((
+                                state.tool_index,
+                                done_name,
+                                suffix,
+                            ))
+                        });
+                    if let Some((tool_index, name, arguments_delta)) = update
+                        && (name.is_some() || arguments_delta.is_some())
+                    {
+                        yield SamplingEvent::ToolCallDelta {
+                            request_id: request_id.clone(),
+                            tool_index,
+                            id: None,
+                            name,
+                            arguments_delta,
+                        };
+                    }
+                }
+
                 ResponseStreamEvent::ResponseCompleted(completed_event) => {
                     final_response = Some(completed_event.response);
                 }
 
                 ResponseStreamEvent::ResponseIncomplete(incomplete_event) => {
-                    final_response = Some(incomplete_event.response);
+                    let response = incomplete_event.response;
+                    terminal_incomplete_reason = Some(incomplete_stop_reason(&response));
+                    final_response = Some(response);
                     should_break = true;
                 }
 
                 ResponseStreamEvent::ResponseFailed(failed_event) => {
                     let response = failed_event.response;
-                    let error_message = response
-                        .error
-                        .as_ref()
-                        .map(|e| format!("{}: {}", e.code, e.message))
-                        .unwrap_or_else(|| "Response failed with unknown error".to_string());
-                    let err = SamplingError::Api {
-                        status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
-                        message: error_message,
-                        model_metadata: None,
-                        retry_after_secs: None,
-                        should_retry: None,
-                    };
+                    let err = response.error.as_ref().map_or_else(
+                        || response_stream_error(None, "Response failed with unknown error"),
+                        |error| response_stream_error(Some(&error.code), &error.message),
+                    );
                     yield SamplingEvent::Failed {
                         request_id: request_id.clone(),
                         error: SamplingErrorInfo::from(&err),
@@ -309,15 +658,10 @@ pub fn stream_responses<'a>(
                 }
 
                 ResponseStreamEvent::ResponseError(error_event) => {
-                    let code = error_event.code.unwrap_or_else(|| "error".to_string());
-                    let error_message = format!("{}: {}", code, error_event.message);
-                    let err = SamplingError::Api {
-                        status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
-                        message: error_message,
-                        model_metadata: None,
-                        retry_after_secs: None,
-                        should_retry: None,
-                    };
+                    let err = response_stream_error(
+                        error_event.code.as_deref(),
+                        &error_event.message,
+                    );
                     yield SamplingEvent::Failed {
                         request_id: request_id.clone(),
                         error: SamplingErrorInfo::from(&err),
@@ -363,13 +707,15 @@ pub fn stream_responses<'a>(
                         // the specific sub-type is in the serialized result payload
                         // and extracted by the pager from raw_output.name.
                         rs::OutputItem::CustomToolCall(ct) => {
-                            let result = serde_json::to_value(ct).ok();
-                            yield SamplingEvent::BackendToolCallCompleted {
-                                request_id: request_id.clone(),
-                                call_id: ct.id.clone(),
-                                name: "x_search".to_string(),
-                                result,
-                            };
+                            if xai_grok_sampling_types::is_x_search_custom_tool_name(&ct.name) {
+                                let result = serde_json::to_value(ct).ok();
+                                yield SamplingEvent::BackendToolCallCompleted {
+                                    request_id: request_id.clone(),
+                                    call_id: ct.id.clone(),
+                                    name: "x_search".to_string(),
+                                    result,
+                                };
+                            }
                         }
                         _ => {}
                     }
@@ -378,11 +724,13 @@ pub fn stream_responses<'a>(
                 // CustomToolCallInputDelta is x_search in-progress streaming.
                 // Emit a started event on first delta per item_id.
                 ResponseStreamEvent::ResponseCustomToolCallInputDone(ev) => {
-                    yield SamplingEvent::BackendToolCallStarted {
-                        request_id: request_id.clone(),
-                        call_id: ev.item_id.clone(),
-                        name: "x_search".to_string(),
-                    };
+                    if x_search_item_ids.contains(&ev.item_id) {
+                        yield SamplingEvent::BackendToolCallStarted {
+                            request_id: request_id.clone(),
+                            call_id: ev.item_id.clone(),
+                            name: "x_search".to_string(),
+                        };
+                    }
                 }
 
                 // All other events (intermediate progress, annotations,
@@ -429,6 +777,15 @@ pub fn stream_responses<'a>(
             }
         };
 
+        refusal_seen |= response_contains_refusal(&response);
+        let incomplete_reason = terminal_incomplete_reason.or_else(|| {
+            (response.status == rs::Status::Incomplete).then(|| incomplete_stop_reason(&response))
+        });
+        let allow_tool_calls = incomplete_reason.is_none()
+            && response.status == rs::Status::Completed
+            && !refusal_seen;
+        finalize_function_calls(&mut response, &streamed_tool_calls, allow_tool_calls);
+
         // Billing fields (`prompt_tokens`, `completion_tokens`,
         // `cached_prompt_tokens`, `reasoning_tokens`) are the cumulative
         // wire values — they sum across every server-side turn of the
@@ -462,14 +819,55 @@ pub fn stream_responses<'a>(
         // `summary` (the streaming deltas may have arrived out of band).
         // Splice policy lives in `inject_streaming_reasoning_fallback`.
         let mut items = xai_grok_sampling_types::response_to_conversation_items(response);
-        xai_grok_sampling_types::inject_streaming_reasoning_fallback(&mut items, reasoning_acc);
+        let summary_acc = reasoning_summaries
+            .into_values()
+            .filter(|summary| !summary.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let reasoning_fallback = if summary_acc.is_empty() {
+            reasoning_acc
+        } else if reasoning_acc.is_empty() || summary_acc.contains(&reasoning_acc) {
+            summary_acc
+        } else {
+            format!("{summary_acc}\n{reasoning_acc}")
+        };
+        xai_grok_sampling_types::inject_streaming_reasoning_fallback(
+            &mut items,
+            reasoning_fallback,
+        );
+
+        // Some compatible gateways omit the refusal content from the final
+        // response object even though they streamed refusal events. Preserve
+        // the authoritative done text so the UI and persisted turn never see
+        // an apparently empty completion.
+        let refusal_fallback = refusal_parts
+            .into_values()
+            .filter(|refusal| !refusal.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if refusal_seen
+            && !refusal_fallback.is_empty()
+            && let Some(ConversationItem::Assistant(assistant)) = items
+                .iter_mut()
+                .find(|item| matches!(item, ConversationItem::Assistant(_)))
+            && assistant.content.is_empty()
+        {
+            assistant.content = std::sync::Arc::<str>::from(refusal_fallback);
+        }
 
         let has_tool_calls = items.iter().any(|i| match i {
             ConversationItem::Assistant(a) => !a.tool_calls.is_empty(),
             _ => false,
         });
 
-        let stop_reason = if has_tool_calls {
+        let stop_reason = if let Some(incomplete_reason) = incomplete_reason {
+            // An incomplete terminal frame always outranks partial tool output.
+            Some(incomplete_reason)
+        } else if refusal_seen {
+            // Refusal is a successful, deterministic terminal outcome. Mark it
+            // explicitly so an empty refusal body still never retry-storms.
+            Some(StopReason::ContentFilter)
+        } else if has_tool_calls {
             Some(StopReason::ToolCalls)
         } else {
             match status {
@@ -588,10 +986,146 @@ mod tests {
     }
 
     fn completed_event() -> rs::ResponseStreamEvent {
+        completed_event_with_response(empty_completed_response())
+    }
+
+    fn completed_event_with_response(response: rs_types::Response) -> rs::ResponseStreamEvent {
         rs::ResponseStreamEvent::ResponseCompleted(rs_types::ResponseCompletedEvent {
-            response: empty_completed_response(),
+            response,
             sequence_number: 0,
         })
+    }
+
+    fn incomplete_event(reason: &str, mut response: rs_types::Response) -> rs::ResponseStreamEvent {
+        response.status = rs_types::Status::Incomplete;
+        response.incomplete_details = Some(rs_types::IncompleteDetails {
+            reason: reason.into(),
+        });
+        rs::ResponseStreamEvent::ResponseIncomplete(rs_types::ResponseIncompleteEvent {
+            response,
+            sequence_number: 0,
+        })
+    }
+
+    fn response_with_function_call(
+        arguments: &str,
+        call_id: &str,
+        name: &str,
+        status: Option<rs_types::OutputStatus>,
+    ) -> rs_types::Response {
+        let mut response = empty_completed_response();
+        response.output = vec![rs_types::OutputItem::FunctionCall(
+            rs_types::FunctionToolCall {
+                arguments: arguments.into(),
+                call_id: call_id.into(),
+                name: name.into(),
+                id: Some("fc_1".into()),
+                status,
+            },
+        )];
+        response
+    }
+
+    fn response_with_refusal(refusal: &str) -> rs_types::Response {
+        let mut response = empty_completed_response();
+        response.output = vec![rs_types::OutputItem::Message(rs_types::OutputMessage {
+            content: vec![rs_types::OutputMessageContent::Refusal(
+                rs_types::RefusalContent {
+                    refusal: refusal.into(),
+                },
+            )],
+            id: "msg_1".into(),
+            role: rs_types::AssistantRole::Assistant,
+            status: rs_types::OutputStatus::Completed,
+        })];
+        response
+    }
+
+    fn custom_tool_call(name: &str) -> rs_types::CustomToolCall {
+        serde_json::from_value(serde_json::json!({
+            "call_id": "custom_call_1",
+            "input": "example input",
+            "name": name,
+            "id": "custom_item_1"
+        }))
+        .expect("valid custom tool call")
+    }
+
+    fn response_with_custom_tool_call(name: &str) -> rs_types::Response {
+        let mut response = empty_completed_response();
+        response.output = vec![rs_types::OutputItem::CustomToolCall(custom_tool_call(name))];
+        response
+    }
+
+    fn custom_tool_added_event(name: &str) -> rs::ResponseStreamEvent {
+        rs::ResponseStreamEvent::ResponseOutputItemAdded(rs_types::ResponseOutputItemAddedEvent {
+            sequence_number: 0,
+            output_index: 0,
+            item: rs_types::OutputItem::CustomToolCall(custom_tool_call(name)),
+        })
+    }
+
+    fn custom_tool_input_done_event() -> rs::ResponseStreamEvent {
+        rs::ResponseStreamEvent::ResponseCustomToolCallInputDone(
+            rs_types::ResponseCustomToolCallInputDoneEvent {
+                sequence_number: 0,
+                output_index: 0,
+                item_id: "custom_item_1".into(),
+                input: "example input".into(),
+            },
+        )
+    }
+
+    fn custom_tool_output_done_event(name: &str) -> rs::ResponseStreamEvent {
+        rs::ResponseStreamEvent::ResponseOutputItemDone(rs_types::ResponseOutputItemDoneEvent {
+            sequence_number: 0,
+            output_index: 0,
+            item: rs_types::OutputItem::CustomToolCall(custom_tool_call(name)),
+        })
+    }
+
+    fn refusal_delta_event(delta: &str) -> rs::ResponseStreamEvent {
+        rs::ResponseStreamEvent::ResponseRefusalDelta(rs_types::ResponseRefusalDeltaEvent {
+            sequence_number: 0,
+            item_id: "msg_1".into(),
+            output_index: 0,
+            content_index: 0,
+            delta: delta.into(),
+        })
+    }
+
+    fn refusal_done_event(refusal: &str) -> rs::ResponseStreamEvent {
+        rs::ResponseStreamEvent::ResponseRefusalDone(rs_types::ResponseRefusalDoneEvent {
+            sequence_number: 0,
+            item_id: "msg_1".into(),
+            output_index: 0,
+            content_index: 0,
+            refusal: refusal.into(),
+        })
+    }
+
+    fn reasoning_summary_delta_event(delta: &str) -> rs::ResponseStreamEvent {
+        rs::ResponseStreamEvent::ResponseReasoningSummaryTextDelta(
+            rs_types::ResponseReasoningSummaryTextDeltaEvent {
+                sequence_number: 0,
+                item_id: "reasoning_1".into(),
+                output_index: 0,
+                summary_index: 0,
+                delta: delta.into(),
+            },
+        )
+    }
+
+    fn reasoning_summary_done_event(text: &str) -> rs::ResponseStreamEvent {
+        rs::ResponseStreamEvent::ResponseReasoningSummaryTextDone(
+            rs_types::ResponseReasoningSummaryTextDoneEvent {
+                sequence_number: 0,
+                item_id: "reasoning_1".into(),
+                output_index: 0,
+                summary_index: 0,
+                text: text.into(),
+            },
+        )
     }
 
     async fn collect(s: impl Stream<Item = SamplingEvent>) -> Vec<SamplingEvent> {
@@ -659,12 +1193,293 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn refusal_is_visible_content_and_terminal_content_filter() {
+        let raw = stream::iter(vec![
+            Ok(refusal_delta_event("I can't help")),
+            // The done event is authoritative but must not duplicate the
+            // already-streamed text.
+            Ok(refusal_done_event("I can't help")),
+            // Exercise the gateway fallback where the terminal object omits
+            // the refusal content entirely.
+            Ok(completed_event()),
+        ])
+        .boxed();
+        let events = collect(stream_responses(
+            raw,
+            None,
+            rid(),
+            Duration::from_secs(60),
+            None,
+        ))
+        .await;
+
+        let visible: Vec<&str> = events
+            .iter()
+            .filter_map(|event| match event {
+                SamplingEvent::ChannelToken {
+                    channel: SamplingChannel::Text,
+                    text,
+                    ..
+                } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(visible, vec!["I can't help"]);
+
+        match events.last().unwrap() {
+            SamplingEvent::Completed { response, .. } => {
+                assert_eq!(response.stop_reason, Some(StopReason::ContentFilter));
+                assert_eq!(
+                    response.assistant().expect("assistant").content.as_ref(),
+                    "I can't help"
+                );
+            }
+            other => panic!("expected Completed refusal, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_response_refusal_content_is_preserved() {
+        let raw = stream::iter(vec![Ok(completed_event_with_response(
+            response_with_refusal("I cannot assist with that."),
+        ))])
+        .boxed();
+        let events = collect(stream_responses(
+            raw,
+            None,
+            rid(),
+            Duration::from_secs(60),
+            None,
+        ))
+        .await;
+
+        match events.last().unwrap() {
+            SamplingEvent::Completed { response, .. } => {
+                assert_eq!(response.stop_reason, Some(StopReason::ContentFilter));
+                assert_eq!(
+                    response.assistant().expect("assistant").content.as_ref(),
+                    "I cannot assist with that."
+                );
+            }
+            other => panic!("expected Completed refusal, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_refusal_is_still_terminal_content_filter() {
+        let raw = stream::iter(vec![Ok(completed_event_with_response(
+            response_with_refusal(""),
+        ))])
+        .boxed();
+        let events = collect(stream_responses(
+            raw,
+            None,
+            rid(),
+            Duration::from_secs(60),
+            None,
+        ))
+        .await;
+
+        match events.last().unwrap() {
+            SamplingEvent::Completed { response, .. } => {
+                assert_eq!(response.stop_reason, Some(StopReason::ContentFilter));
+                assert!(response.assistant().expect("assistant").content.is_empty());
+            }
+            other => panic!("expected Completed refusal, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn reasoning_summary_done_completes_fallback_without_duplication() {
+        let raw = stream::iter(vec![
+            Ok(reasoning_summary_delta_event("Plan ")),
+            Ok(reasoning_summary_done_event("Plan safely")),
+            Ok(completed_event()),
+        ])
+        .boxed();
+        let events = collect(stream_responses(
+            raw,
+            None,
+            rid(),
+            Duration::from_secs(60),
+            None,
+        ))
+        .await;
+
+        let reasoning_tokens: Vec<&str> = events
+            .iter()
+            .filter_map(|event| match event {
+                SamplingEvent::ChannelToken {
+                    channel: SamplingChannel::Reasoning,
+                    text,
+                    ..
+                } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(reasoning_tokens, vec!["Plan ", "safely"]);
+
+        match events.last().unwrap() {
+            SamplingEvent::Completed { response, .. } => {
+                let reasoning = response.reasoning_items().next().expect("reasoning");
+                assert_eq!(
+                    xai_grok_sampling_types::reasoning_item_text(reasoning),
+                    "Plan safely"
+                );
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn incomplete_length_outranks_and_discards_partial_tool_call() {
+        for reason in ["max_output_tokens", "max_tokens"] {
+            let response = response_with_function_call(
+                "{\"path\":",
+                "call_partial",
+                "read_file",
+                Some(rs_types::OutputStatus::Incomplete),
+            );
+            let raw = stream::iter(vec![
+                Ok(function_call_added_event(0, "call_partial", "read_file")),
+                Ok(function_call_args_delta_event(0, "{\"path\":")),
+                Ok(incomplete_event(reason, response)),
+            ])
+            .boxed();
+            let events = collect(stream_responses(
+                raw,
+                None,
+                rid(),
+                Duration::from_secs(60),
+                None,
+            ))
+            .await;
+
+            match events.last().unwrap() {
+                SamplingEvent::Completed { response, .. } => {
+                    assert_eq!(response.stop_reason, Some(StopReason::Length));
+                    assert!(response.tool_calls().is_empty());
+                }
+                other => panic!("expected incomplete Completed, got {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn incomplete_content_filter_outranks_and_discards_tool_call() {
+        let response = response_with_function_call(
+            "{}",
+            "call_filtered",
+            "dangerous_tool",
+            Some(rs_types::OutputStatus::Completed),
+        );
+        let raw = stream::iter(vec![Ok(incomplete_event("content_filter", response))]).boxed();
+        let events = collect(stream_responses(
+            raw,
+            None,
+            rid(),
+            Duration::from_secs(60),
+            None,
+        ))
+        .await;
+
+        match events.last().unwrap() {
+            SamplingEvent::Completed { response, .. } => {
+                assert_eq!(response.stop_reason, Some(StopReason::ContentFilter));
+                assert!(response.tool_calls().is_empty());
+            }
+            other => panic!("expected filtered Completed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn provider_neutral_custom_tool_is_never_labeled_or_persisted_as_x_search() {
+        let raw = stream::iter(vec![
+            Ok(custom_tool_added_event("python")),
+            Ok(custom_tool_input_done_event()),
+            Ok(custom_tool_output_done_event("python")),
+            Ok(completed_event_with_response(
+                response_with_custom_tool_call("python"),
+            )),
+        ])
+        .boxed();
+        let events = collect(stream_responses(
+            raw,
+            None,
+            rid(),
+            Duration::from_secs(60),
+            None,
+        ))
+        .await;
+
+        assert!(!events.iter().any(|event| {
+            matches!(
+                event,
+                SamplingEvent::BackendToolCallStarted { name, .. }
+                    | SamplingEvent::BackendToolCallCompleted { name, .. }
+                    if name == "x_search"
+            )
+        }));
+        match events.last().unwrap() {
+            SamplingEvent::Completed { response, .. } => {
+                assert_eq!(response.backend_tool_items().count(), 0);
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn exact_x_search_custom_tool_retains_x_search_lifecycle_and_history() {
+        let raw = stream::iter(vec![
+            Ok(custom_tool_added_event("x_keyword_search")),
+            Ok(custom_tool_input_done_event()),
+            Ok(custom_tool_output_done_event("x_keyword_search")),
+            Ok(completed_event_with_response(
+                response_with_custom_tool_call("x_keyword_search"),
+            )),
+        ])
+        .boxed();
+        let events = collect(stream_responses(
+            raw,
+            None,
+            rid(),
+            Duration::from_secs(60),
+            None,
+        ))
+        .await;
+
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                SamplingEvent::BackendToolCallStarted { name, .. } if name == "x_search"
+            )
+        }));
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                SamplingEvent::BackendToolCallCompleted { name, .. } if name == "x_search"
+            )
+        }));
+        match events.last().unwrap() {
+            SamplingEvent::Completed { response, .. } => {
+                assert_eq!(response.backend_tool_items().count(), 1);
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn response_failed_yields_failed_500() {
         let failed = rs::ResponseStreamEvent::ResponseFailed(rs_types::ResponseFailedEvent {
             response: failed_response_with_error("boom"),
             sequence_number: 0,
         });
-        let raw = stream::iter(vec![Ok(failed)]).boxed();
+        let raw = stream::iter(vec![
+            Ok(function_call_added_event(0, "call_partial", "read_file")),
+            Ok(function_call_args_delta_event(0, "{")),
+            Ok(failed),
+        ])
+        .boxed();
         let events = collect(stream_responses(
             raw,
             None,
@@ -682,6 +1497,40 @@ mod tests {
             }
             other => panic!("expected Failed, got {other:?}"),
         }
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, SamplingEvent::Completed { .. }))
+        );
+    }
+
+    #[test]
+    fn streamed_error_codes_map_to_conservative_retry_classes() {
+        let cases = [
+            ("invalid_api_key", 401, false),
+            ("context_length_exceeded", 400, false),
+            ("invalid_request_error", 400, false),
+            ("content_filter", 400, false),
+            ("insufficient_quota", 402, false),
+            ("rate_limit_exceeded", 429, true),
+            ("server_error", 500, true),
+            ("future_unknown_error", 500, true),
+        ];
+
+        for (code, expected_status, expected_retryable) in cases {
+            let error = response_stream_error(Some(code), "test message");
+            let SamplingError::Api { status, .. } = &error else {
+                panic!("expected Api error for {code}");
+            };
+            assert_eq!(status.as_u16(), expected_status, "code={code}");
+            assert_eq!(error.is_retryable(), expected_retryable, "code={code}");
+        }
+
+        let missing_code = response_stream_error(None, "Invalid request: malformed tool input");
+        let SamplingError::Api { status, .. } = missing_code else {
+            panic!("expected Api error without a code");
+        };
+        assert_eq!(status, reqwest::StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
@@ -795,6 +1644,22 @@ mod tests {
         )
     }
 
+    fn function_call_args_done_event(
+        output_index: u32,
+        name: Option<&str>,
+        arguments: &str,
+    ) -> rs::ResponseStreamEvent {
+        rs::ResponseStreamEvent::ResponseFunctionCallArgumentsDone(
+            rs_types::ResponseFunctionCallArgumentsDoneEvent {
+                name: name.map(str::to_owned),
+                sequence_number: 0,
+                item_id: format!("item-{output_index}"),
+                output_index,
+                arguments: arguments.into(),
+            },
+        )
+    }
+
     type Delta = (u32, Option<String>, Option<String>, Option<String>);
 
     /// Extract all ToolCallDelta events as (tool_index, id, name, arguments_delta).
@@ -847,6 +1712,86 @@ mod tests {
         assert_eq!(deltas[1].2, None);
         assert_eq!(deltas[1].3.as_deref(), Some("{\"x\":"));
         assert_eq!(deltas[2].3.as_deref(), Some("1}"));
+    }
+
+    #[tokio::test]
+    async fn function_call_done_is_authoritative_and_deduplicated() {
+        let terminal = response_with_function_call(
+            "{\"x\":",
+            "call_xyz",
+            "do_thing",
+            // `arguments.done` is authoritative even if a compatible
+            // provider leaves the echoed item status stale.
+            Some(rs_types::OutputStatus::InProgress),
+        );
+        let events: Vec<Result<rs::ResponseStreamEvent, SamplingError>> = vec![
+            Ok(function_call_added_event(0, "call_xyz", "do_thing")),
+            Ok(function_call_args_delta_event(0, "{\"x\":")),
+            Ok(function_call_args_done_event(
+                0,
+                Some("do_thing"),
+                "{\"x\":1}",
+            )),
+            // Duplicate terminal events are allowed by some gateways during
+            // reconnect; they must not duplicate the arguments in the UI.
+            Ok(function_call_args_done_event(
+                0,
+                Some("do_thing"),
+                "{\"x\":1}",
+            )),
+            Ok(completed_event_with_response(terminal)),
+        ];
+        let raw = stream::iter(events).boxed();
+        let evs = collect(stream_responses(
+            raw,
+            None,
+            rid(),
+            Duration::from_secs(60),
+            None,
+        ))
+        .await;
+        let deltas = tool_call_deltas(&evs);
+
+        assert_eq!(deltas.len(), 3);
+        assert_eq!(deltas[1].3.as_deref(), Some("{\"x\":"));
+        assert_eq!(deltas[2].3.as_deref(), Some("1}"));
+        match evs.last().unwrap() {
+            SamplingEvent::Completed { response, .. } => {
+                assert_eq!(response.stop_reason, Some(StopReason::ToolCalls));
+                let calls = response.tool_calls();
+                assert_eq!(calls.len(), 1);
+                assert_eq!(calls[0].id.as_ref(), "call_xyz");
+                assert_eq!(calls[0].name, "do_thing");
+                assert_eq!(calls[0].arguments.as_ref(), "{\"x\":1}");
+            }
+            other => panic!("expected completed ToolCalls, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn incomplete_function_call_never_becomes_tool_use() {
+        for terminal in [
+            response_with_function_call("{}", "", "do_thing", None),
+            response_with_function_call("{}", "call_1", "", None),
+            response_with_function_call("{", "call_1", "do_thing", None),
+        ] {
+            let raw = stream::iter(vec![Ok(completed_event_with_response(terminal))]).boxed();
+            let evs = collect(stream_responses(
+                raw,
+                None,
+                rid(),
+                Duration::from_secs(60),
+                None,
+            ))
+            .await;
+            match evs.last().unwrap() {
+                SamplingEvent::Completed { response, .. } => {
+                    assert_eq!(response.stop_reason, Some(StopReason::Stop));
+                    assert!(response.tool_calls().is_empty());
+                }
+                other => panic!("expected safe Completed, got {other:?}"),
+            }
+        }
     }
 
     #[tokio::test]

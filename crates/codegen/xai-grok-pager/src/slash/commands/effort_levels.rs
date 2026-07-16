@@ -1,3 +1,4 @@
+// Modified in 2026 by the ocque41 OpenAI-support fork; see FORK-NOTICE.md.
 //! Shared reasoning-effort dropdown levels for `/model` and `/effort`.
 
 use xai_grok_shell::sampling::types::{ReasoningEffort, ReasoningEffortOption};
@@ -20,7 +21,8 @@ pub(crate) fn effort_description(level: ReasoningEffort) -> &'static str {
         ReasoningEffort::Low => "Faster, lighter reasoning",
         ReasoningEffort::Medium => "Balanced reasoning",
         ReasoningEffort::High => "Heavy reasoning",
-        ReasoningEffort::Xhigh => "Maximum reasoning",
+        ReasoningEffort::Xhigh => "Extra-high reasoning",
+        ReasoningEffort::Max => "Maximum reasoning",
     }
 }
 

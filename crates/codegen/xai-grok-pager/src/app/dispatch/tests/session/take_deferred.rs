@@ -1,3 +1,4 @@
+// Modified in 2026 by the ocque41 OpenAI-support fork; see FORK-NOTICE.md.
 use crate::acp::model_state::{EffortTokenError, ModelState};
 use crate::app::dispatch::session::lifecycle::{DeferredSwitchOutcome, take_deferred_model_switch};
 use agent_client_protocol as acp;
@@ -183,16 +184,46 @@ fn stashed_model_keeps_model_when_unsupported() {
 }
 
 #[test]
-fn effort_only_accepts_max_as_xhigh() {
+fn effort_only_does_not_alias_max_to_xhigh() {
     let models = models_with_current(true);
     let out = take_deferred_model_switch(None, &models, Some("max"));
     assert_eq!(
         out,
         DeferredSwitchOutcome {
-            switch: Some((
-                models.current.clone().unwrap(),
-                Some(ReasoningEffort::Xhigh)
-            )),
+            switch: None,
+            effort_error: Some(EffortTokenError::UnknownToken {
+                token: "max".into(),
+                offered: vec!["deep".into(), "high".into()],
+            }),
+        }
+    );
+}
+
+#[test]
+fn effort_only_accepts_max_when_model_offers_max() {
+    let id = acp::ModelId::new(Arc::from("openai-model"));
+    let info = acp::ModelInfo::new(id.clone(), id.0.to_string()).meta(Some(
+        serde_json::json!({
+            "supportsReasoningEffort": true,
+            "reasoningEffort": "medium",
+            "reasoningEfforts": [
+                { "id": "xhigh", "value": "xhigh", "label": "X-High" },
+                { "id": "max", "value": "max", "label": "Max" },
+            ],
+        })
+        .as_object()
+        .cloned()
+        .unwrap(),
+    ));
+    let mut models = ModelState::default();
+    models.available.insert(id.clone(), info);
+    models.current = Some(id.clone());
+    models.reasoning_effort = Some(ReasoningEffort::Medium);
+
+    assert_eq!(
+        take_deferred_model_switch(None, &models, Some("max")),
+        DeferredSwitchOutcome {
+            switch: Some((id, Some(ReasoningEffort::Max))),
             effort_error: None,
         }
     );

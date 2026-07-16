@@ -1,3 +1,4 @@
+// Modified in 2026 by the ocque41 OpenAI-support fork; see FORK-NOTICE.md.
 //! HTTP client for the xAI sampling APIs.
 //!
 //! Owns the `reqwest::Client`, default request headers, and per-method
@@ -22,10 +23,10 @@ use serde::Serialize;
 
 use xai_grok_sampling_types::error::{parse_error_bytes, try_parse_stream_error};
 use xai_grok_sampling_types::{
-    ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, ConversationRequest,
-    ConversationResponse, CreateResponseWrapper, DOOM_LOOP_CHECK_HEADER, MessagesRequestWrapper,
-    ResponseModelMetadata, Result, SamplingError, build_messages_request, is_check_event, messages,
-    rs,
+    CANONICAL_REASONING_EFFORT_METADATA_KEY, ChatCompletionChunk, ChatCompletionRequest,
+    ChatCompletionResponse, ConversationRequest, ConversationResponse, CreateResponseWrapper,
+    DOOM_LOOP_CHECK_HEADER, MessagesRequestWrapper, ReasoningEffort, ResponseModelMetadata, Result,
+    SamplingError, build_messages_request, is_check_event, messages, rs,
 };
 
 use crate::config::{AuthScheme, OriginClientInfo, SamplerConfig};
@@ -40,6 +41,38 @@ const DEFAULT_CLIENT_IDENTIFIER: &str = "grok-shell";
 const AGENT_PRODUCT: &str = "grok-shell";
 const ANTHROPIC_DEFAULT_MAX_TOKENS: u32 = 128_000;
 
+/// Whether a sampling base URL is allowed to receive xAI-only wire extensions.
+///
+/// Keep this trust boundary sampler-local: this crate intentionally has no
+/// shell dependency. The production CLI proxy is matched exactly (including
+/// its `/v1` path boundary); all trusted hosts require HTTPS on the default
+/// port, and `x.ai` uses a hostname-boundary check so suffix attacks such as
+/// `api.x.ai.evil.example` are rejected.
+fn is_first_party_xai_url(url: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    if parsed.scheme() != "https" || parsed.port_or_known_default() != Some(443) {
+        return false;
+    }
+
+    let host = parsed.host_str().unwrap_or_default();
+    if host == "x.ai" || host.ends_with(".x.ai") {
+        return true;
+    }
+
+    let path = parsed.path().trim_end_matches('/');
+    host == "cli-chat-proxy.grok.com" && (path == "/v1" || path.starts_with("/v1/"))
+}
+
+fn is_xai_only_header(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    name.starts_with("x-grok-")
+        || name.starts_with("x-xai-")
+        || name == "x-compactions-remaining"
+        || name == "x-compaction-at"
+}
+
 /// Per-request `x-grok-*` headers. Optional fields are skipped when empty/`None`.
 struct GrokRequestHeaders<'a> {
     conv_id: &'a str,
@@ -53,7 +86,14 @@ struct GrokRequestHeaders<'a> {
 }
 
 impl GrokRequestHeaders<'_> {
-    fn apply(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    fn apply(
+        &self,
+        builder: reqwest::RequestBuilder,
+        xai_wire_extensions: bool,
+    ) -> reqwest::RequestBuilder {
+        if !xai_wire_extensions {
+            return builder;
+        }
         let mut b = builder
             .header("x-grok-conv-id", self.conv_id)
             .header("x-grok-req-id", self.req_id)
@@ -96,37 +136,195 @@ impl GrokRequestHeaders<'_> {
 /// `ResponseUsage` unchanged so billing telemetry stays correct. When
 /// the API doesn't emit `context_details` (older deployments) `total_tokens`
 /// passes through unchanged.
-fn deserialize_response_event(data: &str) -> Result<rs::ResponseStreamEvent> {
+#[derive(serde::Deserialize)]
+struct ResponseEventEnvelope<'a> {
+    #[serde(rename = "type", borrow)]
+    event_type: &'a str,
+}
+
+fn response_event_type(data: &str) -> Option<&str> {
+    serde_json::from_str::<ResponseEventEnvelope<'_>>(data)
+        .ok()
+        .map(|envelope| envelope.event_type)
+}
+
+fn is_known_response_event_type(event_type: &str) -> bool {
+    matches!(
+        event_type,
+        "response.created"
+            | "response.in_progress"
+            | "response.completed"
+            | "response.failed"
+            | "response.incomplete"
+            | "response.output_item.added"
+            | "response.output_item.done"
+            | "response.content_part.added"
+            | "response.content_part.done"
+            | "response.output_text.delta"
+            | "response.output_text.done"
+            | "response.refusal.delta"
+            | "response.refusal.done"
+            | "response.function_call_arguments.delta"
+            | "response.function_call_arguments.done"
+            | "response.file_search_call.in_progress"
+            | "response.file_search_call.searching"
+            | "response.file_search_call.completed"
+            | "response.web_search_call.in_progress"
+            | "response.web_search_call.searching"
+            | "response.web_search_call.completed"
+            | "response.reasoning_summary_part.added"
+            | "response.reasoning_summary_part.done"
+            | "response.reasoning_summary_text.delta"
+            | "response.reasoning_summary_text.done"
+            | "response.reasoning_text.delta"
+            | "response.reasoning_text.done"
+            | "response.image_generation_call.completed"
+            | "response.image_generation_call.generating"
+            | "response.image_generation_call.in_progress"
+            | "response.image_generation_call.partial_image"
+            | "response.mcp_call_arguments.delta"
+            | "response.mcp_call_arguments.done"
+            | "response.mcp_call.completed"
+            | "response.mcp_call.failed"
+            | "response.mcp_call.in_progress"
+            | "response.mcp_list_tools.completed"
+            | "response.mcp_list_tools.failed"
+            | "response.mcp_list_tools.in_progress"
+            | "response.code_interpreter_call.in_progress"
+            | "response.code_interpreter_call.interpreting"
+            | "response.code_interpreter_call.completed"
+            | "response.code_interpreter_call_code.delta"
+            | "response.code_interpreter_call_code.done"
+            | "response.output_text.annotation.added"
+            | "response.queued"
+            | "response.custom_tool_call_input.delta"
+            | "response.custom_tool_call_input.done"
+            | "error"
+    )
+}
+
+/// Normalize OpenAI's inbound `max` token for async-openai 0.33 while
+/// preserving the canonical value in process-local response metadata.
+///
+/// This touches only the exact `reasoning.effort == "max"` field. Malformed
+/// response shapes and all other effort values remain unchanged so the typed
+/// parser continues to reject malformed known responses strictly.
+fn normalize_inbound_max_reasoning_effort(response: &mut serde_json::Value) -> bool {
+    if response
+        .pointer("/reasoning/effort")
+        .and_then(serde_json::Value::as_str)
+        != Some("max")
+    {
+        return false;
+    }
+
+    let Some(effort) = response.pointer_mut("/reasoning/effort") else {
+        return false;
+    };
+    *effort = serde_json::Value::String("xhigh".to_owned());
+
+    let Some(response) = response.as_object_mut() else {
+        return true;
+    };
+    let metadata = response
+        .entry("metadata")
+        .or_insert_with(|| serde_json::Value::Object(Default::default()));
+    if metadata.is_null() {
+        *metadata = serde_json::Value::Object(Default::default());
+    }
+    if let Some(metadata) = metadata.as_object_mut() {
+        metadata.insert(
+            CANONICAL_REASONING_EFFORT_METADATA_KEY.to_owned(),
+            serde_json::Value::String("max".to_owned()),
+        );
+    }
+
+    true
+}
+
+/// Deserialize a non-streaming Responses body with the same narrow inbound
+/// compatibility shim used by SSE events.
+fn deserialize_response_body(bytes: &[u8]) -> serde_json::Result<rs::Response> {
+    match serde_json::from_slice::<rs::Response>(bytes) {
+        Ok(response) => Ok(response),
+        Err(first_err) => {
+            let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+                return Err(first_err);
+            };
+            if !normalize_inbound_max_reasoning_effort(&mut value) {
+                return Err(first_err);
+            }
+            serde_json::from_value(value)
+        }
+    }
+}
+
+/// Deserialize a Responses event known to this client. Future event types are
+/// ignored so adding a server-side event does not break an otherwise valid
+/// stream. Malformed JSON and malformed known events remain hard errors.
+/// Raw event data is never included in logs.
+fn deserialize_response_event(
+    data: &str,
+    xai_wire_extensions: bool,
+) -> Result<Option<rs::ResponseStreamEvent>> {
+    let envelope = serde_json::from_str::<ResponseEventEnvelope<'_>>(data).map_err(|err| {
+        tracing::error!(error = %err, "Malformed Responses API event envelope");
+        SamplingError::Serialization(err)
+    })?;
+    if !is_known_response_event_type(envelope.event_type) {
+        tracing::debug!(
+            event_type = envelope.event_type,
+            "Ignoring unknown Responses API stream event"
+        );
+        return Ok(None);
+    }
+
     let mut event = match serde_json::from_str::<rs::ResponseStreamEvent>(data) {
         Ok(event) => event,
         Err(first_err) => {
-            // Try sanitizing: parse as Value, strip unknown tools, retry.
             if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(data) {
+                let normalized_max = value
+                    .get_mut("response")
+                    .is_some_and(normalize_inbound_max_reasoning_effort);
+                if normalized_max
+                    && let Ok(mut event) =
+                        serde_json::from_value::<rs::ResponseStreamEvent>(value.clone())
+                {
+                    apply_terminal_event_overrides(&mut event, data, xai_wire_extensions);
+                    return Ok(Some(event));
+                }
+
+                // xAI's verified first-party stream can echo tool definitions
+                // that async-openai does not model. Keep this sanitizer behind
+                // the existing provider trust boundary.
                 // Strip tools that async_openai's rs::Tool can't deserialize
                 // (e.g., xAI-specific "x_search"). Instead of maintaining a
                 // hardcoded allowlist, try deserializing each tool entry —
                 // if it fails, drop it.
-                if let Some(tools) = value
-                    .pointer_mut("/response/tools")
-                    .and_then(|v| v.as_array_mut())
-                {
-                    tools.retain(|t| serde_json::from_value::<rs::Tool>(t.clone()).is_ok());
-                }
-                if let Ok(mut event) = serde_json::from_value::<rs::ResponseStreamEvent>(value) {
-                    apply_terminal_event_overrides(&mut event, data);
-                    return Ok(event);
+                if xai_wire_extensions {
+                    if let Some(tools) = value
+                        .pointer_mut("/response/tools")
+                        .and_then(|v| v.as_array_mut())
+                    {
+                        tools.retain(|t| serde_json::from_value::<rs::Tool>(t.clone()).is_ok());
+                    }
+                    if let Ok(mut event) = serde_json::from_value::<rs::ResponseStreamEvent>(value)
+                    {
+                        apply_terminal_event_overrides(&mut event, data, xai_wire_extensions);
+                        return Ok(Some(event));
+                    }
                 }
             }
             tracing::error!(
                 error = %first_err,
-                raw_data = %data,
+                event_type = envelope.event_type,
                 "Failed to deserialize ResponseStreamEvent from stream"
             );
             return Err(SamplingError::Serialization(first_err));
         }
     };
-    apply_terminal_event_overrides(&mut event, data);
-    Ok(event)
+    apply_terminal_event_overrides(&mut event, data, xai_wire_extensions);
+    Ok(Some(event))
 }
 
 /// On terminal Responses API events (`response.completed` /
@@ -150,7 +348,14 @@ fn deserialize_response_event(data: &str) -> Result<rs::ResponseStreamEvent> {
 /// - `context_details` is absent (older backends / non-loop responses),
 /// - or either of `context_details.{input_tokens, output_tokens}` is
 ///   missing — we don't guess the missing half.
-fn apply_terminal_event_overrides(event: &mut rs::ResponseStreamEvent, data: &str) {
+fn apply_terminal_event_overrides(
+    event: &mut rs::ResponseStreamEvent,
+    data: &str,
+    xai_wire_extensions: bool,
+) {
+    if !xai_wire_extensions {
+        return;
+    }
     let response = match event {
         rs::ResponseStreamEvent::ResponseCompleted(e) => &mut e.response,
         rs::ResponseStreamEvent::ResponseIncomplete(e) => &mut e.response,
@@ -226,16 +431,27 @@ fn extract_should_retry(headers: &reqwest::header::HeaderMap) -> Option<bool> {
         })
 }
 
-fn extract_model_metadata(headers: &reqwest::header::HeaderMap) -> Option<ResponseModelMetadata> {
-    let context_window = headers
-        .get("x-grok-context-window")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.parse::<u64>().ok());
+fn extract_model_metadata(
+    headers: &reqwest::header::HeaderMap,
+    xai_wire_extensions: bool,
+) -> Option<ResponseModelMetadata> {
+    let context_window = xai_wire_extensions
+        .then(|| {
+            headers
+                .get("x-grok-context-window")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<u64>().ok())
+        })
+        .flatten();
 
-    let max_completion_tokens = headers
-        .get("x-grok-max-completion-tokens")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.parse::<u32>().ok());
+    let max_completion_tokens = xai_wire_extensions
+        .then(|| {
+            headers
+                .get("x-grok-max-completion-tokens")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<u32>().ok())
+        })
+        .flatten();
 
     let models_etag = headers
         .get("x-models-etag")
@@ -280,6 +496,8 @@ pub struct SamplingClient {
     http: reqwest::Client,
     default_headers: HeaderMap,
     base_url: String,
+    /// Derived once from `base_url`; false for OpenAI and every custom host.
+    xai_wire_extensions: bool,
     defaults: ClientDefaults,
     /// Optional 401-attribution hook. The shell wires this to emit a
     /// structured event at every UNAUTHORIZED arm so 401s can be
@@ -296,6 +514,7 @@ impl std::fmt::Debug for SamplingClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SamplingClient")
             .field("base_url", &self.base_url)
+            .field("xai_wire_extensions", &self.xai_wire_extensions)
             .field("defaults", &self.defaults)
             .field(
                 "has_attribution_callback",
@@ -314,6 +533,7 @@ struct ClientDefaults {
     top_p: Option<f32>,
     api_backend: ApiBackend,
     auth_scheme: AuthScheme,
+    reasoning_effort: Option<ReasoningEffort>,
     stream_tool_calls: bool,
     doom_loop_recovery: Option<xai_grok_sampling_types::DoomLoopRecoveryPolicy>,
 }
@@ -399,6 +619,7 @@ impl SamplingClient {
     /// pre-computes the default request headers. This does not perform
     /// any network I/O.
     pub fn new(config: SamplerConfig) -> Result<Self> {
+        let xai_wire_extensions = is_first_party_xai_url(&config.base_url);
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         if let Some(ref api_key) = config.api_key {
@@ -406,7 +627,6 @@ impl SamplingClient {
                 AuthScheme::XApiKey => {
                     let header_value = HeaderValue::from_str(api_key).map_err(|_| {
                         tracing::debug!(
-                            api_key = %api_key,
                             "Invalid api_key: cannot be converted to a valid HTTP header"
                         );
                         SamplingError::Auth(
@@ -420,7 +640,6 @@ impl SamplingClient {
                     let bearer = format!("Bearer {}", api_key);
                     let header_value = HeaderValue::from_str(&bearer).map_err(|_| {
                         tracing::debug!(
-                            api_key = %api_key,
                             "Invalid api_key: cannot be converted to a valid HTTP Authorization header"
                         );
                         SamplingError::Auth(
@@ -437,6 +656,13 @@ impl SamplingClient {
         // injection point for proxy-auth headers and any other URL- or
         // environment-specific headers the session decides to set.
         for (key, value) in &config.extra_headers {
+            if !xai_wire_extensions && is_xai_only_header(key) {
+                tracing::debug!(
+                    header_name = key,
+                    "Omitting xAI-only request header for a non-xAI endpoint"
+                );
+                continue;
+            }
             let header_name = HeaderName::try_from(key.as_str())
                 .map_err(|_| SamplingError::InvalidConfiguration("Invalid extra header name"))?;
             let header_value = HeaderValue::from_str(value)
@@ -444,32 +670,32 @@ impl SamplingClient {
             headers.insert(header_name, header_value);
         }
 
-        // Add x-grok-client-version header for version gating at the proxy.
-        if let Some(client_version) = config.client_version.as_ref()
-            && let Ok(header_value) = HeaderValue::from_str(client_version)
-        {
-            headers.insert(
-                HeaderName::from_static("x-grok-client-version"),
-                header_value,
-            );
-        }
+        if xai_wire_extensions {
+            // xAI proxy/client identity headers never leave first-party hosts.
+            if let Some(client_version) = config.client_version.as_ref()
+                && let Ok(header_value) = HeaderValue::from_str(client_version)
+            {
+                headers.insert(
+                    HeaderName::from_static("x-grok-client-version"),
+                    header_value,
+                );
+            }
 
-        if let Some(deployment_id) = config.deployment_id.as_ref()
-            && let Ok(header_value) = HeaderValue::from_str(deployment_id)
-        {
-            headers.insert(
-                HeaderName::from_static("x-grok-deployment-id"),
-                header_value,
-            );
-        }
+            if let Some(deployment_id) = config.deployment_id.as_ref()
+                && let Ok(header_value) = HeaderValue::from_str(deployment_id)
+            {
+                headers.insert(
+                    HeaderName::from_static("x-grok-deployment-id"),
+                    header_value,
+                );
+            }
 
-        if let Some(user_id) = config.user_id.as_ref()
-            && let Ok(header_value) = HeaderValue::from_str(user_id)
-        {
-            headers.insert(HeaderName::from_static("x-grok-user-id"), header_value);
-        }
+            if let Some(user_id) = config.user_id.as_ref()
+                && let Ok(header_value) = HeaderValue::from_str(user_id)
+            {
+                headers.insert(HeaderName::from_static("x-grok-user-id"), header_value);
+            }
 
-        {
             let client_id = config
                 .client_identifier
                 .clone()
@@ -526,6 +752,7 @@ impl SamplingClient {
             top_p: config.top_p,
             api_backend: config.api_backend,
             auth_scheme: config.auth_scheme,
+            reasoning_effort: config.reasoning_effort,
             stream_tool_calls: config.stream_tool_calls,
             doom_loop_recovery: config.doom_loop_recovery,
         };
@@ -534,6 +761,7 @@ impl SamplingClient {
             http,
             default_headers: headers,
             base_url: config.base_url,
+            xai_wire_extensions,
             defaults,
             attribution_callback: config.attribution_callback,
             bearer_resolver: config.bearer_resolver,
@@ -567,31 +795,29 @@ impl SamplingClient {
                 }
             }
         }
-        {
-            let auth_prefix = headers
-                .get(AUTHORIZATION)
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.chars().take(20).collect::<String>());
-            let x_api_key_prefix = headers
-                .get(HeaderName::from_static("x-api-key"))
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.chars().take(12).collect::<String>());
-            tracing::info!(
-                target: crate::sampling_log::TARGET,
-                event = "client_post",
-                base_url = %self.base_url,
-                model = %self.defaults.model,
-                api_backend = ?self.defaults.api_backend,
-                auth_scheme = ?self.defaults.auth_scheme,
-                has_bearer_resolver = self.bearer_resolver.is_some(),
-                has_authorization_header = headers.get(AUTHORIZATION).is_some(),
-                has_x_api_key_header = headers.get(HeaderName::from_static("x-api-key")).is_some(),
-                auth_header_prefix = auth_prefix.as_deref().unwrap_or("none"),
-                x_api_key_prefix = x_api_key_prefix.as_deref().unwrap_or("none"),
-            );
-        }
+        tracing::info!(
+            target: crate::sampling_log::TARGET,
+            event = "client_post",
+            base_url = %self.base_url,
+            model = %self.defaults.model,
+            api_backend = ?self.defaults.api_backend,
+            auth_scheme = ?self.defaults.auth_scheme,
+            has_bearer_resolver = self.bearer_resolver.is_some(),
+            has_authorization_header = headers.get(AUTHORIZATION).is_some(),
+            has_x_api_key_header = headers.get(HeaderName::from_static("x-api-key")).is_some(),
+        );
         if let Some(injector) = &self.header_injector {
             injector.inject(&mut headers);
+        }
+        if !self.xai_wire_extensions {
+            let xai_only_names: Vec<HeaderName> = headers
+                .keys()
+                .filter(|name| is_xai_only_header(name.as_str()))
+                .cloned()
+                .collect();
+            for name in xai_only_names {
+                headers.remove(name);
+            }
         }
         self.http.post(url).headers(headers)
     }
@@ -636,11 +862,10 @@ impl SamplingClient {
         })
     }
 
-    /// Invoke the optional 401 attribution callback for one logical
-    /// 401 response. Each of the six UNAUTHORIZED arms in this file
-    /// calls this helper immediately before returning
-    /// `SamplingError::Auth(...)`. Emit happens at the lowest layer
-    /// that saw the status, so higher layers that react to a 401 must
+    /// Invoke the optional 401 attribution callback for one logical response
+    /// from a verified xAI endpoint. Each UNAUTHORIZED arm calls this helper;
+    /// non-xAI endpoints return without deriving a credential prefix. Emit
+    /// happens at the lowest layer that saw the status, so higher layers must
     /// not emit a duplicate event.
     ///
     /// The bearer passed to the callback is already truncated to
@@ -649,6 +874,11 @@ impl SamplingClient {
     /// that callers downstream of this crate never see the full
     /// bearer.
     fn record_401_attribution(&self, consumer: crate::attribution::SamplingConsumer) {
+        // Credential-prefix attribution is an internal xAI diagnostic. Never
+        // derive or forward even a truncated OpenAI/custom-provider key.
+        if !self.xai_wire_extensions {
+            return;
+        }
         if let Some(cb) = self.attribution_callback.as_ref() {
             let sent_prefix = self.current_sent_bearer_prefix();
             cb.record_401(consumer, sent_prefix.as_deref());
@@ -656,15 +886,24 @@ impl SamplingClient {
     }
 
     pub fn auth_info(&self) -> crate::sampling_log::AuthInfo {
-        let auth_prefix = self.current_sent_bearer_prefix();
-        let auth_type = match (&self.defaults.auth_scheme, &auth_prefix) {
-            (AuthScheme::XApiKey, Some(_)) => "x-api-key",
-            (AuthScheme::Bearer, Some(_)) => "bearer",
-            (_, None) => "none",
+        let has_auth = self.bearer_resolver.as_ref().is_some_and(|r| {
+            r.current_bearer()
+                .as_deref()
+                .is_some_and(|value| !value.is_empty())
+        }) || match self.defaults.auth_scheme {
+            AuthScheme::XApiKey => self
+                .default_headers
+                .contains_key(HeaderName::from_static("x-api-key")),
+            AuthScheme::Bearer => self.default_headers.contains_key(AUTHORIZATION),
+        };
+        let auth_type = match (self.defaults.auth_scheme, has_auth) {
+            (AuthScheme::XApiKey, true) => "x-api-key",
+            (AuthScheme::Bearer, true) => "bearer",
+            (_, false) => "none",
         };
         crate::sampling_log::AuthInfo {
             auth_type,
-            auth_prefix,
+            auth_prefix: None,
         }
     }
 
@@ -704,9 +943,11 @@ impl SamplingClient {
             })
             .collect();
 
-        req_headers.push(Self::format_header("x-grok-conv-id", x_grok_conv_id));
-        req_headers.push(Self::format_header("x-grok-req-id", x_grok_req_id));
-        req_headers.push(Self::format_header("x-grok-model-override", model_id));
+        if self.xai_wire_extensions {
+            req_headers.push(Self::format_header("x-grok-conv-id", x_grok_conv_id));
+            req_headers.push(Self::format_header("x-grok-req-id", x_grok_req_id));
+            req_headers.push(Self::format_header("x-grok-model-override", model_id));
+        }
         if include_accept {
             req_headers.push(Self::format_header("accept", "text/event-stream"));
         }
@@ -792,12 +1033,33 @@ impl SamplingClient {
             request.top_p = self.defaults.top_p;
         }
 
+        if request.reasoning_effort.is_none() {
+            request.reasoning_effort = self.defaults.reasoning_effort;
+        }
+
         Ok(request)
+    }
+
+    /// Remove fields implemented by xAI's Chat Completions extension before
+    /// serializing a request for OpenAI or another custom provider. Standard
+    /// OpenAI Chat accepts `reasoning_effort`, but not xAI's per-message
+    /// `model_id` / `reasoning_content` fields or top-level
+    /// `search_parameters` object.
+    fn strip_non_xai_chat_fields(&self, request: &mut ChatCompletionRequest) {
+        if self.xai_wire_extensions {
+            return;
+        }
+
+        request.search_parameters = None;
+        for message in &mut request.messages {
+            message.model_id = None;
+            message.reasoning_content = None;
+        }
     }
 
     async fn handle_response(&self, response: reqwest::Response) -> Result<ChatCompletionResponse> {
         let status = response.status();
-        let model_metadata = extract_model_metadata(response.headers());
+        let model_metadata = extract_model_metadata(response.headers(), self.xai_wire_extensions);
         let retry_after_secs = extract_retry_after(response.headers());
         let should_retry = extract_should_retry(response.headers());
         let bytes = response.bytes().await?;
@@ -821,10 +1083,9 @@ impl SamplingClient {
         }
 
         let completion = serde_json::from_slice::<ChatCompletionResponse>(&bytes).map_err(|e| {
-            let raw_body = String::from_utf8_lossy(&bytes);
             tracing::error!(
                 error = %e,
-                raw_body = %raw_body,
+                payload_bytes = bytes.len(),
                 "Failed to deserialize ChatCompletionResponse"
             );
             SamplingError::Serialization(e)
@@ -840,7 +1101,8 @@ impl SamplingClient {
         &self,
         request: ChatCompletionRequest,
     ) -> Result<ChatCompletionResponse> {
-        let payload = self.apply_defaults(request)?;
+        let mut payload = self.apply_defaults(request)?;
+        self.strip_non_xai_chat_fields(&mut payload);
         let x_grok_conv_id = &payload.x_grok_conv_id.clone().unwrap_or_default();
         let x_grok_req_id = &payload.x_grok_req_id.clone().unwrap_or_default();
         let model_id = payload.model.clone().unwrap_or_default();
@@ -862,7 +1124,10 @@ impl SamplingClient {
             user_id: payload.x_grok_user_id.as_deref(),
         };
         let http_request = grok_headers
-            .apply(self.post(self.endpoint("chat/completions")))
+            .apply(
+                self.post(self.endpoint("chat/completions")),
+                self.xai_wire_extensions,
+            )
             .json(&payload);
 
         let response = http_request.send().await.map_err(|e| {
@@ -893,7 +1158,8 @@ impl SamplingClient {
         BoxStream<'static, Result<ChatCompletionChunk>>,
         Option<ResponseModelMetadata>,
     )> {
-        let payload = self.apply_defaults(request)?;
+        let mut payload = self.apply_defaults(request)?;
+        self.strip_non_xai_chat_fields(&mut payload);
         let x_grok_conv_id = &payload.x_grok_conv_id.clone().unwrap_or_default();
         let x_grok_req_id = &payload.x_grok_req_id.clone().unwrap_or_default();
         let model_id = payload.model.clone().unwrap_or_default();
@@ -920,7 +1186,10 @@ impl SamplingClient {
             user_id: payload.x_grok_user_id.as_deref(),
         };
         let http_request = grok_headers
-            .apply(self.post(self.endpoint("chat/completions")))
+            .apply(
+                self.post(self.endpoint("chat/completions")),
+                self.xai_wire_extensions,
+            )
             .header(ACCEPT, HeaderValue::from_static("text/event-stream"))
             .json(&streaming_request);
 
@@ -946,7 +1215,7 @@ impl SamplingClient {
         let span = tracing::Span::current();
         span.record("status_code", status.as_u16() as i64);
         span.record("success", status.is_success());
-        let model_metadata = extract_model_metadata(response.headers());
+        let model_metadata = extract_model_metadata(response.headers(), self.xai_wire_extensions);
         let retry_after_secs = extract_retry_after(response.headers());
         let should_retry = extract_should_retry(response.headers());
         if !status.is_success() {
@@ -956,7 +1225,8 @@ impl SamplingClient {
                     crate::attribution::SamplingConsumer::ChatCompletionsStream,
                 );
                 let endpoint = self.endpoint("chat/completions");
-                let server_message = response.text().await.unwrap_or_default();
+                let bytes = response.bytes().await?;
+                let server_message = parse_error_bytes(bytes.as_ref());
                 return Err(SamplingError::Auth(format!(
                     "Unauthorized (401) from {endpoint}: {server_message}"
                 )));
@@ -1031,7 +1301,7 @@ impl SamplingClient {
                             target: crate::sampling_log::TARGET,
                             event = "sse_chunk",
                             backend = "chat_completions",
-                            data = %data,
+                            payload_bytes = data.len(),
                         );
 
                         if let Some(stream_error) = try_parse_stream_error(data) {
@@ -1041,7 +1311,7 @@ impl SamplingClient {
                                 serde_json::from_str::<ChatCompletionChunk>(data).map_err(|e| {
                                     tracing::error!(
                                         error = %e,
-                                        raw_data = %data,
+                                        payload_bytes = data.len(),
                                         "Failed to deserialize ChatCompletionChunk from stream"
                                     );
                                     SamplingError::Serialization(e)
@@ -1087,6 +1357,25 @@ impl SamplingClient {
             request.inner.max_output_tokens = self.defaults.max_completion_tokens;
         }
 
+        // Preserve an explicit request's canonical token. The typed
+        // async-openai request cannot distinguish Max from Xhigh, so infer
+        // from it only when the wrapper did not retain a canonical value.
+        if request.reasoning_effort.is_none() {
+            request.reasoning_effort = request
+                .inner
+                .reasoning
+                .as_ref()
+                .and_then(|reasoning| reasoning.effort.clone())
+                .map(ReasoningEffort::from_responses_api)
+                .or(self.defaults.reasoning_effort);
+        }
+        if let Some(effort) = request.reasoning_effort {
+            let reasoning = request.inner.reasoning.get_or_insert_with(Default::default);
+            if reasoning.effort.is_none() {
+                reasoning.effort = Some(effort.to_responses_api());
+            }
+        }
+
         // Set store to false if not specified (default is true, but that breaks ZDR compliance)
         if request.inner.store.is_none() {
             request.inner.store = Some(false);
@@ -1099,6 +1388,46 @@ impl SamplingClient {
         }
 
         Ok(())
+    }
+
+    /// Restore the exact per-request canonical effort at the final JSON
+    /// boundary. async-openai 0.33 stages `Max` as `Xhigh`, but a client
+    /// default must never rewrite an explicit request's `Xhigh` to `max`.
+    fn patch_response_reasoning_effort(
+        request_body: &mut serde_json::Value,
+        reasoning_effort: Option<ReasoningEffort>,
+    ) {
+        if let Some(effort) = reasoning_effort
+            && let Some(reasoning) = request_body
+                .get_mut("reasoning")
+                .and_then(serde_json::Value::as_object_mut)
+        {
+            reasoning.insert("effort".to_owned(), serde_json::json!(effort.as_str()));
+        }
+    }
+
+    fn finalize_response_body(
+        &self,
+        request_body: &mut serde_json::Value,
+        reasoning_effort: Option<ReasoningEffort>,
+        streaming: bool,
+        extra_raw_tools: Vec<serde_json::Value>,
+    ) {
+        if streaming && self.xai_wire_extensions && self.defaults.stream_tool_calls {
+            request_body["stream_tool_calls"] = serde_json::json!(true);
+        }
+        if self.xai_wire_extensions && !extra_raw_tools.is_empty() {
+            if let Some(tools) = request_body
+                .get_mut("tools")
+                .and_then(serde_json::Value::as_array_mut)
+            {
+                tools.extend(extra_raw_tools);
+            } else {
+                request_body["tools"] = serde_json::Value::Array(extra_raw_tools);
+            }
+        }
+        xai_grok_sampling_types::patch_reasoning_text_types(request_body);
+        Self::patch_response_reasoning_effort(request_body, reasoning_effort);
     }
 
     /// Create a response using the Responses API (non-streaming).
@@ -1120,8 +1449,11 @@ impl SamplingClient {
         // forwarded by the sampler. Drop it before we send.
         request.trace.take();
 
-        tracing::debug!("create_response: {:?}", &request);
-        tracing::debug!("endpoint: {:?}", self.endpoint("responses"));
+        tracing::debug!(
+            base_url = %self.base_url,
+            model_id = %model_id,
+            "Sending Responses API request"
+        );
 
         let grok_headers = GrokRequestHeaders {
             conv_id: x_grok_conv_id,
@@ -1141,9 +1473,17 @@ impl SamplingClient {
         // discriminator that the Responses API requires on input. Patch
         // it in post-serialize. This is the last surviving piece of the
         // old raw_output machinery.
-        xai_grok_sampling_types::patch_reasoning_text_types(&mut request_body);
+        self.finalize_response_body(
+            &mut request_body,
+            request.reasoning_effort,
+            false,
+            Vec::new(),
+        );
         let http_request = grok_headers
-            .apply(self.post(self.endpoint("responses")))
+            .apply(
+                self.post(self.endpoint("responses")),
+                self.xai_wire_extensions,
+            )
             .json(&request_body);
 
         let response = http_request.send().await.map_err(|e| {
@@ -1152,7 +1492,7 @@ impl SamplingClient {
         })?;
 
         let status = response.status();
-        let model_metadata = extract_model_metadata(response.headers());
+        let model_metadata = extract_model_metadata(response.headers(), self.xai_wire_extensions);
         let retry_after_secs = extract_retry_after(response.headers());
         let should_retry = extract_should_retry(response.headers());
         let bytes = response.bytes().await?;
@@ -1193,11 +1533,10 @@ impl SamplingClient {
             });
         }
 
-        let response_obj = serde_json::from_slice::<rs::Response>(&bytes).map_err(|e| {
-            let raw_body = String::from_utf8_lossy(&bytes);
+        let response_obj = deserialize_response_body(&bytes).map_err(|e| {
             tracing::error!(
                 error = %e,
-                raw_body = %raw_body,
+                payload_bytes = bytes.len(),
                 "Failed to deserialize rs::Response"
             );
             SamplingError::Serialization(e)
@@ -1273,28 +1612,29 @@ impl SamplingClient {
             tracing::error!("Failed to serialize responses request: {}", e);
             SamplingError::Serialization(e)
         })?;
-        // Inject xAI-specific fields not in async-openai's CreateResponse type.
-        if self.defaults.stream_tool_calls {
-            request_body["stream_tool_calls"] = serde_json::json!(true);
-        }
-        // Inject xAI-specific tools (e.g., x_search) that can't be expressed
-        // via async_openai's rs::Tool enum.
-        if !extra_raw_tools.is_empty() {
-            if let Some(tools) = request_body.get_mut("tools").and_then(|v| v.as_array_mut()) {
-                tools.extend(extra_raw_tools);
-            } else {
-                request_body["tools"] = serde_json::Value::Array(extra_raw_tools);
-            }
-        }
-        xai_grok_sampling_types::patch_reasoning_text_types(&mut request_body);
+        // xAI-only body extensions are applied only after the provider trust
+        // boundary has been evaluated from the configured base URL.
+        self.finalize_response_body(
+            &mut request_body,
+            request.reasoning_effort,
+            true,
+            extra_raw_tools,
+        );
         // Fresh per attempt so signals never leak across retries; `None`
         // (check disabled) sends no header and does no peek work per event.
         let doom_loop = self
-            .defaults
-            .doom_loop_recovery
-            .map(crate::doom_loop::DoomLoopSignalCollector::new);
+            .xai_wire_extensions
+            .then(|| {
+                self.defaults
+                    .doom_loop_recovery
+                    .map(crate::doom_loop::DoomLoopSignalCollector::new)
+            })
+            .flatten();
         let mut http_request = grok_headers
-            .apply(self.post(self.endpoint("responses")))
+            .apply(
+                self.post(self.endpoint("responses")),
+                self.xai_wire_extensions,
+            )
             .header(ACCEPT, HeaderValue::from_static("text/event-stream"));
         if doom_loop.is_some() {
             // Presence opts in; the server ignores the value.
@@ -1329,12 +1669,14 @@ impl SamplingClient {
                 span.record("error", "unauthorized (401)");
                 self.record_401_attribution(crate::attribution::SamplingConsumer::ResponsesStream);
                 let endpoint = self.endpoint("responses");
-                let server_message = response.text().await.unwrap_or_default();
+                let bytes = response.bytes().await?;
+                let server_message = parse_error_bytes(bytes.as_ref());
                 return Err(SamplingError::Auth(format!(
                     "Unauthorized (401) from {endpoint}: {server_message}"
                 )));
             }
-            let model_metadata = extract_model_metadata(response.headers());
+            let model_metadata =
+                extract_model_metadata(response.headers(), self.xai_wire_extensions);
             let retry_after_secs = extract_retry_after(response.headers());
             let should_retry = extract_should_retry(response.headers());
             let req_headers =
@@ -1367,7 +1709,7 @@ impl SamplingClient {
             });
         }
 
-        let model_metadata = extract_model_metadata(response.headers());
+        let model_metadata = extract_model_metadata(response.headers(), self.xai_wire_extensions);
 
         // Strip UTF-8 BOM if present
         const UTF8_BOM: &[u8] = &[0xEF, 0xBB, 0xBF];
@@ -1388,6 +1730,7 @@ impl SamplingClient {
         let event_stream = byte_stream.eventsource();
 
         let doom_loop_for_stream = doom_loop.clone();
+        let xai_wire_extensions = self.xai_wire_extensions;
 
         // The scan item is an `Option`: `Some(None)` skips an absorbed
         // doom-loop event without terminating the stream (`filter_map`
@@ -1408,7 +1751,8 @@ impl SamplingClient {
                             target: crate::sampling_log::TARGET,
                             event = "sse_chunk",
                             backend = "responses",
-                            data = %data,
+                            event_type = response_event_type(data).unwrap_or("malformed"),
+                            payload_bytes = data.len(),
                         );
 
                         // Intercept the non-standard doom-loop event before
@@ -1417,16 +1761,21 @@ impl SamplingClient {
                         // the check disabled, the shared name-or-payload-type
                         // predicate guards against a server emitting it
                         // despite no opt-in (rollout skew), named or not.
-                        let swallow = match &doom_loop_for_stream {
-                            Some(collector) => collector.absorb(&event.event, data),
-                            None => is_check_event(&event.event, data),
+                        let swallow = match (xai_wire_extensions, &doom_loop_for_stream) {
+                            (true, Some(collector)) => collector.absorb(&event.event, data),
+                            (true, None) => is_check_event(&event.event, data),
+                            (false, _) => false,
                         };
                         if swallow {
                             Some(None)
                         } else if let Some(stream_error) = try_parse_stream_error(data) {
                             Some(Some(Err(stream_error)))
                         } else {
-                            Some(Some(deserialize_response_event(data)))
+                            match deserialize_response_event(data, xai_wire_extensions) {
+                                Ok(Some(event)) => Some(Some(Ok(event))),
+                                Ok(None) => Some(None),
+                                Err(err) => Some(Some(Err(err))),
+                            }
                         }
                     }
                     Err(e) => {
@@ -1487,8 +1836,11 @@ impl SamplingClient {
         // Drop process-local trace data.
         request.trace.take();
 
-        tracing::debug!("create_message: {:?}", &request.inner);
-        tracing::debug!("endpoint: {:?}", self.endpoint("messages"));
+        tracing::debug!(
+            base_url = %self.base_url,
+            model_id = %model_id,
+            "Sending Messages API request"
+        );
 
         let grok_headers = GrokRequestHeaders {
             conv_id: x_grok_conv_id,
@@ -1501,7 +1853,10 @@ impl SamplingClient {
             user_id: request.x_grok_user_id.as_deref(),
         };
         let http_request = grok_headers
-            .apply(self.post(self.endpoint("messages")))
+            .apply(
+                self.post(self.endpoint("messages")),
+                self.xai_wire_extensions,
+            )
             .json(&request.inner);
 
         let response = http_request.send().await.map_err(|e| {
@@ -1510,7 +1865,7 @@ impl SamplingClient {
         })?;
 
         let status = response.status();
-        let model_metadata = extract_model_metadata(response.headers());
+        let model_metadata = extract_model_metadata(response.headers(), self.xai_wire_extensions);
         let retry_after_secs = extract_retry_after(response.headers());
         let should_retry = extract_should_retry(response.headers());
         let bytes = response.bytes().await?;
@@ -1553,10 +1908,9 @@ impl SamplingClient {
 
         let response_obj =
             serde_json::from_slice::<messages::MessagesResponse>(&bytes).map_err(|e| {
-                let raw_body = String::from_utf8_lossy(&bytes);
                 tracing::error!(
                     error = %e,
-                    raw_body = %raw_body,
+                    payload_bytes = bytes.len(),
                     "Failed to deserialize MessagesResponse"
                 );
                 SamplingError::Serialization(e)
@@ -1617,7 +1971,10 @@ impl SamplingClient {
             user_id: request.x_grok_user_id.as_deref(),
         };
         let http_request = grok_headers
-            .apply(self.post(self.endpoint("messages")))
+            .apply(
+                self.post(self.endpoint("messages")),
+                self.xai_wire_extensions,
+            )
             .header(ACCEPT, HeaderValue::from_static("text/event-stream"))
             .json(&request.inner);
 
@@ -1648,12 +2005,14 @@ impl SamplingClient {
                 span.record("error", "unauthorized (401)");
                 self.record_401_attribution(crate::attribution::SamplingConsumer::MessagesStream);
                 let endpoint = self.endpoint("messages");
-                let server_message = response.text().await.unwrap_or_default();
+                let bytes = response.bytes().await?;
+                let server_message = parse_error_bytes(bytes.as_ref());
                 return Err(SamplingError::Auth(format!(
                     "Unauthorized (401) from {endpoint}: {server_message}"
                 )));
             }
-            let model_metadata = extract_model_metadata(response.headers());
+            let model_metadata =
+                extract_model_metadata(response.headers(), self.xai_wire_extensions);
             let retry_after_secs = extract_retry_after(response.headers());
             let should_retry = extract_should_retry(response.headers());
             let req_headers =
@@ -1686,7 +2045,7 @@ impl SamplingClient {
             });
         }
 
-        let model_metadata = extract_model_metadata(response.headers());
+        let model_metadata = extract_model_metadata(response.headers(), self.xai_wire_extensions);
 
         // Strip UTF-8 BOM if present
         const UTF8_BOM: &[u8] = &[0xEF, 0xBB, 0xBF];
@@ -1725,7 +2084,7 @@ impl SamplingClient {
                             target: crate::sampling_log::TARGET,
                             event = "sse_chunk",
                             backend = "messages",
-                            data = %data,
+                            payload_bytes = data.len(),
                         );
 
                         if let Some(stream_error) = try_parse_stream_error(data) {
@@ -1736,7 +2095,7 @@ impl SamplingClient {
                                     |e| {
                                         tracing::error!(
                                             error = %e,
-                                            raw_data = %data,
+                                            payload_bytes = data.len(),
                                             "Failed to deserialize MessageStreamEvent from stream"
                                         );
                                         SamplingError::Serialization(e)
@@ -1779,7 +2138,25 @@ impl SamplingClient {
             request.max_output_tokens = self.defaults.max_completion_tokens;
         }
 
+        if request.reasoning_effort.is_none() {
+            request.reasoning_effort = self.defaults.reasoning_effort;
+        }
+
         Ok(())
+    }
+
+    /// Remove xAI-only hosted tools before building a non-xAI Responses
+    /// request. This must happen before typed conversion: tool-name collision
+    /// resolution runs during conversion, and leaving `HostedTool::XSearch`
+    /// present there would incorrectly suppress a legitimate OpenAI/custom
+    /// function named `x_search` even though the raw hosted tool is omitted
+    /// later at the wire boundary.
+    fn strip_non_xai_hosted_tools(&self, request: &mut ConversationRequest) {
+        if !self.xai_wire_extensions {
+            request
+                .hosted_tools
+                .retain(|tool| !matches!(tool, xai_grok_sampling_types::HostedTool::XSearch));
+        }
     }
 
     /// Send a conversation request using the Chat Completions API (streaming).
@@ -1838,6 +2215,7 @@ impl SamplingClient {
         Option<crate::doom_loop::DoomLoopSignalCollector>,
     )> {
         self.apply_conversation_defaults(&mut request)?;
+        self.strip_non_xai_hosted_tools(&mut request);
 
         let trace = request.trace.take();
         let x_grok_conv_id = request.x_grok_conv_id.clone();
@@ -1848,11 +2226,13 @@ impl SamplingClient {
 
         // Collect xAI-specific tools that can't be expressed via rs::Tool
         // (e.g., x_search). These are injected as raw JSON after serialization.
-        let extra_tools = xai_grok_sampling_types::extra_raw_tools(&request.hosted_tools);
+        let extra_tools = if self.xai_wire_extensions {
+            xai_grok_sampling_types::extra_raw_tools(&request.hosted_tools)
+        } else {
+            Vec::new()
+        };
 
-        let responses_request: rs::CreateResponse = (&request).into();
-
-        let mut wrapper = CreateResponseWrapper::new(responses_request);
+        let mut wrapper: CreateResponseWrapper = (&request).into();
         wrapper.x_grok_conv_id = x_grok_conv_id;
         wrapper.x_grok_req_id = x_grok_req_id;
         wrapper.x_grok_session_id = x_grok_session_id;
@@ -1875,6 +2255,7 @@ impl SamplingClient {
         mut request: ConversationRequest,
     ) -> Result<rs::Response> {
         self.apply_conversation_defaults(&mut request)?;
+        self.strip_non_xai_hosted_tools(&mut request);
 
         let trace = request.trace.take();
         let x_grok_conv_id = request.x_grok_conv_id.clone();
@@ -1883,9 +2264,7 @@ impl SamplingClient {
         let x_grok_turn_idx = request.x_grok_turn_idx.clone();
         let x_grok_agent_id = request.x_grok_agent_id.clone();
 
-        let responses_request: rs::CreateResponse = (&request).into();
-
-        let mut wrapper = CreateResponseWrapper::new(responses_request);
+        let mut wrapper: CreateResponseWrapper = (&request).into();
         wrapper.x_grok_conv_id = x_grok_conv_id;
         wrapper.x_grok_req_id = x_grok_req_id;
         wrapper.x_grok_session_id = x_grok_session_id;
@@ -2011,7 +2390,14 @@ impl SamplingClient {
 mod tests {
     use super::*;
     use indexmap::IndexMap;
+    use xai_grok_sampling_types::ConversationItem;
     use xai_grok_sampling_types::types::ChatRequestMessage;
+
+    fn known_xai_response_event(data: &str) -> rs::ResponseStreamEvent {
+        deserialize_response_event(data, true)
+            .expect("valid event")
+            .expect("known event type")
+    }
 
     fn minimal_config() -> SamplerConfig {
         SamplerConfig {
@@ -2107,6 +2493,318 @@ mod tests {
 
         assert!(obj.get("max_tokens").is_none());
         assert!(obj.get("tools").is_none());
+    }
+
+    #[test]
+    fn first_party_xai_url_trust_boundary_rejects_suffix_and_path_attacks() {
+        assert!(is_first_party_xai_url("https://api.x.ai/v1"));
+        assert!(is_first_party_xai_url("https://x.ai"));
+        assert!(is_first_party_xai_url("https://cli-chat-proxy.grok.com/v1"));
+        assert!(is_first_party_xai_url(
+            "https://cli-chat-proxy.grok.com/v1/responses"
+        ));
+
+        assert!(!is_first_party_xai_url("https://api.openai.com/v1"));
+        assert!(!is_first_party_xai_url("http://api.x.ai/v1"));
+        assert!(!is_first_party_xai_url("https://api.x.ai:444/v1"));
+        assert!(!is_first_party_xai_url("https://api.x.ai.evil.example/v1"));
+        assert!(!is_first_party_xai_url(
+            "https://evil-x.ai.attacker.example/v1"
+        ));
+        assert!(!is_first_party_xai_url(
+            "https://cli-chat-proxy.grok.com.evil.example/v1"
+        ));
+        assert!(!is_first_party_xai_url(
+            "https://cli-chat-proxy.grok.com/v11"
+        ));
+        assert!(!is_first_party_xai_url("http://cli-chat-proxy.grok.com/v1"));
+        assert!(!is_first_party_xai_url(
+            "https://cli-chat-proxy.grok.com:444/v1"
+        ));
+        assert!(!is_first_party_xai_url("https://other.grok.com/v1"));
+        assert!(!is_first_party_xai_url("not-a-url"));
+    }
+
+    #[test]
+    fn non_xai_metadata_ignores_x_grok_headers_but_keeps_models_etag() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-grok-context-window", "1048576".parse().unwrap());
+        headers.insert("x-grok-max-completion-tokens", "131072".parse().unwrap());
+        headers.insert("x-models-etag", "openai-models-v1".parse().unwrap());
+
+        let non_xai = extract_model_metadata(&headers, false).expect("etag is provider-neutral");
+        assert_eq!(non_xai.context_window, None);
+        assert_eq!(non_xai.max_completion_tokens, None);
+        assert_eq!(non_xai.models_etag.as_deref(), Some("openai-models-v1"));
+
+        let xai = extract_model_metadata(&headers, true).expect("xAI metadata is accepted");
+        assert_eq!(xai.context_window, Some(1_048_576));
+        assert_eq!(xai.max_completion_tokens, Some(131_072));
+        assert_eq!(xai.models_etag.as_deref(), Some("openai-models-v1"));
+    }
+
+    #[test]
+    fn non_xai_chat_wire_strips_xai_only_body_fields() {
+        let mut request = ChatCompletionRequest {
+            model: Some("gpt-test".to_owned()),
+            messages: vec![ChatRequestMessage::assistant(
+                "answer",
+                "private-xai-model-id",
+                Some("private reasoning".to_owned()),
+            )],
+            search_parameters: Some(xai_grok_sampling_types::SearchParameters {
+                mode: Some("on".to_owned()),
+                sources: None,
+                from_date: None,
+                to_date: None,
+                return_citations: None,
+                max_search_results: None,
+            }),
+            ..ChatCompletionRequest::new("gpt-test", Vec::new())
+        };
+
+        let mut custom_cfg = minimal_config();
+        custom_cfg.base_url = "https://api.openai.com/v1".to_owned();
+        let custom = SamplingClient::new(custom_cfg).expect("custom client builds");
+        custom.strip_non_xai_chat_fields(&mut request);
+        let body = serde_json::to_value(&request).expect("chat request serializes");
+        assert!(body.get("search_parameters").is_none());
+        assert!(body.pointer("/messages/0/model_id").is_none());
+        assert!(body.pointer("/messages/0/reasoning_content").is_none());
+
+        let mut xai_request = ChatCompletionRequest {
+            model: Some("grok-test".to_owned()),
+            messages: vec![ChatRequestMessage::assistant(
+                "answer",
+                "grok-private-model-id",
+                Some("reasoning".to_owned()),
+            )],
+            search_parameters: Some(xai_grok_sampling_types::SearchParameters {
+                mode: Some("on".to_owned()),
+                sources: None,
+                from_date: None,
+                to_date: None,
+                return_citations: None,
+                max_search_results: None,
+            }),
+            ..ChatCompletionRequest::new("grok-test", Vec::new())
+        };
+        let mut xai_cfg = minimal_config();
+        xai_cfg.base_url = "https://api.x.ai/v1".to_owned();
+        let xai = SamplingClient::new(xai_cfg).expect("xAI client builds");
+        xai.strip_non_xai_chat_fields(&mut xai_request);
+        let xai_body = serde_json::to_value(&xai_request).expect("xAI request serializes");
+        assert_eq!(
+            xai_body
+                .pointer("/messages/0/model_id")
+                .and_then(serde_json::Value::as_str),
+            Some("grok-private-model-id")
+        );
+        assert!(xai_body.get("search_parameters").is_some());
+    }
+
+    #[test]
+    fn non_streaming_non_xai_conversion_keeps_function_named_x_search() {
+        let mut cfg = minimal_config();
+        cfg.base_url = "https://api.openai.com/v1".to_owned();
+        cfg.api_backend = ApiBackend::Responses;
+        let client = SamplingClient::new(cfg).expect("OpenAI client builds");
+
+        let mut request = ConversationRequest::from_items(vec![ConversationItem::user("hello")]);
+        request.tools.push(xai_grok_sampling_types::ToolSpec {
+            name: "x_search".to_owned(),
+            description: Some("provider-neutral function".to_owned()),
+            parameters: serde_json::json!({"type": "object"}),
+        });
+        request.hosted_tools = vec![xai_grok_sampling_types::HostedTool::XSearch];
+        client.strip_non_xai_hosted_tools(&mut request);
+
+        let wrapper: CreateResponseWrapper = (&request).into();
+        let body = serde_json::to_value(&wrapper.inner).expect("Responses request serializes");
+        let tools = body["tools"].as_array().expect("function tool remains");
+        assert!(tools.iter().any(|tool| {
+            tool.get("type").and_then(serde_json::Value::as_str) == Some("function")
+                && tool.get("name").and_then(serde_json::Value::as_str) == Some("x_search")
+        }));
+    }
+
+    #[test]
+    fn openai_wire_omits_xai_headers_and_body_extensions() {
+        let mut cfg = minimal_config();
+        cfg.base_url = "https://api.openai.com/v1".to_owned();
+        cfg.api_backend = ApiBackend::Responses;
+        cfg.stream_tool_calls = true;
+        cfg.doom_loop_recovery = Some(Default::default());
+        cfg.client_identifier = Some("should-not-leak".to_owned());
+        cfg.client_version = Some("should-not-leak".to_owned());
+        cfg.deployment_id = Some("should-not-leak".to_owned());
+        cfg.user_id = Some("should-not-leak".to_owned());
+        cfg.extra_headers
+            .insert("x-grok-extra".to_owned(), "should-not-leak".to_owned());
+        cfg.extra_headers
+            .insert("x-xai-token-auth".to_owned(), "should-not-leak".to_owned());
+        cfg.extra_headers.insert(
+            "x-compactions-remaining".to_owned(),
+            "should-not-leak".to_owned(),
+        );
+        cfg.extra_headers
+            .insert("x-compaction-at".to_owned(), "should-not-leak".to_owned());
+
+        let client = SamplingClient::new(cfg).expect("client builds");
+        assert!(!client.xai_wire_extensions);
+        assert!(client.default_headers.contains_key(AUTHORIZATION));
+        assert!(client.default_headers.contains_key(CONTENT_TYPE));
+        assert!(client.default_headers.contains_key(USER_AGENT));
+        assert!(
+            client
+                .default_headers
+                .keys()
+                .all(|name| !is_xai_only_header(name.as_str()))
+        );
+
+        let tracking = GrokRequestHeaders {
+            conv_id: "conv",
+            req_id: "req",
+            model_id: "gpt-5.6",
+            session_id: "session",
+            turn_idx: Some("1"),
+            agent_id: "agent",
+            deployment_id: Some("deployment"),
+            user_id: Some("user"),
+        };
+        let request = tracking
+            .apply(
+                client.post("https://api.openai.com/v1/responses"),
+                client.xai_wire_extensions,
+            )
+            .build()
+            .expect("request builds");
+        assert!(
+            request
+                .headers()
+                .keys()
+                .all(|name| !is_xai_only_header(name.as_str()))
+        );
+
+        let mut body = serde_json::json!({"tools": [{"type": "web_search"}]});
+        client.finalize_response_body(
+            &mut body,
+            None,
+            true,
+            vec![serde_json::json!({"type": "x_search"})],
+        );
+        assert!(body.get("stream_tool_calls").is_none());
+        assert_eq!(body["tools"], serde_json::json!([{"type": "web_search"}]));
+        assert!(
+            client
+                .xai_wire_extensions
+                .then(|| client.defaults.doom_loop_recovery)
+                .flatten()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn xai_wire_keeps_tracking_and_opt_in_extensions() {
+        let mut cfg = minimal_config();
+        cfg.base_url = "https://api.x.ai/v1".to_owned();
+        cfg.api_backend = ApiBackend::Responses;
+        cfg.stream_tool_calls = true;
+        cfg.doom_loop_recovery = Some(Default::default());
+        cfg.client_identifier = Some("grok-build-test".to_owned());
+        cfg.client_version = Some("1.2.3".to_owned());
+
+        let client = SamplingClient::new(cfg).expect("client builds");
+        assert!(client.xai_wire_extensions);
+        assert_eq!(
+            client
+                .default_headers
+                .get("x-grok-client-identifier")
+                .and_then(|value| value.to_str().ok()),
+            Some("grok-build-test")
+        );
+        assert_eq!(
+            client
+                .default_headers
+                .get("x-grok-client-version")
+                .and_then(|value| value.to_str().ok()),
+            Some("1.2.3")
+        );
+
+        let tracking = GrokRequestHeaders {
+            conv_id: "conv",
+            req_id: "req",
+            model_id: "grok-build",
+            session_id: "session",
+            turn_idx: Some("1"),
+            agent_id: "agent",
+            deployment_id: None,
+            user_id: None,
+        };
+        let request = tracking
+            .apply(
+                client.post("https://api.x.ai/v1/responses"),
+                client.xai_wire_extensions,
+            )
+            .header(DOOM_LOOP_CHECK_HEADER, "true")
+            .build()
+            .expect("request builds");
+        assert_eq!(
+            request
+                .headers()
+                .get("x-grok-conv-id")
+                .and_then(|value| value.to_str().ok()),
+            Some("conv")
+        );
+        assert!(request.headers().contains_key(DOOM_LOOP_CHECK_HEADER));
+
+        let mut body = serde_json::json!({"tools": [{"type": "web_search"}]});
+        client.finalize_response_body(
+            &mut body,
+            None,
+            true,
+            vec![serde_json::json!({"type": "x_search"})],
+        );
+        assert_eq!(body["stream_tool_calls"], serde_json::json!(true));
+        assert_eq!(
+            body["tools"],
+            serde_json::json!([{"type": "web_search"}, {"type": "x_search"}])
+        );
+        assert!(client.defaults.doom_loop_recovery.is_some());
+    }
+
+    #[test]
+    fn responses_reasoning_effort_keeps_xhigh_and_max_distinct_on_wire() {
+        let cfg = SamplerConfig {
+            api_backend: ApiBackend::Responses,
+            reasoning_effort: Some(ReasoningEffort::Max),
+            ..minimal_config()
+        };
+        let client = SamplingClient::new(cfg).expect("client builds");
+
+        for (explicit, expected_effort, expected_wire) in [
+            (None, ReasoningEffort::Max, "max"),
+            (
+                Some(ReasoningEffort::Xhigh),
+                ReasoningEffort::Xhigh,
+                "xhigh",
+            ),
+            (Some(ReasoningEffort::Max), ReasoningEffort::Max, "max"),
+        ] {
+            let mut request = CreateResponseWrapper::default();
+            request.reasoning_effort = explicit;
+            client
+                .apply_response_defaults(&mut request)
+                .expect("defaults apply");
+            assert_eq!(request.reasoning_effort, Some(expected_effort));
+            let mut body = serde_json::to_value(&request.inner).expect("request serializes");
+            client.finalize_response_body(&mut body, request.reasoning_effort, false, Vec::new());
+            assert_eq!(
+                body.pointer("/reasoning/effort")
+                    .and_then(serde_json::Value::as_str),
+                Some(expected_wire)
+            );
+        }
     }
 
     #[test]
@@ -2250,6 +2948,18 @@ mod tests {
                     HeaderName::from_static("traceparent"),
                     HeaderValue::from_static("00-test-trace-id-00"),
                 );
+                headers.insert(
+                    HeaderName::from_static("x-grok-injected"),
+                    HeaderValue::from_static("must-not-leak"),
+                );
+                headers.insert(
+                    HeaderName::from_static("x-xai-token-auth"),
+                    HeaderValue::from_static("must-not-leak"),
+                );
+                headers.insert(
+                    HeaderName::from_static("x-compactions-remaining"),
+                    HeaderValue::from_static("must-not-leak"),
+                );
             }
         }
 
@@ -2263,6 +2973,12 @@ mod tests {
         assert!(
             req.headers().contains_key("traceparent"),
             "HeaderInjector should inject traceparent into post() requests"
+        );
+        assert!(
+            req.headers()
+                .keys()
+                .all(|name| !is_xai_only_header(name.as_str())),
+            "HeaderInjector cannot bypass the non-xAI denylist"
         );
     }
 
@@ -2483,6 +3199,7 @@ mod tests {
         let cb_dyn: crate::attribution::SharedAttributionCallback = cb.clone();
         let cfg = SamplerConfig {
             api_key: Some("the-bearer-1234567890-extra-tail".to_string()),
+            base_url: "https://api.x.ai/v1".to_string(),
             api_backend: ApiBackend::ChatCompletions,
             attribution_callback: Some(cb_dyn),
             bearer_resolver: None,
@@ -2502,6 +3219,25 @@ mod tests {
         assert_eq!(
             calls[0].1.as_deref().map(str::len),
             Some(crate::attribution::SENT_BEARER_PREFIX_LEN),
+        );
+    }
+
+    #[test]
+    fn record_401_attribution_never_exposes_non_xai_key_prefix() {
+        let cb = std::sync::Arc::new(CountingCallback::default());
+        let cb_dyn: crate::attribution::SharedAttributionCallback = cb.clone();
+        let cfg = SamplerConfig {
+            api_key: Some("sk-openai-secret-value".to_string()),
+            base_url: "https://api.openai.com/v1".to_string(),
+            api_backend: ApiBackend::Responses,
+            attribution_callback: Some(cb_dyn),
+            ..minimal_config()
+        };
+        let client = SamplingClient::new(cfg).expect("client should build");
+        client.record_401_attribution(crate::attribution::SamplingConsumer::ResponsesStream);
+        assert!(
+            cb.invocations.lock().unwrap().is_empty(),
+            "non-xAI credentials must never reach attribution"
         );
     }
 
@@ -2596,7 +3332,7 @@ mod tests {
                 }
             }
         }"#;
-        let event = deserialize_response_event(sse).expect("parse");
+        let event = known_xai_response_event(sse);
         let rs::ResponseStreamEvent::ResponseCompleted(e) = event else {
             panic!("expected ResponseCompleted");
         };
@@ -2634,7 +3370,7 @@ mod tests {
             )
         };
 
-        let event = deserialize_response_event(&make(78)).expect("parse");
+        let event = known_xai_response_event(&make(78));
         let rs::ResponseStreamEvent::ResponseCompleted(e) = event else {
             panic!("expected ResponseCompleted");
         };
@@ -2648,11 +3384,57 @@ mod tests {
         );
 
         // The REST mapper backfills 0 for unbilled requests: no stash.
-        let event = deserialize_response_event(&make(0)).expect("parse");
+        let event = known_xai_response_event(&make(0));
         let rs::ResponseStreamEvent::ResponseCompleted(e) = event else {
             panic!("expected ResponseCompleted");
         };
         assert!(e.response.metadata.is_none());
+    }
+
+    #[test]
+    fn non_xai_terminal_event_ignores_xai_context_and_cost_overrides() {
+        let sse = r#"{
+            "type": "response.completed",
+            "sequence_number": 0,
+            "response": {
+                "id": "resp_1",
+                "object": "response",
+                "created_at": 0,
+                "model": "gpt-test",
+                "status": "completed",
+                "output": [],
+                "usage": {
+                    "input_tokens": 10,
+                    "input_tokens_details": { "cached_tokens": 0 },
+                    "output_tokens": 5,
+                    "output_tokens_details": { "reasoning_tokens": 0 },
+                    "total_tokens": 15,
+                    "cost_in_usd_ticks": 78,
+                    "context_details": {
+                        "input_tokens": 3,
+                        "output_tokens": 2
+                    }
+                }
+            }
+        }"#;
+
+        let event = deserialize_response_event(sse, false)
+            .expect("known OpenAI event deserializes")
+            .expect("known event is retained");
+        let rs::ResponseStreamEvent::ResponseCompleted(event) = event else {
+            panic!("expected ResponseCompleted");
+        };
+        assert_eq!(
+            event.response.usage.expect("usage present").total_tokens,
+            15
+        );
+        assert!(
+            event
+                .response
+                .metadata
+                .as_ref()
+                .is_none_or(|metadata| !metadata.contains_key(COST_USD_TICKS_METADATA_KEY))
+        );
     }
 
     #[test]
@@ -2678,7 +3460,7 @@ mod tests {
                 }
             }
         }"#;
-        let event = deserialize_response_event(sse).expect("parse");
+        let event = known_xai_response_event(sse);
         let rs::ResponseStreamEvent::ResponseCompleted(e) = event else {
             panic!("expected ResponseCompleted");
         };
@@ -2715,7 +3497,7 @@ mod tests {
                 }
             }
         }"#;
-        let event = deserialize_response_event(sse).expect("parse");
+        let event = known_xai_response_event(sse);
         let rs::ResponseStreamEvent::ResponseCompleted(e) = event else {
             panic!("expected ResponseCompleted");
         };
@@ -2736,10 +3518,158 @@ mod tests {
             "delta": "hello",
             "logprobs": []
         }"#;
-        let event = deserialize_response_event(sse).expect("non-terminal event parses");
+        let event = known_xai_response_event(sse);
         assert!(matches!(
             event,
             rs::ResponseStreamEvent::ResponseOutputTextDelta(_)
+        ));
+    }
+
+    #[test]
+    fn deserialize_response_event_ignores_well_formed_unknown_event_type() {
+        let event = deserialize_response_event(
+            r#"{"type":"response.future_capability.delta","sequence_number":1,"delta":"private content"}"#,
+            false,
+        )
+        .expect("well-formed future event must not fail the stream");
+        assert!(event.is_none());
+    }
+
+    #[test]
+    fn deserialize_response_event_rejects_malformed_known_and_terminal_events() {
+        let malformed_delta = r#"{"type":"response.output_text.delta","sequence_number":1}"#;
+        assert!(deserialize_response_event(malformed_delta, false).is_err());
+
+        let malformed_terminal =
+            r#"{"type":"response.completed","sequence_number":2,"response":{}}"#;
+        assert!(deserialize_response_event(malformed_terminal, false).is_err());
+
+        let malformed_max_terminal = r#"{
+            "type": "response.completed",
+            "sequence_number": 3,
+            "response": {"reasoning": {"effort": "max"}}
+        }"#;
+        assert!(deserialize_response_event(malformed_max_terminal, false).is_err());
+        assert!(deserialize_response_body(br#"{"reasoning":{"effort":"max"}}"#).is_err());
+
+        assert!(deserialize_response_event("not json", false).is_err());
+    }
+
+    #[test]
+    fn streaming_response_preserves_canonical_max_through_sdk_staging() {
+        let sse = r#"{
+            "type": "response.completed",
+            "sequence_number": 0,
+            "response": {
+                "id": "resp_max_stream",
+                "object": "response",
+                "created_at": 0,
+                "model": "gpt-5.6",
+                "status": "completed",
+                "output": [],
+                "reasoning": {"effort": "max", "summary": "auto"}
+            }
+        }"#;
+
+        let event = deserialize_response_event(sse, false)
+            .expect("OpenAI max event must deserialize")
+            .expect("response.completed is known");
+        let rs::ResponseStreamEvent::ResponseCompleted(event) = event else {
+            panic!("expected ResponseCompleted");
+        };
+        assert_eq!(
+            event
+                .response
+                .reasoning
+                .as_ref()
+                .and_then(|reasoning| reasoning.effort.clone()),
+            Some(rs::ReasoningEffort::Xhigh),
+            "async-openai 0.33 receives its supported staging value"
+        );
+        assert_eq!(
+            event
+                .response
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get(CANONICAL_REASONING_EFFORT_METADATA_KEY))
+                .map(String::as_str),
+            Some("max")
+        );
+
+        let items = xai_grok_sampling_types::response_to_conversation_items(event.response);
+        let assistant = items
+            .iter()
+            .find_map(|item| match item {
+                xai_grok_sampling_types::ConversationItem::Assistant(assistant) => Some(assistant),
+                _ => None,
+            })
+            .expect("response conversion emits an assistant item");
+        assert_eq!(assistant.reasoning_effort, Some(ReasoningEffort::Max));
+    }
+
+    #[test]
+    fn non_streaming_response_preserves_canonical_max_through_sdk_staging() {
+        let body = br#"{
+            "id": "resp_max_body",
+            "object": "response",
+            "created_at": 0,
+            "model": "gpt-5.6",
+            "status": "completed",
+            "output": [],
+            "reasoning": {"effort": "max", "summary": "auto"}
+        }"#;
+
+        let response = deserialize_response_body(body).expect("OpenAI max body must deserialize");
+        assert_eq!(
+            response
+                .reasoning
+                .as_ref()
+                .and_then(|reasoning| reasoning.effort.clone()),
+            Some(rs::ReasoningEffort::Xhigh),
+            "async-openai 0.33 receives its supported staging value"
+        );
+        assert_eq!(
+            response
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get(CANONICAL_REASONING_EFFORT_METADATA_KEY))
+                .map(String::as_str),
+            Some("max")
+        );
+
+        let items = xai_grok_sampling_types::response_to_conversation_items(response);
+        let assistant = items
+            .iter()
+            .find_map(|item| match item {
+                xai_grok_sampling_types::ConversationItem::Assistant(assistant) => Some(assistant),
+                _ => None,
+            })
+            .expect("response conversion emits an assistant item");
+        assert_eq!(assistant.reasoning_effort, Some(ReasoningEffort::Max));
+    }
+
+    #[test]
+    fn unknown_tool_sanitizer_is_limited_to_verified_xai_streams() {
+        let terminal_with_x_search = r#"{
+            "type": "response.completed",
+            "sequence_number": 0,
+            "response": {
+                "id": "resp_1",
+                "object": "response",
+                "created_at": 0,
+                "model": "grok-build",
+                "status": "completed",
+                "output": [],
+                "tools": [{"type": "x_search"}]
+            }
+        }"#;
+        assert!(
+            deserialize_response_event(terminal_with_x_search, false).is_err(),
+            "custom/OpenAI streams must remain strict for malformed known events"
+        );
+        assert!(matches!(
+            deserialize_response_event(terminal_with_x_search, true),
+            Ok(Some(rs::ResponseStreamEvent::ResponseCompleted(_)))
         ));
     }
 }

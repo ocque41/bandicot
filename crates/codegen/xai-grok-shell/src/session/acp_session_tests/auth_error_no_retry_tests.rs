@@ -1,3 +1,4 @@
+// Modified in 2026 by the ocque41 OpenAI-support fork; see FORK-NOTICE.md.
 use super::support::*;
 use super::*;
 use crate::auth::{AuthManager, AuthMode, GrokAuth, GrokComConfig};
@@ -578,10 +579,10 @@ fn session_token_auth_gate_truth_table() {
         assert!(!gate(false, ModelByok::NotByok, fp));
         assert!(!gate(false, ModelByok::Byok, fp));
         assert!(!gate(false, ModelByok::Unknown, fp));
-        // Session method: a definite classification ignores the endpoint —
-        // NotByok always refreshes (only ever routes to the session endpoint),
-        // a genuine per-model Byok never does.
-        assert!(gate(true, ModelByok::NotByok, fp));
+        // Session method: every refresh still requires a verified first-party
+        // endpoint, including a cached NotByok classification. This protects a
+        // model id that was repointed to a third-party host after caching.
+        assert_eq!(gate(true, ModelByok::NotByok, fp), fp);
         assert!(!gate(true, ModelByok::Byok, fp));
     }
     // Session method + Unknown BYOK: refresh only against a first-party xAI

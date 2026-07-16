@@ -1,3 +1,4 @@
+// Modified in 2026 by the ocque41 OpenAI-support fork; see FORK-NOTICE.md.
 //! Shared environment helpers: binary resolution, git workdirs, env var setup.
 
 use std::ffi::{OsStr, OsString};
@@ -77,20 +78,26 @@ fn ensure_local_grok_binary(binary: &Path) {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     let output = Command::new(&cargo)
         .current_dir(workspace_root())
-        .args(["build", "-p", "xai-grok-pager", "--bin", "xai-grok-pager"])
+        .args([
+            "build",
+            "-p",
+            "xai-grok-pager-bin",
+            "--bin",
+            "xai-grok-pager",
+        ])
         .output()
-        .unwrap_or_else(|e| panic!("failed to spawn {cargo} to build xai-grok-pager: {e}"));
+        .unwrap_or_else(|e| panic!("failed to spawn {cargo} to build xai-grok-pager-bin: {e}"));
 
     assert!(
         output.status.success(),
-        "failed to build xai-grok-pager for lifecycle tests (exit {:?})\nstdout:\n{}\nstderr:\n{}",
+        "failed to build xai-grok-pager-bin for lifecycle tests (exit {:?})\nstdout:\n{}\nstderr:\n{}",
         output.status.code(),
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
     assert!(
         binary.exists(),
-        "xai-grok-pager build completed but binary missing at {}",
+        "xai-grok-pager-bin build completed but binary missing at {}",
         binary.display()
     );
 }

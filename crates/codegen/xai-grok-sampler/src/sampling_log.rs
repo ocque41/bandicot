@@ -1,3 +1,4 @@
+// Modified in 2026 by the ocque41 OpenAI-support fork; see FORK-NOTICE.md.
 //! Sampling log — emits `tracing` events with `target: "sampling_log"`.
 //! A dedicated layer in `xai-grok-telemetry` routes these to
 //! `~/.grok/logs/sampling.jsonl`. Enable with `--log-sampling`.
@@ -9,6 +10,8 @@ pub const TARGET: &str = "sampling_log";
 #[derive(Debug, Clone)]
 pub struct AuthInfo {
     pub auth_type: &'static str,
+    /// Retained for source compatibility. Credential prefixes are no longer
+    /// populated or emitted to logs.
     pub auth_prefix: Option<String>,
 }
 
@@ -27,7 +30,6 @@ pub fn request_span(
         api_backend = api_backend,
         base_url = base_url,
         auth_type = auth.auth_type,
-        auth_prefix = auth.auth_prefix.as_deref().unwrap_or(""),
         // Recorded from `SamplerConfig` / response usage as the request
         // progresses; `field::Empty` lets callers `record()` them later.
         reasoning_effort = tracing::field::Empty,

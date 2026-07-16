@@ -1,3 +1,4 @@
+// Modified in 2026 by the ocque41 OpenAI-support fork; see FORK-NOTICE.md.
 #![cfg_attr(rustfmt, rustfmt::skip)]
 use super::*;
 use crate::test_support::lsp_runtime::{
@@ -3132,13 +3133,20 @@ fn subagent_auth_type_rule() {
     let session = acp::AuthMethodId::new(CACHED_TOKEN_AUTH_METHOD_ID);
     let api_key = acp::AuthMethodId::new(XAI_API_KEY_METHOD_ID);
     let byok = byok_model_entry("grok-byok");
-    let plain = test_model_entry("grok-plain");
+    let mut plain = test_model_entry("grok-plain");
+    plain.info.base_url = "https://api.x.ai/v1".to_string();
+    let mut third_party = test_model_entry("third-party");
+    third_party.info.base_url = "https://api.openai.com/v1".to_string();
     assert_eq!(super::subagent_auth_type(Some(& byok), & session), AuthType::ApiKey);
     assert_eq!(super::subagent_auth_type(Some(& byok), & api_key), AuthType::ApiKey);
     assert_eq!(
         super::subagent_auth_type(Some(& plain), & session), AuthType::SessionToken,
     );
     assert_eq!(super::subagent_auth_type(Some(& plain), & api_key), AuthType::ApiKey);
+    assert_eq!(
+        super::subagent_auth_type(Some(& third_party), & session), AuthType::ApiKey,
+        "an xAI session bearer must not be refresh-wired to a third-party endpoint",
+    );
     assert_eq!(super::subagent_auth_type(None, & session), AuthType::SessionToken);
     assert_eq!(super::subagent_auth_type(None, & api_key), AuthType::ApiKey);
 }

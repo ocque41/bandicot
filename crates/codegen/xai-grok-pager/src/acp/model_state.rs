@@ -1,3 +1,4 @@
+// Modified in 2026 by the ocque41 OpenAI-support fork; see FORK-NOTICE.md.
 //! Model state — tracks available models and current selection.
 
 use agent_client_protocol as acp;
@@ -231,9 +232,10 @@ impl ModelState {
         {
             return Some(option.value);
         }
-        // Canonical level (e.g. "high", "max"→xhigh) only if the model menu
-        // actually offers that value — not free-form power-user aliases that
-        // would 400 on the server (e.g. `none` on grok-4.5).
+        // Canonical level (for example, "high" or "max") only if the model
+        // menu actually offers that exact value. `xhigh` and `max` remain
+        // distinct; accepting either as an alias for the other could send an
+        // unsupported value and trigger a provider 400 response.
         let parsed = token.parse::<ReasoningEffort>().ok()?;
         options
             .iter()

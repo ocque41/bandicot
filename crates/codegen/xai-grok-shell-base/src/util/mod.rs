@@ -1,3 +1,4 @@
+// Modified in 2026 by the ocque41 OpenAI-support fork; see FORK-NOTICE.md.
 pub mod changelog;
 pub mod event_id;
 pub mod grok_home;
@@ -70,10 +71,12 @@ pub fn is_first_party_xai_url(url: &str) -> bool {
     if is_cli_chat_proxy_url(url) {
         return true;
     }
-    reqwest::Url::parse(url)
-        .ok()
-        .and_then(|u| u.host_str().map(|h| h.to_owned()))
-        .is_some_and(|host| host == "x.ai" || host.ends_with(".x.ai"))
+    reqwest::Url::parse(url).ok().is_some_and(|u| {
+        let host = u.host_str().unwrap_or_default();
+        u.scheme() == "https"
+            && u.port_or_known_default() == Some(443)
+            && (host == "x.ai" || host.ends_with(".x.ai"))
+    })
 }
 /// Truncate a string to at most `max_chars` characters.
 /// Slices at char boundaries so multi-byte UTF-8 never panics.
@@ -239,6 +242,8 @@ mod tests {
         assert!(is_first_party_xai_url(
             "https://cli-chat-proxy.grok.com/v1/chat/completions"
         ));
+        assert!(!is_first_party_xai_url("http://api.x.ai/v1"));
+        assert!(!is_first_party_xai_url("https://api.x.ai:8443/v1"));
         assert!(!is_first_party_xai_url("https://api.openai.com/v1"));
         assert!(!is_first_party_xai_url("https://api.anthropic.com/v1"));
         assert!(!is_first_party_xai_url(

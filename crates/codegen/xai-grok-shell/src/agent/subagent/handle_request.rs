@@ -1,3 +1,4 @@
+// Modified in 2026 by the ocque41 OpenAI-support fork; see FORK-NOTICE.md.
 #![cfg_attr(rustfmt, rustfmt::skip)]
 #![allow(unused_imports)]
 use std::collections::HashMap;
@@ -779,11 +780,11 @@ pub(crate) async fn handle_subagent_request(
                 { "subagent_id" : & request.id, "subagent_type" : & request
                 .subagent_type, "effective_model" : effective_model_id.0.as_ref(),
                 "effective_model_raw" : & effective_sampling_config.model, "base_url" : &
-                effective_sampling_config.base_url, "key_prefix" : key_prefix(&
+                effective_sampling_config.base_url, "has_credential" : has_credential(&
                 effective_sampling_config.api_key), "auth_type" : format!("{:?}",
                 inherited_auth_type), "model_has_own_creds" : model_has_own_creds,
                 "auth_method_id" : ctx.auth_method_id.0.as_ref(), "parent_model" : ctx
-                .model_id.0.as_ref(), "parent_key_prefix" : key_prefix(& ctx
+                .model_id.0.as_ref(), "parent_has_credential" : has_credential(& ctx
                 .sampling_config.api_key), "context_window" : effective_sampling_config
                 .context_window, }
             ),

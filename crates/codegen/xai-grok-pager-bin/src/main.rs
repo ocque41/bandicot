@@ -1,3 +1,4 @@
+// Modified in 2026 by the ocque41 OpenAI-support fork; see FORK-NOTICE.md.
 #![allow(
     unused_imports,
     unused_variables,
@@ -1723,6 +1724,12 @@ async fn async_main() -> Result<()> {
                 stable,
                 enterprise,
             } => {
+                if std::env::var_os("GROK_OPENAI_DISABLE_VENDOR_UPDATE").is_some() {
+                    anyhow::bail!(
+                        "the vendor updater is disabled for grok-openai; run \
+                         scripts/update-from-upstream.sh from the fork checkout instead"
+                    );
+                }
                 init_tracing_simple("cli");
                 let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
                 let channel_switch = get_channel_switch(alpha, stable, enterprise);

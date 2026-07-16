@@ -1,3 +1,4 @@
+// Modified in 2026 by the ocque41 OpenAI-support fork; see FORK-NOTICE.md.
 use crate::agent::auth_method::ModelByok;
 use crate::auth::{AuthManager, GrokComConfig, OidcAuthConfig};
 use crate::remote::DEFAULT_CONTEXT_WINDOW;
@@ -967,6 +968,11 @@ pub struct CliConfig {
 pub struct DiagnosticsConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub crash_handler: Option<bool>,
+    /// Recognition-only typed mirror for `[diagnostics] error_reporting`.
+    /// The raw layered resolver in [`is_error_reporting_disabled_sync`] remains
+    /// authoritative so managed and requirements precedence is preserved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_reporting: Option<bool>,
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -1379,7 +1385,8 @@ pub struct Config {
     /// `[marketplace]` — also read by `xai_grok_plugin_marketplace::load_sources()`.
     #[serde(default, skip_serializing)]
     pub marketplace: MarketplaceConfig,
-    /// `[diagnostics]` — crash handler toggle (`load_crash_handler_enabled_sync`).
+    /// `[diagnostics]` — recognized crash/error-reporting policy switches; the
+    /// startup resolvers still read the raw layered configuration.
     #[serde(default, skip_serializing)]
     pub diagnostics: DiagnosticsConfig,
     /// Storage mode for session persistence.
@@ -3431,12 +3438,16 @@ pub struct ModelEntryConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub top_p: Option<f32>,
     /// The API key for this model's provider.
-    /// If not set, falls back to env_key, then XAI_API_KEY.
+    /// If absent or blank, `env_key` is tried. When either model credential
+    /// field is explicitly configured but neither resolves, credential
+    /// resolution fails closed instead of borrowing session or xAI credentials.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
     /// Environment variable name(s) that hold the provider API key.
     /// Accepts a string or an array (first set, non-empty value wins).
-    /// If not set, falls back to XAI_API_KEY.
+    /// Session and xAI fallback credentials are considered only when neither
+    /// model credential field is configured and the destination is a verified
+    /// first-party xAI endpoint.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub env_key: Option<EnvKeys>,
     /// Which API backend to use for this model.
@@ -3895,10 +3906,21 @@ impl ModelEntry {
         }
     }
     /// The model's own (BYOK) credential: a non-empty `api_key`, else the first
-    /// set, non-empty `env_key` value. `None` means the model has no usable own
-    /// credential and resolution should fall through to the session / global key.
+    /// set, non-empty `env_key` value.
     fn own_credential(&self) -> Option<String> {
         first_own_credential(self.api_key.as_deref(), self.env_key.as_ref())
+    }
+    /// Whether this model explicitly selects its own credential source.
+    ///
+    /// This deliberately differs from [`Self::has_own_credentials`]: a declared
+    /// but currently missing or blank credential still selects that provider and
+    /// must fail closed rather than falling through to xAI authentication.
+    fn declares_own_credentials(&self) -> bool {
+        self.api_key.is_some()
+            || self
+                .env_key
+                .as_ref()
+                .is_some_and(|env_keys| !env_keys.is_empty())
     }
     /// `true` when the model has a non-empty `api_key` or an `env_key` that
     /// resolves to a non-empty value.
@@ -4111,6 +4133,11 @@ pub struct Features {
     /// `None` = defer to env / default (true).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub managed_config: Option<bool>,
+    /// Recognition-only typed mirror for the remote-fetch policy switch.
+    /// Runtime behavior is resolved from raw policy layers by
+    /// `crate::util::config::resolve_remote_fetch_enabled`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_fetch: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lsp_tools: Option<bool>,
     /// MCP tool search/discovery. `None` = defer to remote settings / env / default (true).
@@ -4273,14 +4300,37 @@ pub(crate) fn first_own_credential(
         .or_else(|| env_key.and_then(EnvKeys::resolve_value))
 }
 /// Resolve credentials for a model.
-/// Priority: model api_key/env_key > session token > XAI_API_KEY.
+/// Priority: model api_key/env_key > first-party xAI session token > first-party
+/// `XAI_API_KEY`.
 ///
 /// When `env_key` lists multiple names, the first set non-empty value is used.
+/// Declaring `api_key` or a non-empty `env_key` opts the model into fail-closed
+/// provider isolation: when neither yields a usable value, the result has no
+/// key and does not borrow a cached xAI session or `XAI_API_KEY`.
+/// Models without an explicit credential source may use xAI fallback credentials
+/// only when the endpoint that would receive them is verified first-party.
 pub fn resolve_credentials(model: &ModelEntry, session_key: Option<&str>) -> ResolvedCredentials {
     let info = model.info();
     let (api_key, base_url, auth_type) = if let Some(key) = model.own_credential() {
         (
             Some(key),
+            info.base_url.clone(),
+            xai_chat_state::AuthType::ApiKey,
+        )
+    } else if model.declares_own_credentials() {
+        tracing::warn!(
+            model = % info.model,
+            "model credentials are configured but no non-empty value is available; \
+             session and xAI credential fallback is disabled",
+        );
+        (
+            None,
+            info.base_url.clone(),
+            xai_chat_state::AuthType::ApiKey,
+        )
+    } else if !crate::util::is_first_party_xai_url(&info.base_url) {
+        (
+            None,
             info.base_url.clone(),
             xai_chat_state::AuthType::ApiKey,
         )
@@ -4295,17 +4345,16 @@ pub fn resolve_credentials(model: &ModelEntry, session_key: Option<&str>) -> Res
             .api_base_url
             .clone()
             .unwrap_or_else(|| info.base_url.clone());
-        (Some(key), url, xai_chat_state::AuthType::ApiKey)
-    } else {
-        if let Some(ref env_keys) = model.env_key
-            && !env_keys.is_empty()
-        {
-            tracing::warn!(
-                model = % info.model, env_key = % env_keys,
-                "model has env_key configured but none of the environment variables are set — \
-                 requests will have no API key",
-            );
+        if crate::util::is_first_party_xai_url(&url) {
+            (Some(key), url, xai_chat_state::AuthType::ApiKey)
+        } else {
+            (
+                None,
+                info.base_url.clone(),
+                xai_chat_state::AuthType::ApiKey,
+            )
         }
+    } else {
         (
             None,
             info.base_url.clone(),
@@ -4392,9 +4441,11 @@ pub struct ModelAuthFacts {
     pub auth_scheme: AuthScheme,
 }
 /// Resolve `model_id` to its auth facts from one effective-config load.
-/// Load/parse failure → `byok = Unknown`; model absent from the catalog →
-/// `NotByok`. An empty `model_id` (no sampling config yet) → `Unknown`, not
-/// `NotByok`, so the gate isn't activated for an unidentified model.
+/// Load/parse failure, a model absent from the catalog, or an empty `model_id`
+/// yields `Unknown`, so the session gate must also verify the active endpoint.
+/// A declared provider credential source or any non-xAI route yields `Byok`
+/// even when no key is currently available; this prevents session-token
+/// refresh from crossing provider boundaries.
 pub fn resolve_model_auth_facts(model_id: &str) -> ModelAuthFacts {
     if model_id.is_empty() {
         return ModelAuthFacts {
@@ -4413,8 +4464,14 @@ pub fn resolve_model_auth_facts(model_id: &str) -> ModelAuthFacts {
 fn byok_from_lookup(lookup: &ModelLookup) -> ModelByok {
     match lookup {
         ModelLookup::ConfigUnavailable => ModelByok::Unknown,
-        ModelLookup::Loaded(Some(e)) if e.has_own_credentials() => ModelByok::Byok,
-        ModelLookup::Loaded(_) => ModelByok::NotByok,
+        ModelLookup::Loaded(None) => ModelByok::Unknown,
+        ModelLookup::Loaded(Some(e))
+            if e.declares_own_credentials()
+                || !crate::util::is_first_party_xai_url(&e.info.base_url) =>
+        {
+            ModelByok::Byok
+        }
+        ModelLookup::Loaded(Some(_)) => ModelByok::NotByok,
     }
 }
 enum ModelLookup<'a> {
@@ -4445,6 +4502,8 @@ fn with_resolved_model<T>(model_id: &str, f: impl FnOnce(ModelLookup) -> T) -> T
 /// description, session summary, ...), resolved through the catalog so a
 /// `[model.*]` override redirects it to its own endpoint, credentials, and
 /// routing `model`. `None` → caller falls back to the active session's model.
+/// A resolved third-party/local route is preserved even without a key; xAI
+/// fallback credentials are considered only for verified first-party routes.
 pub fn resolve_aux_model_sampling_config(
     model_id: &str,
     models: &IndexMap<String, ModelEntry>,
@@ -4465,9 +4524,20 @@ pub fn resolve_aux_model_sampling_config(
             None,
             None,
         );
-        if sampler.api_key.is_some() {
+        if sampler.api_key.is_some()
+            || entry.declares_own_credentials()
+            || !crate::util::is_first_party_xai_url(&entry.info.base_url)
+        {
             return Some(sampler);
         }
+    }
+    let fallback_base_url = endpoints.resolve_inference_base_url();
+    if !crate::util::is_first_party_xai_url(&fallback_base_url) {
+        tracing::warn!(
+            aux_model = % model_id,
+            "refusing to attach xAI fallback credentials to a non-xAI auxiliary endpoint",
+        );
+        return None;
     }
     let xai_bearer = session_key
         .map(|s| s.to_owned())
@@ -4481,7 +4551,7 @@ pub fn resolve_aux_model_sampling_config(
                 model: catalog_entry
                     .map(|e| e.info.model)
                     .unwrap_or_else(|| model_id.to_owned()),
-                base_url: endpoints.resolve_inference_base_url(),
+                base_url: fallback_base_url,
                 name: None,
                 description: None,
                 max_completion_tokens: None,
@@ -4541,7 +4611,9 @@ pub fn resolve_aux_model_sampling_config(
 /// Stamp the session-local fields (client id, attribution, bearer resolver,
 /// retries) from the active session onto a routed aux `SamplerConfig` so a
 /// helper model keeps the session's auth/attribution. Shared by image-describe
-/// and the auto-mode classifier so the two can't drift.
+/// and the auto-mode classifier so the two can't drift. The active session's
+/// bearer resolver is copied only to verified first-party xAI endpoints; a
+/// third-party/local helper keeps its own static credential or no auth.
 pub fn stamp_session_local_sampler_fields(
     cfg: &mut SamplerConfig,
     active_session_config: &SamplerConfig,
@@ -4550,7 +4622,11 @@ pub fn stamp_session_local_sampler_fields(
 ) {
     cfg.client_identifier = client_identifier;
     cfg.attribution_callback = active_session_config.attribution_callback.clone();
-    cfg.bearer_resolver = active_session_config.bearer_resolver.clone();
+    cfg.bearer_resolver = if crate::util::is_first_party_xai_url(&cfg.base_url) {
+        active_session_config.bearer_resolver.clone()
+    } else {
+        None
+    };
     cfg.max_retries = max_retries;
 }
 pub fn finalize_image_describe_sampler_config(
@@ -4894,6 +4970,29 @@ mod tests {
     use super::*;
     use serial_test::serial;
     use xai_grok_test_support::EnvGuard;
+    #[derive(Debug)]
+    struct StaticTestBearer;
+    impl xai_grok_sampler::BearerResolver for StaticTestBearer {
+        fn current_bearer(&self) -> Option<String> {
+            Some("xai-session-must-not-leak".to_string())
+        }
+    }
+    #[test]
+    fn raw_policy_switches_are_recognized_by_typed_config() {
+        let raw: toml::Value = toml::from_str(
+            r#"
+            [features]
+            remote_fetch = false
+
+            [diagnostics]
+            error_reporting = false
+            "#,
+        )
+        .expect("policy config should parse as TOML");
+        let cfg = Config::new_from_toml_cfg(&raw).expect("policy config should deserialize");
+        assert_eq!(cfg.features.remote_fetch, Some(false));
+        assert_eq!(cfg.diagnostics.error_reporting, Some(false));
+    }
     #[test]
     fn main_cli_tools_override_preserves_profile_injection_policy() {
         let overrides = CliAgentOverrides {
@@ -5257,10 +5356,12 @@ reasoning_effort = "low"
     fn finalize_image_describe_sampler_some_stamps_session_fields() {
         let active = SamplerConfig {
             model: "composer-session-model".into(),
+            bearer_resolver: Some(std::sync::Arc::new(StaticTestBearer)),
             ..Default::default()
         };
         let aux = SamplerConfig {
             model: "grok-build".into(),
+            base_url: "https://api.x.ai/v1".into(),
             ..Default::default()
         };
         let (model, cfg) =
@@ -5269,6 +5370,25 @@ reasoning_effort = "low"
         assert_eq!(cfg.model, "grok-build");
         assert_eq!(cfg.client_identifier.as_deref(), Some("cli"));
         assert_eq!(cfg.max_retries, Some(7));
+        assert!(cfg.bearer_resolver.is_some());
+    }
+    #[test]
+    fn finalize_image_describe_sampler_does_not_copy_bearer_to_external_route() {
+        let active = SamplerConfig {
+            model: "composer-session-model".into(),
+            bearer_resolver: Some(std::sync::Arc::new(StaticTestBearer)),
+            ..Default::default()
+        };
+        let aux = SamplerConfig {
+            model: "openai-helper".into(),
+            base_url: "https://api.openai.com/v1".into(),
+            ..Default::default()
+        };
+        let (_, cfg) = finalize_image_describe_sampler_config(Some(aux), &active, None, None);
+        assert!(
+            cfg.bearer_resolver.is_none(),
+            "the active xAI session bearer must not cross into an external helper route"
+        );
     }
     #[test]
     fn resolve_aux_model_honors_grok_build_override() {
@@ -5297,6 +5417,97 @@ reasoning_effort = "low"
         assert_eq!(resolved.model, "v9m-rl-learnability-tp8");
         assert_eq!(resolved.base_url, "https://vendor.example/v1");
         assert_eq!(resolved.api_key.as_deref(), Some("vendor-key"));
+    }
+    #[test]
+    #[serial]
+    fn resolve_aux_model_missing_provider_env_fails_closed() {
+        use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
+        let provider_env = "GROK_TEST_AUX_MISSING_PROVIDER_KEY";
+        let _provider = EnvGuard::unset(provider_env);
+        let _global = EnvGuard::set(XAI_API_KEY_ENV_VAR, "xai-global-must-not-leak");
+        let _legacy = EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR);
+        let endpoints = EndpointsConfig::default();
+        let mut catalog = IndexMap::new();
+        catalog.insert(
+            "openai-helper".to_string(),
+            test_model_entry(
+                "openai-helper",
+                "https://api.openai.com/v1",
+                None,
+                Some(provider_env),
+                None,
+            ),
+        );
+        let resolved = resolve_aux_model_sampling_config(
+            "openai-helper",
+            &catalog,
+            &endpoints,
+            Some("xai-session-must-not-leak"),
+            false,
+            None,
+            None,
+        )
+        .expect("the configured provider route should be preserved without a key");
+        assert_eq!(resolved.base_url, "https://api.openai.com/v1");
+        assert_eq!(resolved.api_key, None);
+    }
+    #[test]
+    fn resolve_aux_model_local_no_auth_route_does_not_inherit_xai_session() {
+        let endpoints = EndpointsConfig::default();
+        let mut catalog = IndexMap::new();
+        catalog.insert(
+            "local-helper".to_string(),
+            test_model_entry("local-helper", "http://127.0.0.1:8000/v1", None, None, None),
+        );
+        let resolved = resolve_aux_model_sampling_config(
+            "local-helper",
+            &catalog,
+            &endpoints,
+            Some("xai-session-must-not-leak"),
+            false,
+            None,
+            None,
+        )
+        .expect("an unauthenticated local helper route is valid");
+        assert_eq!(resolved.base_url, "http://127.0.0.1:8000/v1");
+        assert_eq!(resolved.api_key, None);
+    }
+    #[test]
+    fn resolve_aux_model_rejects_xai_bearer_for_custom_fallback_endpoint() {
+        let endpoints = EndpointsConfig {
+            models_base_url: Some("https://inference.example.com/v1".to_string()),
+            deployment_key: Some("xai-deployment-must-not-leak".to_string()),
+            ..EndpointsConfig::default()
+        };
+        let resolved = resolve_aux_model_sampling_config(
+            "missing-helper",
+            &IndexMap::new(),
+            &endpoints,
+            Some("xai-session-must-not-leak"),
+            false,
+            None,
+            None,
+        );
+        assert!(
+            resolved.is_none(),
+            "an xAI fallback credential must never be attached to a custom endpoint"
+        );
+    }
+    #[test]
+    fn resolve_aux_model_preserves_first_party_session_fallback() {
+        let endpoints = EndpointsConfig::default();
+        let resolved = resolve_aux_model_sampling_config(
+            "missing-helper",
+            &IndexMap::new(),
+            &endpoints,
+            Some("xai-session-token"),
+            false,
+            None,
+            None,
+        )
+        .expect("the default first-party helper fallback should remain available");
+        assert_eq!(resolved.base_url, endpoints.resolve_inference_base_url());
+        assert_eq!(resolved.api_key.as_deref(), Some("xai-session-token"));
     }
     #[test]
     fn web_search_disable_api_key_auth_swaps_first_party_key_for_session() {
@@ -5612,23 +5823,49 @@ reasoning_effort = "low"
     }
     #[test]
     #[serial]
-    fn resolve_credentials_empty_env_key_falls_through_to_session() {
+    fn resolve_credentials_missing_env_key_fails_closed_despite_xai_fallbacks() {
+        use xai_chat_state::AuthType;
+        use xai_grok_test_support::EnvGuard;
+        let primary = "GROK_TEST_MISSING_ENV_PRIMARY";
+        let alias = "GROK_TEST_MISSING_ENV_LC_ALIAS";
+        let _primary = EnvGuard::unset(primary);
+        let _alias = EnvGuard::unset(alias);
+        let _global = EnvGuard::set(
+            crate::agent::auth_method::XAI_API_KEY_ENV_VAR,
+            "xai-global-must-not-leak",
+        );
+        let mut model = test_model_entry("m", "https://inference.example/v1", None, None, None);
+        model.env_key = Some(EnvKeys::new([primary, alias]));
+        assert!(!model.has_own_credentials());
+        let creds = resolve_credentials(&model, Some("session-jwt"));
+        assert_eq!(creds.auth_type, AuthType::ApiKey);
+        assert_eq!(
+            creds.api_key, None,
+            "a missing provider env key must not borrow the xAI session or global key"
+        );
+    }
+    #[test]
+    #[serial]
+    fn resolve_credentials_empty_env_key_fails_closed_despite_session() {
         use xai_chat_state::AuthType;
         use xai_grok_test_support::EnvGuard;
         let primary = "GROK_TEST_EMPTY_ENV_PRIMARY";
         let alias = "GROK_TEST_EMPTY_ENV_LC_ALIAS";
         let _primary = EnvGuard::set(primary, "");
-        let _alias = EnvGuard::set(alias, "");
+        let _alias = EnvGuard::set(alias, "   ");
         let mut model = test_model_entry("m", "https://inference.example/v1", None, None, None);
         model.env_key = Some(EnvKeys::new([primary, alias]));
         assert!(!model.has_own_credentials());
         let creds = resolve_credentials(&model, Some("session-jwt"));
-        assert_eq!(creds.auth_type, AuthType::SessionToken);
-        assert_eq!(creds.api_key.as_deref(), Some("session-jwt"));
+        assert_eq!(creds.auth_type, AuthType::ApiKey);
+        assert_eq!(
+            creds.api_key, None,
+            "blank provider env values must not borrow the xAI session key"
+        );
     }
     #[test]
     #[serial]
-    fn resolve_credentials_empty_env_key_falls_through_to_global_key() {
+    fn resolve_credentials_empty_env_key_fails_closed_despite_global_key() {
         use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
         use xai_chat_state::AuthType;
         use xai_grok_test_support::EnvGuard;
@@ -5644,16 +5881,22 @@ reasoning_effort = "low"
         assert!(!model.has_own_credentials());
         let creds = resolve_credentials(&model, None);
         assert_eq!(creds.auth_type, AuthType::ApiKey);
-        assert_eq!(creds.api_key.as_deref(), Some(sentinel));
+        assert_eq!(
+            creds.api_key, None,
+            "blank provider env values must not borrow XAI_API_KEY"
+        );
     }
     #[test]
-    fn resolve_credentials_empty_api_key_falls_through_to_session() {
+    fn resolve_credentials_empty_api_key_fails_closed_despite_session() {
         use xai_chat_state::AuthType;
         let model = test_model_entry("m", "https://inference.example/v1", Some(""), None, None);
         assert!(!model.has_own_credentials());
         let creds = resolve_credentials(&model, Some("session-jwt"));
-        assert_eq!(creds.auth_type, AuthType::SessionToken);
-        assert_eq!(creds.api_key.as_deref(), Some("session-jwt"));
+        assert_eq!(creds.auth_type, AuthType::ApiKey);
+        assert_eq!(
+            creds.api_key, None,
+            "an explicitly blank inline provider key must not borrow the xAI session key"
+        );
     }
     #[test]
     #[serial]
@@ -5679,12 +5922,108 @@ reasoning_effort = "low"
     #[test]
     fn resolve_credentials_sets_auth_type() {
         use xai_chat_state::AuthType;
-        let model = test_model_entry("m", "https://example.com/v1", None, None, None);
+        let model = test_model_entry(
+            "m",
+            crate::env::PROD_CLI_CHAT_PROXY_BASE_URL,
+            None,
+            None,
+            None,
+        );
         let creds = resolve_credentials(&model, Some("tok"));
         assert_eq!(creds.auth_type, AuthType::SessionToken);
         let byok = test_model_entry("m", "https://example.com/v1", Some("key"), None, None);
         let creds = resolve_credentials(&byok, Some("tok"));
         assert_eq!(creds.auth_type, AuthType::ApiKey);
+    }
+    #[test]
+    #[serial]
+    fn resolve_credentials_custom_https_without_own_key_never_inherits_xai_auth() {
+        use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
+        use xai_chat_state::AuthType;
+        use xai_grok_test_support::EnvGuard;
+        let _global = EnvGuard::set(XAI_API_KEY_ENV_VAR, "xai-global-must-not-leak");
+        let _legacy = EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR);
+        let model = test_model_entry(
+            "third-party",
+            "https://inference.example.com/v1",
+            None,
+            None,
+            None,
+        );
+        for session_key in [Some("xai-session-must-not-leak"), None] {
+            let creds = resolve_credentials(&model, session_key);
+            assert_eq!(creds.auth_type, AuthType::ApiKey);
+            assert_eq!(
+                creds.api_key, None,
+                "a third-party HTTPS endpoint must stay unauthenticated without its own key"
+            );
+            assert_eq!(creds.base_url, "https://inference.example.com/v1");
+        }
+    }
+    #[test]
+    #[serial]
+    fn resolve_credentials_localhost_without_own_key_never_inherits_xai_auth() {
+        use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
+        use xai_chat_state::AuthType;
+        use xai_grok_test_support::EnvGuard;
+        let _global = EnvGuard::set(XAI_API_KEY_ENV_VAR, "xai-global-must-not-leak");
+        let _legacy = EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR);
+        let model = test_model_entry("local", "http://127.0.0.1:8000/v1", None, None, None);
+        for session_key in [Some("xai-session-must-not-leak"), None] {
+            let creds = resolve_credentials(&model, session_key);
+            assert_eq!(creds.auth_type, AuthType::ApiKey);
+            assert_eq!(
+                creds.api_key, None,
+                "a localhost endpoint must stay unauthenticated without its own key"
+            );
+            assert_eq!(creds.base_url, "http://127.0.0.1:8000/v1");
+        }
+    }
+    #[test]
+    #[serial]
+    fn resolve_credentials_first_party_xai_preserves_session_and_global_fallbacks() {
+        use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
+        use xai_chat_state::AuthType;
+        use xai_grok_test_support::EnvGuard;
+        let _global = EnvGuard::set(XAI_API_KEY_ENV_VAR, "xai-global-key");
+        let _legacy = EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR);
+        let model = test_model_entry(
+            "first-party",
+            crate::env::PROD_CLI_CHAT_PROXY_BASE_URL,
+            None,
+            None,
+            Some("https://api.x.ai/v1"),
+        );
+        let session = resolve_credentials(&model, Some("xai-session-token"));
+        assert_eq!(session.auth_type, AuthType::SessionToken);
+        assert_eq!(session.api_key.as_deref(), Some("xai-session-token"));
+        assert_eq!(session.base_url, crate::env::PROD_CLI_CHAT_PROXY_BASE_URL);
+        let global = resolve_credentials(&model, None);
+        assert_eq!(global.auth_type, AuthType::ApiKey);
+        assert_eq!(global.api_key.as_deref(), Some("xai-global-key"));
+        assert_eq!(global.base_url, "https://api.x.ai/v1");
+    }
+    #[test]
+    #[serial]
+    fn resolve_credentials_rejects_untrusted_api_key_fallback_endpoint() {
+        use crate::agent::auth_method::{LEGACY_XAI_API_KEY_ENV_VAR, XAI_API_KEY_ENV_VAR};
+        use xai_grok_test_support::EnvGuard;
+        let _global = EnvGuard::set(XAI_API_KEY_ENV_VAR, "xai-global-must-not-leak");
+        let _legacy = EnvGuard::unset(LEGACY_XAI_API_KEY_ENV_VAR);
+        let model = test_model_entry(
+            "misconfigured-first-party",
+            crate::env::PROD_CLI_CHAT_PROXY_BASE_URL,
+            None,
+            None,
+            Some("https://attacker.example/v1"),
+        );
+        let creds = resolve_credentials(&model, None);
+        assert_eq!(creds.api_key, None);
+        assert_eq!(
+            creds.base_url,
+            crate::env::PROD_CLI_CHAT_PROXY_BASE_URL,
+            "an untrusted api_base_url must not receive XAI_API_KEY"
+        );
     }
     /// Regression: BYOK env-var auth must stay ApiKey even when signed in,
     /// otherwise the bearer resolver overwrites the BYOK key with a session JWT.
@@ -5904,7 +6243,7 @@ reasoning_effort = "low"
         );
         assert_eq!(
             byok_from_lookup(&ModelLookup::Loaded(None)),
-            ModelByok::NotByok,
+            ModelByok::Unknown,
         );
         let byok = test_model_entry(
             "m",
@@ -5916,6 +6255,20 @@ reasoning_effort = "low"
         assert_eq!(
             byok_from_lookup(&ModelLookup::Loaded(Some(&byok))),
             ModelByok::Byok,
+        );
+        let unresolved_declared =
+            test_model_entry("m", "https://api.x.ai/v1", Some(""), None, None);
+        assert_eq!(
+            byok_from_lookup(&ModelLookup::Loaded(Some(&unresolved_declared))),
+            ModelByok::Byok,
+            "a declared but unresolved provider key must block session refresh",
+        );
+        let unauthenticated_external =
+            test_model_entry("m", "http://127.0.0.1:8000/v1", None, None, None);
+        assert_eq!(
+            byok_from_lookup(&ModelLookup::Loaded(Some(&unauthenticated_external))),
+            ModelByok::Byok,
+            "a non-xAI route must never receive a refreshed xAI session token",
         );
         let session = test_model_entry("m", "https://api.x.ai/v1", None, None, None);
         assert_eq!(

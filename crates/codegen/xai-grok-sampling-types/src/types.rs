@@ -1,3 +1,4 @@
+// Modified in 2026 by the ocque41 OpenAI-support fork; see FORK-NOTICE.md.
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use std::num::NonZeroU64;
@@ -760,6 +761,10 @@ impl CompactionsRemaining {
 }
 
 /// Reasoning effort level. `None`/`Minimal` are omitted on the Anthropic Messages API.
+///
+/// `Xhigh` and `Max` are distinct canonical tokens. Some provider SDKs do not
+/// yet expose `Max`, so callers must preserve the distinction when producing
+/// the final wire payload.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ReasoningEffort {
@@ -770,6 +775,7 @@ pub enum ReasoningEffort {
     Medium,
     High,
     Xhigh,
+    Max,
 }
 
 impl ReasoningEffort {
@@ -781,11 +787,16 @@ impl ReasoningEffort {
             Self::Medium => crate::rs::ReasoningEffort::Medium,
             Self::High => crate::rs::ReasoningEffort::High,
             Self::Xhigh => crate::rs::ReasoningEffort::Xhigh,
+            // async-openai 0.33 does not expose `max`. This is only a typed
+            // staging value: Responses API serialization must override the
+            // resulting effort to the literal `"max"` before sending it.
+            Self::Max => crate::rs::ReasoningEffort::Xhigh,
         }
     }
 
-    /// Inverse of [`to_responses_api`](Self::to_responses_api): the effort the
-    /// Responses API echoes back on `response.reasoning.effort`.
+    /// Convert the effort echoed by the Responses API. Because async-openai
+    /// 0.33 has no `Max` variant, an echoed `Xhigh` remains `Xhigh`; callers
+    /// cannot reconstruct a staged `Max` value through this SDK type.
     pub fn from_responses_api(effort: crate::rs::ReasoningEffort) -> Self {
         match effort {
             crate::rs::ReasoningEffort::None => Self::None,
@@ -805,6 +816,7 @@ impl ReasoningEffort {
             Self::Medium => "medium",
             Self::High => "high",
             Self::Xhigh => "xhigh",
+            Self::Max => "max",
         }
     }
 
@@ -816,6 +828,7 @@ impl ReasoningEffort {
             Self::Medium => Some("medium"),
             Self::High => Some("high"),
             Self::Xhigh => Some("max"),
+            Self::Max => Some("max"),
         }
     }
 }
@@ -836,7 +849,8 @@ impl std::str::FromStr for ReasoningEffort {
             "low" => Ok(Self::Low),
             "medium" => Ok(Self::Medium),
             "high" => Ok(Self::High),
-            "xhigh" | "max" => Ok(Self::Xhigh), // max is a CLI/UX alias of xhigh
+            "xhigh" => Ok(Self::Xhigh),
+            "max" => Ok(Self::Max),
             _ => Err(format!(
                 "invalid reasoning effort: {s:?} (expected one of: none, minimal, low, medium, high, xhigh, max)"
             )),
@@ -844,7 +858,8 @@ impl std::str::FromStr for ReasoningEffort {
     }
 }
 
-/// Canonical wire parse only (`max` → `Xhigh`); remapped menu ids need a model catalog.
+/// Canonical wire parse only (`xhigh` and `max` remain distinct); remapped menu
+/// ids need a model catalog.
 pub fn parse_canonical_effort_token(token: &str) -> Option<ReasoningEffort> {
     token.parse().ok()
 }
@@ -900,7 +915,8 @@ pub struct ReasoningEffortOption {
 }
 
 /// Deserialization shape accepting either a bare canonical value string
-/// (`"xhigh"`) or a table with `value` required and everything else optional.
+/// (for example, `"xhigh"` or `"max"`) or a table with `value` required and
+/// everything else optional.
 #[derive(serde::Deserialize)]
 #[serde(untagged)]
 enum RawReasoningEffortOption {
@@ -1064,6 +1080,11 @@ pub struct CreateResponseWrapper {
     /// The inner Responses API request.
     pub inner: crate::rs::CreateResponse,
 
+    /// Canonical reasoning-effort token before conversion to async-openai's
+    /// typed request. This preserves `Max` as distinct from `Xhigh` even though
+    /// async-openai 0.33 represents both with its `Xhigh` variant.
+    pub reasoning_effort: Option<ReasoningEffort>,
+
     /// Custom header: conversation ID for tracking.
     pub x_grok_conv_id: Option<String>,
 
@@ -1088,8 +1109,14 @@ pub struct CreateResponseWrapper {
 impl CreateResponseWrapper {
     /// Create a new wrapper from an existing `CreateResponse`.
     pub fn new(inner: crate::rs::CreateResponse) -> Self {
+        let reasoning_effort = inner
+            .reasoning
+            .as_ref()
+            .and_then(|reasoning| reasoning.effort.clone())
+            .map(ReasoningEffort::from_responses_api);
         Self {
             inner,
+            reasoning_effort,
             x_grok_conv_id: None,
             x_grok_req_id: None,
             x_grok_session_id: None,
@@ -1207,6 +1234,7 @@ mod tests {
             ReasoningEffort::Medium,
             ReasoningEffort::High,
             ReasoningEffort::Xhigh,
+            ReasoningEffort::Max,
         ] {
             let json = serde_json::to_string(&v).unwrap();
             assert_eq!(json, format!("\"{}\"", v.as_str()), "serialize {v:?}");
@@ -1214,30 +1242,56 @@ mod tests {
             assert_eq!(back, v, "round-trip {v:?}");
         }
         assert!(serde_json::from_str::<ReasoningEffort>("\"BOGUS\"").is_err());
-        assert!(serde_json::from_str::<ReasoningEffort>("\"max\"").is_err());
     }
 
     #[test]
-    fn reasoning_effort_from_str_accepts_max_as_xhigh() {
+    fn reasoning_effort_from_str_keeps_xhigh_and_max_distinct() {
         assert_eq!(
             "max".parse::<ReasoningEffort>().unwrap(),
-            ReasoningEffort::Xhigh
+            ReasoningEffort::Max
         );
         assert_eq!(
             "MAX".parse::<ReasoningEffort>().unwrap(),
-            ReasoningEffort::Xhigh
+            ReasoningEffort::Max
         );
         assert_eq!(
             "xhigh".parse::<ReasoningEffort>().unwrap(),
             ReasoningEffort::Xhigh
         );
         assert_eq!(ReasoningEffort::Xhigh.as_str(), "xhigh");
+        assert_eq!(ReasoningEffort::Max.as_str(), "max");
+        assert_eq!(ReasoningEffort::Xhigh.to_string(), "xhigh");
+        assert_eq!(ReasoningEffort::Max.to_string(), "max");
+    }
+
+    #[test]
+    fn reasoning_effort_provider_mappings_preserve_xhigh_behavior() {
+        assert_eq!(
+            ReasoningEffort::Xhigh.to_responses_api(),
+            crate::rs::ReasoningEffort::Xhigh
+        );
+        // The 0.33 SDK has no `Max` variant; the sampler must replace this
+        // typed staging value with a literal `"max"` in the wire payload.
+        assert_eq!(
+            ReasoningEffort::Max.to_responses_api(),
+            crate::rs::ReasoningEffort::Xhigh
+        );
+        assert_eq!(
+            ReasoningEffort::from_responses_api(crate::rs::ReasoningEffort::Xhigh),
+            ReasoningEffort::Xhigh
+        );
+        assert_eq!(ReasoningEffort::Xhigh.to_messages_api(), Some("max"));
+        assert_eq!(ReasoningEffort::Max.to_messages_api(), Some("max"));
     }
 
     #[test]
     fn parse_canonical_effort_token_helper() {
         assert_eq!(
             parse_canonical_effort_token("max"),
+            Some(ReasoningEffort::Max)
+        );
+        assert_eq!(
+            parse_canonical_effort_token("xhigh"),
             Some(ReasoningEffort::Xhigh)
         );
         assert_eq!(
@@ -1261,6 +1315,11 @@ mod tests {
                 default: false,
             }
         );
+
+        let max: ReasoningEffortOption = serde_json::from_value(json!("max")).unwrap();
+        assert_eq!(max.id, "max");
+        assert_eq!(max.value, ReasoningEffort::Max);
+        assert_eq!(max.label, "Max");
     }
 
     #[test]
