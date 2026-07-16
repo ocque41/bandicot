@@ -1,0 +1,137 @@
+# Secret-free local profile for Grok Build through CLIProxyAPI and Codex OAuth.
+#
+# The launcher reads only CLIProxyAPI's loopback client token from the user's
+# protected token file. Codex OAuth credentials remain owned by CLIProxyAPI.
+
+[cli]
+auto_update = false
+
+[models]
+default = "openai-sol"
+default_reasoning_effort = "medium"
+web_search = "openai-luna"
+session_summary = "openai-luna"
+image_description = "openai-luna"
+prompt_suggestion = "openai-luna"
+allowed_models = ["openai-*"]
+
+[features]
+telemetry = false
+feedback = false
+managed_config = false
+remote_fetch = false
+video_gen = false
+voice_mode = false
+backend_tools = false
+
+[telemetry]
+trace_upload = false
+mixpanel_enabled = false
+otel_enabled = false
+
+[diagnostics]
+error_reporting = false
+
+[model.openai-latest]
+model = "gpt-5.6-sol"
+base_url = "http://127.0.0.1:8317/v1"
+name = "GPT-5.6 Sol via Codex plan"
+description = "Current frontier Codex-plan model through local CLIProxyAPI"
+env_key = "GROK_CODEX_PROXY_TOKEN"
+api_backend = "responses"
+context_window = 372000
+max_completion_tokens = 128000
+agent_type = "codex"
+reasoning_efforts = ["none", "low", "medium", "high", "xhigh", "max"]
+supports_backend_search = false
+
+[model.openai-sol]
+model = "gpt-5.6-sol"
+base_url = "http://127.0.0.1:8317/v1"
+name = "GPT-5.6 Sol via Codex plan"
+description = "Frontier agentic coding model"
+env_key = "GROK_CODEX_PROXY_TOKEN"
+api_backend = "responses"
+context_window = 372000
+max_completion_tokens = 128000
+agent_type = "codex"
+reasoning_efforts = ["none", "low", "medium", "high", "xhigh", "max"]
+supports_backend_search = false
+
+[model.openai-terra]
+model = "gpt-5.6-terra"
+base_url = "http://127.0.0.1:8317/v1"
+name = "GPT-5.6 Terra via Codex plan"
+description = "Balanced agentic coding model"
+env_key = "GROK_CODEX_PROXY_TOKEN"
+api_backend = "responses"
+context_window = 372000
+max_completion_tokens = 128000
+agent_type = "codex"
+reasoning_efforts = ["none", "low", "medium", "high", "xhigh", "max"]
+supports_backend_search = false
+
+[model.openai-luna]
+model = "gpt-5.6-luna"
+base_url = "http://127.0.0.1:8317/v1"
+name = "GPT-5.6 Luna via Codex plan"
+description = "Fast Codex-plan model"
+env_key = "GROK_CODEX_PROXY_TOKEN"
+api_backend = "responses"
+context_window = 372000
+max_completion_tokens = 128000
+agent_type = "codex"
+reasoning_efforts = ["none", "low", "medium", "high", "xhigh", "max"]
+supports_backend_search = false
+
+[model.openai-5-5]
+model = "gpt-5.5"
+base_url = "http://127.0.0.1:8317/v1"
+name = "GPT-5.5 via Codex plan"
+description = "Complex coding and research model"
+env_key = "GROK_CODEX_PROXY_TOKEN"
+api_backend = "responses"
+context_window = 372000
+max_completion_tokens = 128000
+agent_type = "codex"
+reasoning_efforts = ["low", "medium", "high", "xhigh"]
+supports_backend_search = false
+
+[model.openai-5-4]
+model = "gpt-5.4"
+base_url = "http://127.0.0.1:8317/v1"
+name = "GPT-5.4 via Codex plan"
+description = "Everyday coding model"
+env_key = "GROK_CODEX_PROXY_TOKEN"
+api_backend = "responses"
+context_window = 372000
+max_completion_tokens = 128000
+agent_type = "codex"
+reasoning_efforts = ["low", "medium", "high", "xhigh"]
+supports_backend_search = false
+
+[model.openai-5-4-mini]
+model = "gpt-5.4-mini"
+base_url = "http://127.0.0.1:8317/v1"
+name = "GPT-5.4 Mini via Codex plan"
+description = "Small fast coding model"
+env_key = "GROK_CODEX_PROXY_TOKEN"
+api_backend = "responses"
+context_window = 372000
+max_completion_tokens = 128000
+agent_type = "codex"
+reasoning_efforts = ["low", "medium", "high", "xhigh"]
+supports_backend_search = false
+
+[model.openai-codex]
+model = "gpt-5.3-codex-spark"
+base_url = "http://127.0.0.1:8317/v1"
+name = "GPT-5.3 Codex Spark via Codex plan"
+description = "Ultra-fast coding model"
+env_key = "GROK_CODEX_PROXY_TOKEN"
+api_backend = "responses"
+context_window = 372000
+max_completion_tokens = 128000
+agent_type = "codex"
+reasoning_efforts = ["low", "medium", "high", "xhigh"]
+supports_backend_search = false

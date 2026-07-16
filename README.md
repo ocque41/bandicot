@@ -38,10 +38,11 @@ the fork itself:
 ~/.local/bin/grok-openai
 ```
 
-With no Platform key, the launcher verifies the official Codex runtime bundled
-with ChatGPT.app is signed in, then starts its Codex TUI using the ChatGPT plan.
-To run the Grok Build TUI itself, first run `./scripts/setup-openai-key.sh`; the
-key setup delegates the secret prompt and storage to macOS Keychain. The
+With no Platform key, the launcher starts the Grok Build TUI against a
+loopback-only CLIProxyAPI Responses endpoint backed by the user's existing
+Codex OAuth login. To use direct Platform billing instead, first run
+`./scripts/setup-openai-key.sh`; the key setup delegates the secret prompt and
+storage to macOS Keychain. The
 installer creates an isolated launcher at `~/.local/bin/grok-openai`, installs
 the compiled binary under `~/.local/libexec/grok-openai/`, and uses
 `~/.grok-openai` as `GROK_HOME`. It does not edit `PATH`, shell startup files,
@@ -62,9 +63,10 @@ setup, model choices, security boundaries, and troubleshooting are in
 
 ## Assumptions
 
-- ChatGPT-plan access uses the official Codex TUI and its existing login. Grok
-  Build inference means an OpenAI Platform project with an API key and billing.
-  The launcher never copies Codex OAuth tokens or treats them as API keys.
+- ChatGPT-plan access uses the Grok Build TUI through the separately installed
+  CLIProxyAPI compatibility layer on `127.0.0.1`. CLIProxyAPI owns Codex OAuth;
+  the launcher reads only its protected local client token and never copies the
+  OAuth credential or treats it as a Platform API key.
 - "Latest models" means the floating `gpt-5.6` alias by default, plus curated
   `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, and `gpt-5.3-codex`
   selections. Availability still depends on the user's OpenAI project.
@@ -93,9 +95,9 @@ cargo check -p xai-grok-pager-bin            # fast validation
 ```
 
 The binary artifact is named `xai-grok-pager`; this fork's installer exposes it
-as `grok-openai`. Grok Build mode requires `OPENAI_API_KEY`, supplied by the
-environment or its isolated Keychain-backed launcher. Without that key, the
-launcher uses the signed-in official Codex TUI instead.
+as `grok-openai`. Direct Platform mode uses `OPENAI_API_KEY`. Without that key,
+the launcher keeps the Grok Build TUI and selects the isolated
+`~/.grok-codex-plan` profile plus CLIProxyAPI's protected local client token.
 
 ## Documentation
 

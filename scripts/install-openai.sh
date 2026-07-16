@@ -20,8 +20,10 @@ Test/packaging overrides:
   GROK_OPENAI_PREBUILT         executable binary to install instead of building
   GROK_OPENAI_PROFILE_SOURCE  profile TOML (default: config/openai.toml)
   GROK_OPENAI_HOME            isolated state dir (default: ~/.grok-openai)
+  GROK_CODEX_PLAN_HOME        Codex-plan state dir (default: ~/.grok-codex-plan)
   GROK_OPENAI_BIN_DIR         launcher dir (default: ~/.local/bin)
   GROK_OPENAI_LIBEXEC_DIR     binary dir (default: ~/.local/libexec/grok-openai)
+  GROK_CODEX_PROXY_TOKEN_FILE CLIProxyAPI client token (default: ~/.cli-proxy-api/client-token)
 EOF
         exit 0
         ;;
@@ -31,13 +33,16 @@ esac
 [ -n "${HOME:-}" ] || openai_workflow_die 'HOME is not set'
 
 GROK_OPENAI_HOME=${GROK_OPENAI_HOME:-$HOME/.grok-openai}
+GROK_CODEX_PLAN_HOME=${GROK_CODEX_PLAN_HOME:-$HOME/.grok-codex-plan}
 GROK_OPENAI_BIN_DIR=${GROK_OPENAI_BIN_DIR:-$HOME/.local/bin}
 GROK_OPENAI_LIBEXEC_DIR=${GROK_OPENAI_LIBEXEC_DIR:-$HOME/.local/libexec/grok-openai}
 PROFILE_SOURCE=${GROK_OPENAI_PROFILE_SOURCE:-$REPO_ROOT/config/openai.toml}
+PLAN_PROFILE_SOURCE=${GROK_CODEX_PLAN_PROFILE_SOURCE:-$REPO_ROOT/config/codex-plan.toml}
+PROXY_TOKEN_FILE=${GROK_CODEX_PROXY_TOKEN_FILE:-$HOME/.cli-proxy-api/client-token}
 KEYCHAIN_SERVICE=${GROK_OPENAI_KEYCHAIN_SERVICE:-ocque41.grok-build.openai}
 KEYCHAIN_ACCOUNT=${GROK_OPENAI_KEYCHAIN_ACCOUNT:-openai-platform}
 
-case "$GROK_OPENAI_HOME$GROK_OPENAI_BIN_DIR$GROK_OPENAI_LIBEXEC_DIR" in
+case "$GROK_OPENAI_HOME$GROK_CODEX_PLAN_HOME$GROK_OPENAI_BIN_DIR$GROK_OPENAI_LIBEXEC_DIR$PROXY_TOKEN_FILE" in
     *'
 '*) openai_workflow_die 'install paths must not contain newline characters' ;;
 esac
@@ -49,7 +54,20 @@ case $GROK_OPENAI_HOME in
     /*) ;;
     *) openai_workflow_die 'GROK_OPENAI_HOME must be an absolute path' ;;
 esac
+case $GROK_CODEX_PLAN_HOME in
+    /*) ;;
+    *) openai_workflow_die 'GROK_CODEX_PLAN_HOME must be an absolute path' ;;
+esac
+case $PROXY_TOKEN_FILE in
+    /*) ;;
+    *) openai_workflow_die 'GROK_CODEX_PROXY_TOKEN_FILE must be an absolute path' ;;
+esac
 case "$GROK_OPENAI_HOME/" in
+    "$HOME/.grok/"|"$HOME/.grok/"*)
+        openai_workflow_die 'refusing to use or modify the legacy ~/.grok directory'
+        ;;
+esac
+case "$GROK_CODEX_PLAN_HOME/" in
     "$HOME/.grok/"|"$HOME/.grok/"*)
         openai_workflow_die 'refusing to use or modify the legacy ~/.grok directory'
         ;;
@@ -57,10 +75,16 @@ esac
 case $GROK_OPENAI_HOME in
     */../*|*/..|*/./*|*/.) openai_workflow_die 'GROK_OPENAI_HOME must not contain . or .. path components' ;;
 esac
+case $GROK_CODEX_PLAN_HOME in
+    */../*|*/..|*/./*|*/.) openai_workflow_die 'GROK_CODEX_PLAN_HOME must not contain . or .. path components' ;;
+esac
 [ ! -L "$GROK_OPENAI_HOME" ] || \
     openai_workflow_die 'GROK_OPENAI_HOME must not be a symbolic link'
+[ ! -L "$GROK_CODEX_PLAN_HOME" ] || \
+    openai_workflow_die 'GROK_CODEX_PLAN_HOME must not be a symbolic link'
 
 [ -f "$PROFILE_SOURCE" ] || openai_workflow_die "OpenAI profile not found: $PROFILE_SOURCE"
+[ -f "$PLAN_PROFILE_SOURCE" ] || openai_workflow_die "Codex-plan profile not found: $PLAN_PROFILE_SOURCE"
 
 if [ -n "${GROK_OPENAI_PREBUILT:-}" ]; then
     BINARY=$(openai_workflow_abspath "$GROK_OPENAI_PREBUILT") || \
@@ -80,52 +104,69 @@ fi
 "$BINARY" --version >/dev/null || openai_workflow_die 'candidate binary failed its --version smoke test'
 BINARY_VERSION=$("$BINARY" --version 2>&1 | sed -n '1p')
 
-mkdir -p "$GROK_OPENAI_HOME" "$GROK_OPENAI_BIN_DIR" "$GROK_OPENAI_LIBEXEC_DIR"
-chmod 700 "$GROK_OPENAI_HOME"
+mkdir -p "$GROK_OPENAI_HOME" "$GROK_CODEX_PLAN_HOME" "$GROK_OPENAI_BIN_DIR" "$GROK_OPENAI_LIBEXEC_DIR"
+chmod 700 "$GROK_OPENAI_HOME" "$GROK_CODEX_PLAN_HOME"
 
 BINARY_DEST=$GROK_OPENAI_LIBEXEC_DIR/grok
 PROFILE_DEST=$GROK_OPENAI_LIBEXEC_DIR/openai.toml
+PLAN_PROFILE_DEST=$GROK_OPENAI_LIBEXEC_DIR/codex-plan.toml
 CONFIG_DEST=$GROK_OPENAI_HOME/config.toml
 CONFIG_HASH_DEST=$GROK_OPENAI_HOME/.installed-config.sha256
+PLAN_CONFIG_DEST=$GROK_CODEX_PLAN_HOME/config.toml
+PLAN_CONFIG_HASH_DEST=$GROK_CODEX_PLAN_HOME/.installed-config.sha256
 LAUNCHER_DEST=$GROK_OPENAI_BIN_DIR/grok-openai
 
 [ ! -L "$CONFIG_DEST" ] || \
     openai_workflow_die 'refusing a symbolic-link runtime config'
+[ ! -L "$PLAN_CONFIG_DEST" ] || \
+    openai_workflow_die 'refusing a symbolic-link Codex-plan runtime config'
 
 openai_workflow_atomic_copy "$BINARY" "$BINARY_DEST" 755 || \
     openai_workflow_die "failed to install binary at $BINARY_DEST"
 openai_workflow_atomic_copy "$PROFILE_SOURCE" "$PROFILE_DEST" 600 || \
     openai_workflow_die "failed to install canonical profile at $PROFILE_DEST"
+openai_workflow_atomic_copy "$PLAN_PROFILE_SOURCE" "$PLAN_PROFILE_DEST" 600 || \
+    openai_workflow_die "failed to install canonical Codex-plan profile at $PLAN_PROFILE_DEST"
 
-NEW_PROFILE_HASH=$(openai_workflow_hash_file "$PROFILE_SOURCE")
-INSTALL_CONFIG=0
-if [ ! -e "$CONFIG_DEST" ]; then
-    INSTALL_CONFIG=1
-elif [ -f "$CONFIG_HASH_DEST" ]; then
-    RECORDED_HASH=$(sed -n '1p' "$CONFIG_HASH_DEST" 2>/dev/null || true)
-    CURRENT_HASH=$(openai_workflow_hash_file "$CONFIG_DEST" 2>/dev/null || true)
-    if [ -n "$RECORDED_HASH" ] && [ "$RECORDED_HASH" = "$CURRENT_HASH" ]; then
-        INSTALL_CONFIG=1
-    elif [ "$CURRENT_HASH" = "$NEW_PROFILE_HASH" ]; then
-        INSTALL_CONFIG=1
+install_runtime_profile() {
+    _irp_source=$1
+    _irp_config=$2
+    _irp_hash_file=$3
+    _irp_canonical=$4
+    _irp_new_hash=$(openai_workflow_hash_file "$_irp_source")
+    _irp_install=0
+    if [ ! -e "$_irp_config" ]; then
+        _irp_install=1
+    elif [ -f "$_irp_hash_file" ]; then
+        _irp_recorded=$(sed -n '1p' "$_irp_hash_file" 2>/dev/null || true)
+        _irp_current=$(openai_workflow_hash_file "$_irp_config" 2>/dev/null || true)
+        if [ -n "$_irp_recorded" ] && [ "$_irp_recorded" = "$_irp_current" ]; then
+            _irp_install=1
+        elif [ "$_irp_current" = "$_irp_new_hash" ]; then
+            _irp_install=1
+        fi
     fi
-fi
 
-if [ "$INSTALL_CONFIG" -eq 1 ]; then
-    openai_workflow_atomic_copy "$PROFILE_SOURCE" "$CONFIG_DEST" 600 || \
-        openai_workflow_die "failed to install profile at $CONFIG_DEST"
-    openai_workflow_atomic_text "$CONFIG_HASH_DEST" 600 "$NEW_PROFILE_HASH" || \
-        openai_workflow_die "failed to record installed profile hash"
-else
-    openai_workflow_note "Preserved customized profile: $CONFIG_DEST"
-    openai_workflow_note "The new canonical profile is available at: $PROFILE_DEST"
-fi
+    if [ "$_irp_install" -eq 1 ]; then
+        openai_workflow_atomic_copy "$_irp_source" "$_irp_config" 600 || \
+            openai_workflow_die "failed to install profile at $_irp_config"
+        openai_workflow_atomic_text "$_irp_hash_file" 600 "$_irp_new_hash" || \
+            openai_workflow_die "failed to record installed profile hash"
+    else
+        openai_workflow_note "Preserved customized profile: $_irp_config"
+        openai_workflow_note "The new canonical profile is available at: $_irp_canonical"
+    fi
+}
+
+install_runtime_profile "$PROFILE_SOURCE" "$CONFIG_DEST" "$CONFIG_HASH_DEST" "$PROFILE_DEST"
+install_runtime_profile "$PLAN_PROFILE_SOURCE" "$PLAN_CONFIG_DEST" "$PLAN_CONFIG_HASH_DEST" "$PLAN_PROFILE_DEST"
 
 DEFAULT_HOME_QUOTED=$(openai_workflow_shell_quote "$GROK_OPENAI_HOME")
+DEFAULT_PLAN_HOME_QUOTED=$(openai_workflow_shell_quote "$GROK_CODEX_PLAN_HOME")
 DEFAULT_LIBEXEC_QUOTED=$(openai_workflow_shell_quote "$GROK_OPENAI_LIBEXEC_DIR")
 DEFAULT_SERVICE_QUOTED=$(openai_workflow_shell_quote "$KEYCHAIN_SERVICE")
 DEFAULT_ACCOUNT_QUOTED=$(openai_workflow_shell_quote "$KEYCHAIN_ACCOUNT")
-DEFAULT_CODEX_QUOTED=$(openai_workflow_shell_quote "/Applications/ChatGPT.app/Contents/Resources/codex")
+DEFAULT_PROXY_TOKEN_FILE_QUOTED=$(openai_workflow_shell_quote "$PROXY_TOKEN_FILE")
 
 LAUNCHER_TEMP=$(mktemp "${LAUNCHER_DEST}.tmp.XXXXXX") || \
     openai_workflow_die 'failed to stage launcher'
@@ -134,10 +175,11 @@ cat >"$LAUNCHER_TEMP" <<EOF
 set -eu
 
 GROK_OPENAI_HOME=\${GROK_OPENAI_HOME:-$DEFAULT_HOME_QUOTED}
+GROK_CODEX_PLAN_HOME=\${GROK_CODEX_PLAN_HOME:-$DEFAULT_PLAN_HOME_QUOTED}
 GROK_OPENAI_LIBEXEC_DIR=\${GROK_OPENAI_LIBEXEC_DIR:-$DEFAULT_LIBEXEC_QUOTED}
 GROK_OPENAI_KEYCHAIN_SERVICE=\${GROK_OPENAI_KEYCHAIN_SERVICE:-$DEFAULT_SERVICE_QUOTED}
 GROK_OPENAI_KEYCHAIN_ACCOUNT=\${GROK_OPENAI_KEYCHAIN_ACCOUNT:-$DEFAULT_ACCOUNT_QUOTED}
-GROK_OPENAI_CODEX_BIN=\${GROK_OPENAI_CODEX_BIN:-$DEFAULT_CODEX_QUOTED}
+GROK_CODEX_PROXY_TOKEN_FILE=\${GROK_CODEX_PROXY_TOKEN_FILE:-$DEFAULT_PROXY_TOKEN_FILE_QUOTED}
 
 [ -n "\${HOME:-}" ] || {
     printf '%s\n' 'error: HOME is not set.' >&2
@@ -150,9 +192,29 @@ case \$GROK_OPENAI_HOME in
         exit 1
         ;;
 esac
+case \$GROK_CODEX_PLAN_HOME in
+    /*) ;;
+    *)
+        printf '%s\n' 'error: GROK_CODEX_PLAN_HOME must be an absolute path.' >&2
+        exit 1
+        ;;
+esac
+case \$GROK_CODEX_PROXY_TOKEN_FILE in
+    /*) ;;
+    *)
+        printf '%s\n' 'error: GROK_CODEX_PROXY_TOKEN_FILE must be an absolute path.' >&2
+        exit 1
+        ;;
+esac
 case \$GROK_OPENAI_HOME in
     */../*|*/..|*/./*|*/.)
         printf '%s\n' 'error: GROK_OPENAI_HOME must not contain . or .. path components.' >&2
+        exit 1
+        ;;
+esac
+case \$GROK_CODEX_PLAN_HOME in
+    */../*|*/..|*/./*|*/.)
+        printf '%s\n' 'error: GROK_CODEX_PLAN_HOME must not contain . or .. path components.' >&2
         exit 1
         ;;
 esac
@@ -162,12 +224,21 @@ case "\$GROK_OPENAI_HOME/" in
         exit 1
         ;;
 esac
+case "\$GROK_CODEX_PLAN_HOME/" in
+    "\$HOME/.grok/"|"\$HOME/.grok/"*)
+        printf '%s\n' 'error: refusing to use the legacy ~/.grok directory.' >&2
+        exit 1
+        ;;
+esac
 [ ! -L "\$GROK_OPENAI_HOME" ] || {
     printf '%s\n' 'error: GROK_OPENAI_HOME must not be a symbolic link.' >&2
     exit 1
 }
+[ ! -L "\$GROK_CODEX_PLAN_HOME" ] || {
+    printf '%s\n' 'error: GROK_CODEX_PLAN_HOME must not be a symbolic link.' >&2
+    exit 1
+}
 
-export GROK_HOME=\$GROK_OPENAI_HOME
 export GROK_DISABLE_AUTOUPDATER=1
 export GROK_OPENAI_DISABLE_VENDOR_UPDATE=1
 export GROK_IMAGE_GEN=0
@@ -187,11 +258,14 @@ case \${1:-} in
 esac
 
 grok_openai_needs_key=1
-for grok_openai_arg do
-    case \$grok_openai_arg in
-        -h|--help|-v|-V|--version|models|leader) grok_openai_needs_key=0 ;;
-    esac
-done
+grok_openai_prefer_plan=0
+case \${1:-} in
+    -h|--help|-v|-V|--version|leader) grok_openai_needs_key=0 ;;
+    models)
+        grok_openai_needs_key=0
+        grok_openai_prefer_plan=1
+        ;;
+esac
 
 if [ \$grok_openai_needs_key -eq 1 ] && [ -z "\${OPENAI_API_KEY:-}" ] && [ -x /usr/bin/security ]; then
     OPENAI_API_KEY=\$(/usr/bin/security find-generic-password \
@@ -201,20 +275,43 @@ if [ \$grok_openai_needs_key -eq 1 ] && [ -z "\${OPENAI_API_KEY:-}" ] && [ -x /u
     export OPENAI_API_KEY
 fi
 
-if [ \$grok_openai_needs_key -eq 1 ] && [ -z "\${OPENAI_API_KEY:-}" ]; then
-    if [ -x "\$GROK_OPENAI_CODEX_BIN" ] && \
-        "\$GROK_OPENAI_CODEX_BIN" login status 2>&1 | grep -q 'Logged in using ChatGPT'; then
-        printf '%s\n' 'bandicot: using the official Codex TUI with your signed-in ChatGPT plan.' >&2
-        printf '%s\n' 'bandicot: Grok Build itself is used only when an OpenAI Platform API key is available.' >&2
-        unset OPENAI_API_KEY 2>/dev/null || true
-        exec "\$GROK_OPENAI_CODEX_BIN" "\$@"
-    fi
-    printf '%s\n' 'error: neither an OpenAI Platform API key nor a signed-in Codex runtime is available.' >&2
-    printf '%s\n' 'Run Codex login for ChatGPT-plan access, or scripts/setup-openai-key.sh for Grok Build.' >&2
-    exit 1
+if [ -n "\${OPENAI_API_KEY:-}" ]; then
+    export GROK_HOME=\$GROK_OPENAI_HOME
+    exec "\$GROK_OPENAI_LIBEXEC_DIR/grok" --no-auto-update "\$@"
 fi
 
-exec "\$GROK_OPENAI_LIBEXEC_DIR/grok" --no-auto-update "\$@"
+if [ \$grok_openai_needs_key -eq 0 ] && [ \$grok_openai_prefer_plan -eq 0 ]; then
+    export GROK_HOME=\$GROK_OPENAI_HOME
+    exec "\$GROK_OPENAI_LIBEXEC_DIR/grok" --no-auto-update "\$@"
+fi
+
+if [ -f "\$GROK_CODEX_PROXY_TOKEN_FILE" ] && [ ! -L "\$GROK_CODEX_PROXY_TOKEN_FILE" ]; then
+    grok_proxy_token_mode=\$(stat -f '%Lp' "\$GROK_CODEX_PROXY_TOKEN_FILE" 2>/dev/null || \
+        stat -c '%a' "\$GROK_CODEX_PROXY_TOKEN_FILE" 2>/dev/null || true)
+    case \$grok_proxy_token_mode in
+        400|600) ;;
+        *)
+            printf '%s\n' 'error: CLIProxyAPI client token must have mode 0400 or 0600.' >&2
+            exit 1
+            ;;
+    esac
+    IFS= read -r GROK_CODEX_PROXY_TOKEN <"\$GROK_CODEX_PROXY_TOKEN_FILE" || true
+    if [ -n "\$GROK_CODEX_PROXY_TOKEN" ]; then
+        export GROK_CODEX_PROXY_TOKEN
+        export GROK_HOME=\$GROK_CODEX_PLAN_HOME
+        printf '%s\n' 'bandicot: starting Grok Build through local CLIProxyAPI with Codex/ChatGPT authentication.' >&2
+        exec "\$GROK_OPENAI_LIBEXEC_DIR/grok" --no-auto-update "\$@"
+    fi
+fi
+
+if [ \$grok_openai_needs_key -eq 0 ] && [ \$grok_openai_prefer_plan -eq 1 ]; then
+    export GROK_HOME=\$GROK_CODEX_PLAN_HOME
+    exec "\$GROK_OPENAI_LIBEXEC_DIR/grok" --no-auto-update "\$@"
+fi
+
+printf '%s\n' 'error: no Platform API key or protected CLIProxyAPI client token is available.' >&2
+printf '%s\n' 'Run CLIProxyAPI Codex login, or scripts/setup-openai-key.sh for Platform access.' >&2
+exit 1
 EOF
 chmod 755 "$LAUNCHER_TEMP"
 /bin/sh -n "$LAUNCHER_TEMP" || {
@@ -232,6 +329,7 @@ mv -f "$LAUNCHER_TEMP" "$LAUNCHER_DEST" || {
 openai_workflow_note "Installed grok-openai: $LAUNCHER_DEST"
 openai_workflow_note "Installed version: $BINARY_VERSION"
 openai_workflow_note "Isolated state: $GROK_OPENAI_HOME"
+openai_workflow_note "Codex-plan state: $GROK_CODEX_PLAN_HOME"
 case :$PATH: in
     *:"$GROK_OPENAI_BIN_DIR":*) ;;
     *) openai_workflow_note "Launch it by absolute path (the installer did not edit your shell PATH): $LAUNCHER_DEST" ;;
