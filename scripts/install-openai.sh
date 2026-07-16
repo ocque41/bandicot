@@ -125,6 +125,7 @@ DEFAULT_HOME_QUOTED=$(openai_workflow_shell_quote "$GROK_OPENAI_HOME")
 DEFAULT_LIBEXEC_QUOTED=$(openai_workflow_shell_quote "$GROK_OPENAI_LIBEXEC_DIR")
 DEFAULT_SERVICE_QUOTED=$(openai_workflow_shell_quote "$KEYCHAIN_SERVICE")
 DEFAULT_ACCOUNT_QUOTED=$(openai_workflow_shell_quote "$KEYCHAIN_ACCOUNT")
+DEFAULT_CODEX_QUOTED=$(openai_workflow_shell_quote "/Applications/ChatGPT.app/Contents/Resources/codex")
 
 LAUNCHER_TEMP=$(mktemp "${LAUNCHER_DEST}.tmp.XXXXXX") || \
     openai_workflow_die 'failed to stage launcher'
@@ -136,6 +137,7 @@ GROK_OPENAI_HOME=\${GROK_OPENAI_HOME:-$DEFAULT_HOME_QUOTED}
 GROK_OPENAI_LIBEXEC_DIR=\${GROK_OPENAI_LIBEXEC_DIR:-$DEFAULT_LIBEXEC_QUOTED}
 GROK_OPENAI_KEYCHAIN_SERVICE=\${GROK_OPENAI_KEYCHAIN_SERVICE:-$DEFAULT_SERVICE_QUOTED}
 GROK_OPENAI_KEYCHAIN_ACCOUNT=\${GROK_OPENAI_KEYCHAIN_ACCOUNT:-$DEFAULT_ACCOUNT_QUOTED}
+GROK_OPENAI_CODEX_BIN=\${GROK_OPENAI_CODEX_BIN:-$DEFAULT_CODEX_QUOTED}
 
 [ -n "\${HOME:-}" ] || {
     printf '%s\n' 'error: HOME is not set.' >&2
@@ -200,8 +202,15 @@ if [ \$grok_openai_needs_key -eq 1 ] && [ -z "\${OPENAI_API_KEY:-}" ] && [ -x /u
 fi
 
 if [ \$grok_openai_needs_key -eq 1 ] && [ -z "\${OPENAI_API_KEY:-}" ]; then
-    printf '%s\n' 'error: no OpenAI Platform API key is available.' >&2
-    printf '%s\n' 'Export OPENAI_API_KEY or run scripts/setup-openai-key.sh from the fork checkout.' >&2
+    if [ -x "\$GROK_OPENAI_CODEX_BIN" ] && \
+        "\$GROK_OPENAI_CODEX_BIN" login status 2>&1 | grep -q 'Logged in using ChatGPT'; then
+        printf '%s\n' 'bandicot: using the official Codex TUI with your signed-in ChatGPT plan.' >&2
+        printf '%s\n' 'bandicot: Grok Build itself is used only when an OpenAI Platform API key is available.' >&2
+        unset OPENAI_API_KEY 2>/dev/null || true
+        exec "\$GROK_OPENAI_CODEX_BIN" "\$@"
+    fi
+    printf '%s\n' 'error: neither an OpenAI Platform API key nor a signed-in Codex runtime is available.' >&2
+    printf '%s\n' 'Run Codex login for ChatGPT-plan access, or scripts/setup-openai-key.sh for Grok Build.' >&2
     exit 1
 fi
 
