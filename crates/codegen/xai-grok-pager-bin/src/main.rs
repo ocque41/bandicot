@@ -1742,7 +1742,7 @@ async fn async_main() -> Result<()> {
                     println!("{}", serde_json::to_string(&payload)?);
                 } else {
                     println!(
-                        "grok {}",
+                        "bandicot {}",
                         xai_grok_version::display_version_with_commit(
                             env!("VERSION_WITH_COMMIT"),
                             xai_grok_update::channel_label(),
@@ -1867,7 +1867,7 @@ async fn async_main() -> Result<()> {
             } => {
                 if std::env::var_os("GROK_OPENAI_DISABLE_VENDOR_UPDATE").is_some() {
                     anyhow::bail!(
-                        "the vendor updater is disabled for grok-openai; run \
+                        "the vendor updater is disabled for Bandicot; run \
                          scripts/update-from-upstream.sh from the fork checkout instead"
                     );
                 }

@@ -7,9 +7,9 @@ use std::path::PathBuf;
 /// Top-level commands for the pager binary.
 #[derive(Debug, Clone, Subcommand)]
 pub enum Command {
-    /// Run Grok without the interactive UI
+    /// Run Bandicot without the interactive UI
     Agent(Box<AgentArgs>),
-    /// Show the configuration Grok discovers for this directory
+    /// Show the configuration Bandicot discovers for this directory
     Inspect {
         /// Emit machine-readable JSON output.
         #[arg(long)]
@@ -19,7 +19,7 @@ pub enum Command {
     Leader(LeaderMgmtArgs),
     /// Sign out and clear cached credentials
     Logout,
-    /// Sign in to Grok
+    /// Sign in to Bandicot
     Login {
         /// Ignored (kept for backwards compatibility). OAuth2 is now the only auth method.
         #[arg(long, hide = true)]
@@ -408,9 +408,9 @@ fn version_with_channel() -> &'static str {
 }
 #[derive(Debug, Clone, Parser)]
 #[command(
-    name = "grok",
+    name = "bandicot",
     version = version_with_channel(),
-    about = "Grok Build TUI",
+    about = "Bandicot coding agent",
     disable_version_flag = true,
     next_display_order = None,
     help_template = "\
@@ -736,7 +736,7 @@ pub struct PagerArgs {
     /// Run standalone even when leader mode is configured.
     #[arg(long, conflicts_with = "leader", hide = true)]
     pub no_leader: bool,
-    /// Initial prompt for the interactive session, e.g. `grok "fix the bug"` or `grok --worktree=feat "create this feature"`.
+    /// Initial prompt for the interactive session, e.g. `bandicot "fix the bug"` or `bandicot --worktree=feat "create this feature"`.
     #[arg(
         value_name = "PROMPT",
         conflicts_with_all = &["single",
@@ -778,8 +778,8 @@ impl PagerArgs {
             .map(std::path::Path::new)
             .and_then(|p| p.file_name())
             .and_then(|n| n.to_str())
-            .filter(|n| *n == "grok" || *n == "agent")
-            .unwrap_or("grok")
+            .filter(|n| *n == "bandicot" || *n == "grok" || *n == "agent")
+            .unwrap_or("bandicot")
             .to_owned();
         let mut args = Self::parse_from(std::iter::once(bin_name).chain(std::env::args().skip(1)));
         if let Some(socket) = args.leader_socket.take() {

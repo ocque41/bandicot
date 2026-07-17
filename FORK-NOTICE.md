@@ -7,14 +7,14 @@ Apache License 2.0, and bundled third-party notices are retained.
 
 ## Fork-maintained changes
 
-The `ocque41/grok-build` fork adds and maintains:
+The `ocque41/bandicot` fork adds and maintains:
 
 - a secret-free OpenAI Platform profile using the Responses API and curated
   GPT-5.6/GPT-5.3 Codex entries;
 - provider-isolation guards that prevent xAI-only headers, tools, media
   endpoints, sessions, and credentials from crossing into OpenAI requests;
 - fail-closed OpenAI credential selection and credential-safe diagnostics;
-- an isolated `grok-openai` source-build installer and macOS Keychain helper;
+- an isolated `bandicot` source-build installer and macOS Keychain helper;
 - a transactional one-command upstream update workflow; and
 - OpenAI-specific mock integration tests, documentation, and release gates.
 
@@ -27,7 +27,7 @@ repository/configuration profile.
 This fork is not affiliated with, endorsed by, sponsored by, or supported by
 SpaceXAI/xAI or OpenAI. `Grok Build`, `Grok`, `xAI`, `SpaceXAI`, `OpenAI`, model
 names, logos, and related marks belong to their respective owners. The
-`grok-openai` launcher name describes interoperability and does not imply an
+`Bandicot` is this fork's name and does not imply an
 official product or partnership.
 
 Support requests and fork-specific security reports should go to this fork's

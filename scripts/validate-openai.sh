@@ -51,6 +51,7 @@ fi
 printf '%s\n' 'Checking shell workflows...'
 /bin/sh -n \
     scripts/install-openai.sh \
+    scripts/install-bandicot.sh \
     scripts/setup-openai-key.sh \
     scripts/update-from-upstream.sh \
     scripts/validate-openai.sh \
@@ -114,7 +115,7 @@ if GROK_OPENAI_DISABLE_VENDOR_UPDATE=1 \
     printf '%s\n' 'error: release binary accepted the disabled vendor updater' >&2
     exit 1
 fi
-grep -q 'the vendor updater is disabled for grok-openai' "$VENDOR_UPDATE_TEST_OUTPUT" || {
+grep -q 'the vendor updater is disabled for Bandicot' "$VENDOR_UPDATE_TEST_OUTPUT" || {
     printf '%s\n' 'error: release binary vendor-update refusal was not actionable' >&2
     exit 1
 }

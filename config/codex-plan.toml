@@ -1,4 +1,4 @@
-# Secret-free local profile for Grok Build through CLIProxyAPI and Codex OAuth.
+# Secret-free local profile for Bandicot through CLIProxyAPI and Codex OAuth.
 #
 # The launcher reads only CLIProxyAPI's loopback client token from the user's
 # protected token file. Codex OAuth credentials remain owned by CLIProxyAPI.

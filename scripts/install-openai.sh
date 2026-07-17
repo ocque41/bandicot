@@ -13,7 +13,7 @@ case ${1:-} in
         cat <<'EOF'
 Usage: scripts/install-openai.sh
 
-Build, validate, and install the OpenAI-specific launcher. The installer never
+Build, validate, and install Bandicot. The installer never
 edits shell startup files and never reads or writes ~/.grok.
 
 Test/packaging overrides:
@@ -107,14 +107,16 @@ BINARY_VERSION=$("$BINARY" --version 2>&1 | sed -n '1p')
 mkdir -p "$GROK_OPENAI_HOME" "$GROK_CODEX_PLAN_HOME" "$GROK_OPENAI_BIN_DIR" "$GROK_OPENAI_LIBEXEC_DIR"
 chmod 700 "$GROK_OPENAI_HOME" "$GROK_CODEX_PLAN_HOME"
 
-BINARY_DEST=$GROK_OPENAI_LIBEXEC_DIR/grok
+BINARY_DEST=$GROK_OPENAI_LIBEXEC_DIR/bandicot
+COMPAT_BINARY_DEST=$GROK_OPENAI_LIBEXEC_DIR/grok
 PROFILE_DEST=$GROK_OPENAI_LIBEXEC_DIR/openai.toml
 PLAN_PROFILE_DEST=$GROK_OPENAI_LIBEXEC_DIR/codex-plan.toml
 CONFIG_DEST=$GROK_OPENAI_HOME/config.toml
 CONFIG_HASH_DEST=$GROK_OPENAI_HOME/.installed-config.sha256
 PLAN_CONFIG_DEST=$GROK_CODEX_PLAN_HOME/config.toml
 PLAN_CONFIG_HASH_DEST=$GROK_CODEX_PLAN_HOME/.installed-config.sha256
-LAUNCHER_DEST=$GROK_OPENAI_BIN_DIR/grok-openai
+LAUNCHER_DEST=$GROK_OPENAI_BIN_DIR/bandicot
+COMPAT_LAUNCHER_DEST=$GROK_OPENAI_BIN_DIR/grok-openai
 
 [ ! -L "$CONFIG_DEST" ] || \
     openai_workflow_die 'refusing a symbolic-link runtime config'
@@ -123,6 +125,8 @@ LAUNCHER_DEST=$GROK_OPENAI_BIN_DIR/grok-openai
 
 openai_workflow_atomic_copy "$BINARY" "$BINARY_DEST" 755 || \
     openai_workflow_die "failed to install binary at $BINARY_DEST"
+openai_workflow_atomic_copy "$BINARY" "$COMPAT_BINARY_DEST" 755 || \
+    openai_workflow_die "failed to install compatibility binary at $COMPAT_BINARY_DEST"
 openai_workflow_atomic_copy "$PROFILE_SOURCE" "$PROFILE_DEST" 600 || \
     openai_workflow_die "failed to install canonical profile at $PROFILE_DEST"
 openai_workflow_atomic_copy "$PLAN_PROFILE_SOURCE" "$PLAN_PROFILE_DEST" 600 || \
@@ -180,6 +184,7 @@ GROK_OPENAI_LIBEXEC_DIR=\${GROK_OPENAI_LIBEXEC_DIR:-$DEFAULT_LIBEXEC_QUOTED}
 GROK_OPENAI_KEYCHAIN_SERVICE=\${GROK_OPENAI_KEYCHAIN_SERVICE:-$DEFAULT_SERVICE_QUOTED}
 GROK_OPENAI_KEYCHAIN_ACCOUNT=\${GROK_OPENAI_KEYCHAIN_ACCOUNT:-$DEFAULT_ACCOUNT_QUOTED}
 GROK_CODEX_PROXY_TOKEN_FILE=\${GROK_CODEX_PROXY_TOKEN_FILE:-$DEFAULT_PROXY_TOKEN_FILE_QUOTED}
+BANDICOT_CLIPROXYAPI=\${BANDICOT_CLIPROXYAPI:-cliproxyapi}
 
 [ -n "\${HOME:-}" ] || {
     printf '%s\n' 'error: HOME is not set.' >&2
@@ -251,11 +256,34 @@ unset XAI_API_KEY GROK_CODE_XAI_API_KEY GROK_AUTH GROK_AUTH_PATH \
 
 case \${1:-} in
     update)
-        printf '%s\n' 'error: the vendor updater is disabled for grok-openai.' >&2
+        printf '%s\n' 'error: the vendor updater is disabled for Bandicot.' >&2
         printf '%s\n' 'Run scripts/update-from-upstream.sh from your fork checkout instead.' >&2
         exit 2
         ;;
 esac
+
+bandicot_login() {
+    command -v "\$BANDICOT_CLIPROXYAPI" >/dev/null 2>&1 || {
+        printf '%s\n' 'error: CLIProxyAPI is required for ChatGPT sign-in.' >&2
+        printf '%s\n' 'Install it, then run: bandicot login' >&2
+        return 1
+    }
+    case \${1:-} in
+        ''|--browser) "\$BANDICOT_CLIPROXYAPI" -codex-login ;;
+        --device-code) "\$BANDICOT_CLIPROXYAPI" -codex-device-login ;;
+        *)
+            printf 'error: unknown login option: %s\n' "\$1" >&2
+            printf '%s\n' 'Usage: bandicot login [--browser|--device-code]' >&2
+            return 2
+            ;;
+    esac
+}
+
+if [ "\${1:-}" = login ]; then
+    shift
+    bandicot_login "\${1:-}"
+    exit \$?
+fi
 
 grok_openai_needs_key=1
 grok_openai_prefer_plan=0
@@ -277,12 +305,12 @@ fi
 
 if [ -n "\${OPENAI_API_KEY:-}" ]; then
     export GROK_HOME=\$GROK_OPENAI_HOME
-    exec "\$GROK_OPENAI_LIBEXEC_DIR/grok" --no-auto-update "\$@"
+    exec "\$GROK_OPENAI_LIBEXEC_DIR/bandicot" --no-auto-update "\$@"
 fi
 
 if [ \$grok_openai_needs_key -eq 0 ] && [ \$grok_openai_prefer_plan -eq 0 ]; then
     export GROK_HOME=\$GROK_OPENAI_HOME
-    exec "\$GROK_OPENAI_LIBEXEC_DIR/grok" --no-auto-update "\$@"
+    exec "\$GROK_OPENAI_LIBEXEC_DIR/bandicot" --no-auto-update "\$@"
 fi
 
 if [ -f "\$GROK_CODEX_PROXY_TOKEN_FILE" ] && [ ! -L "\$GROK_CODEX_PROXY_TOKEN_FILE" ]; then
@@ -299,18 +327,32 @@ if [ -f "\$GROK_CODEX_PROXY_TOKEN_FILE" ] && [ ! -L "\$GROK_CODEX_PROXY_TOKEN_FI
     if [ -n "\$GROK_CODEX_PROXY_TOKEN" ]; then
         export GROK_CODEX_PROXY_TOKEN
         export GROK_HOME=\$GROK_CODEX_PLAN_HOME
-        printf '%s\n' 'bandicot: starting Grok Build through local CLIProxyAPI with Codex/ChatGPT authentication.' >&2
-        exec "\$GROK_OPENAI_LIBEXEC_DIR/grok" --no-auto-update "\$@"
+        printf '%s\n' 'Bandicot: using your ChatGPT account through local CLIProxyAPI.' >&2
+        exec "\$GROK_OPENAI_LIBEXEC_DIR/bandicot" --no-auto-update "\$@"
     fi
 fi
 
 if [ \$grok_openai_needs_key -eq 0 ] && [ \$grok_openai_prefer_plan -eq 1 ]; then
     export GROK_HOME=\$GROK_CODEX_PLAN_HOME
-    exec "\$GROK_OPENAI_LIBEXEC_DIR/grok" --no-auto-update "\$@"
+    exec "\$GROK_OPENAI_LIBEXEC_DIR/bandicot" --no-auto-update "\$@"
+fi
+
+if [ -t 0 ] && [ -t 2 ]; then
+    printf '%s' 'Bandicot needs ChatGPT access. Sign in now? [Y/n] ' >&2
+    IFS= read -r bandicot_answer || bandicot_answer=n
+    case \$bandicot_answer in
+        ''|y|Y|yes|YES|Yes)
+            bandicot_login --browser || exit \$?
+            ;;
+        *)
+            printf '%s\n' 'Sign-in cancelled. Run bandicot login when ready.' >&2
+            exit 1
+            ;;
+    esac
 fi
 
 printf '%s\n' 'error: no Platform API key or protected CLIProxyAPI client token is available.' >&2
-printf '%s\n' 'Run CLIProxyAPI Codex login, or scripts/setup-openai-key.sh for Platform access.' >&2
+printf '%s\n' 'Run bandicot login, or scripts/setup-openai-key.sh for Platform access.' >&2
 exit 1
 EOF
 chmod 755 "$LAUNCHER_TEMP"
@@ -318,15 +360,21 @@ chmod 755 "$LAUNCHER_TEMP"
     rm -f "$LAUNCHER_TEMP"
     openai_workflow_die 'generated launcher failed shell syntax validation'
 }
+rm -f "$LAUNCHER_DEST" || {
+    rm -f "$LAUNCHER_TEMP"
+    openai_workflow_die "failed to replace existing launcher at $LAUNCHER_DEST"
+}
 mv -f "$LAUNCHER_TEMP" "$LAUNCHER_DEST" || {
     rm -f "$LAUNCHER_TEMP"
     openai_workflow_die "failed to install launcher at $LAUNCHER_DEST"
 }
+openai_workflow_atomic_copy "$LAUNCHER_DEST" "$COMPAT_LAUNCHER_DEST" 755 || \
+    openai_workflow_die "failed to install compatibility launcher at $COMPAT_LAUNCHER_DEST"
 
 "$LAUNCHER_DEST" --version >/dev/null || \
     openai_workflow_die 'installed launcher failed its --version smoke test'
 
-openai_workflow_note "Installed grok-openai: $LAUNCHER_DEST"
+openai_workflow_note "Installed Bandicot: $LAUNCHER_DEST"
 openai_workflow_note "Installed version: $BINARY_VERSION"
 openai_workflow_note "Isolated state: $GROK_OPENAI_HOME"
 openai_workflow_note "Codex-plan state: $GROK_CODEX_PLAN_HOME"

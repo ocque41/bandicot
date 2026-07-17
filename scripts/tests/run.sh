@@ -122,12 +122,27 @@ test_install_isolation() {
         "$REPO_ROOT/scripts/install-openai.sh" >/dev/null
 
     assert_file "$_test_home/.local/libexec/grok-openai/grok"
+    assert_file "$_test_home/.local/libexec/grok-openai/bandicot"
     assert_file "$_test_home/.local/libexec/grok-openai/openai.toml"
     assert_file "$_test_home/.local/libexec/grok-openai/codex-plan.toml"
+    assert_file "$_test_home/.local/bin/bandicot"
     assert_file "$_test_home/.local/bin/grok-openai"
     assert_file "$_test_home/.grok-openai/config.toml"
     assert_file "$_test_home/.grok-codex-plan/config.toml"
     assert_eq "$(sed -n '1p' "$_test_home/.grok/config.toml")" legacy-sentinel
+
+    _test_proxy=$_test_case/cliproxyapi
+    _test_login_capture=$_test_case/login-capture
+    cat >"$_test_proxy" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$1" >"$BANDICOT_LOGIN_CAPTURE"
+EOF
+    chmod 755 "$_test_proxy"
+    HOME=$_test_home \
+    BANDICOT_CLIPROXYAPI=$_test_proxy \
+    BANDICOT_LOGIN_CAPTURE=$_test_login_capture \
+        "$_test_home/.local/bin/bandicot" login --device-code
+    assert_eq "$(sed -n '1p' "$_test_login_capture")" -codex-device-login
 
     if HOME=$_test_home \
         GROK_OPENAI_HOME=$_test_home/.grok \

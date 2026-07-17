@@ -1,10 +1,10 @@
 <!-- Modified in 2026 by the ocque41 OpenAI-support fork; see FORK-NOTICE.md. -->
 <div align="center">
 
-<h1>Grok Build for OpenAI</h1>
+<h1>Bandicot</h1>
 
-**An unofficial, source-built fork of SpaceXAI's Grok Build coding agent, with
-a secret-free OpenAI Platform profile and an isolated `grok-openai` launcher.**
+**A source-built coding agent based on Grok Build and powered by your
+OpenAI Platform or ChatGPT account.**
 
 [OpenAI quick start](#openai-quick-start) ·
 [Assumptions](#assumptions) ·
@@ -43,16 +43,16 @@ prebuilt binary and does not contain these OpenAI changes. Build and install
 the fork itself:
 
 ```sh
-./scripts/install-openai.sh
-~/.local/bin/grok-openai
+./scripts/install-bandicot.sh
+~/.local/bin/bandicot
 ```
 
-With no Platform key, the launcher starts the Grok Build TUI against a
-loopback-only CLIProxyAPI Responses endpoint backed by the user's existing
-Codex OAuth login. To use direct Platform billing instead, first run
+With no Platform key, Bandicot offers to sign you in to ChatGPT and starts the
+TUI against a loopback-only CLIProxyAPI Responses endpoint backed by the user's
+existing Codex OAuth login. To use direct Platform billing instead, first run
 `./scripts/setup-openai-key.sh`; the key setup delegates the secret prompt and
 storage to macOS Keychain. The
-installer creates an isolated launcher at `~/.local/bin/grok-openai`, installs
+installer creates an isolated launcher at `~/.local/bin/bandicot`, installs
 the compiled binary under `~/.local/libexec/grok-openai/`, and uses
 `~/.grok-openai` for Platform mode and `~/.grok-codex-plan` for plan mode. It
 does not edit `PATH`, shell startup files, terminal settings, or an existing
@@ -64,7 +64,7 @@ through the environment and run the installer/launcher normally:
 
 ```sh
 OPENAI_API_KEY="${OPENAI_API_KEY:?set it through your secret manager}" \
-  ~/.local/bin/grok-openai
+  ~/.local/bin/bandicot
 ```
 
 The tracked [OpenAI profile](config/openai.toml) contains no secret. Detailed
@@ -114,7 +114,7 @@ cargo check -p xai-grok-pager-bin            # fast validation
 ```
 
 The binary artifact is named `xai-grok-pager`; this fork's installer exposes it
-as `grok-openai`. Direct Platform mode uses `OPENAI_API_KEY`. Without that key,
+as `bandicot`. Direct Platform mode uses `OPENAI_API_KEY`. Without that key,
 the launcher keeps the Grok Build TUI and selects the isolated
 `~/.grok-codex-plan` profile plus CLIProxyAPI's protected local client token.
 
@@ -184,7 +184,7 @@ resets, rebases, stashes, or pushes to upstream. See
 
 This fork's implementation is considered complete when all of the following
 are true: the OpenAI profile parses, provider-isolation and Responses API tests
-pass, a release `grok-openai` binary builds, a keyless/mock end-to-end prompt
+pass, a release `bandicot` launcher builds, a keyless/mock end-to-end prompt
 passes without contacting xAI, install/update scripts pass their fail-closed
 tests, and the exact tested commit is published to the fork. A live paid API
 request is a separate account-acceptance check because it requires the user's

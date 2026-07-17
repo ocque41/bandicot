@@ -1,4 +1,4 @@
-# OpenAI Platform setup
+# Bandicot OpenAI and ChatGPT setup
 
 This document covers the unofficial fork's OpenAI-only distribution. It uses
 the OpenAI Responses API through the tracked, secret-free
@@ -50,9 +50,9 @@ or pass it as a command-line argument.
 From the repository root:
 
 ```sh
-./scripts/install-openai.sh
-~/.local/bin/grok-openai --version
-~/.local/bin/grok-openai
+./scripts/install-bandicot.sh
+~/.local/bin/bandicot --version
+~/.local/bin/bandicot
 ```
 
 The final command selects one of two supported modes:
@@ -62,8 +62,9 @@ The final command selects one of two supported modes:
 - without a Platform key, it starts the same Grok Build TUI using
   `config/codex-plan.toml`, CLIProxyAPI on `127.0.0.1:8317`, and the protected
   `~/.cli-proxy-api/client-token`. CLIProxyAPI must already be running and have
-  a valid credential created by `cliproxyapi -codex-login` or
-  `cliproxyapi -codex-device-login`.
+  a valid credential. Run `bandicot login` for browser OAuth or
+  `bandicot login --device-code` for device-code authentication. On first
+  interactive launch without credentials, Bandicot offers to start browser login.
 
 Run `./scripts/setup-openai-key.sh` before launching when Grok Build mode is
 required.
@@ -77,8 +78,8 @@ Keychain service name is `ocque41.grok-build.openai`.
 
 | Item | Default path |
 |---|---|
-| Launcher | `~/.local/bin/grok-openai` |
-| Compiled binary | `~/.local/libexec/grok-openai/grok` |
+| Launcher | `~/.local/bin/bandicot` |
+| Compiled binary | `~/.local/libexec/grok-openai/bandicot` |
 | Runtime home | `~/.grok-openai` |
 | Runtime profile | `~/.grok-openai/config.toml` |
 
@@ -88,7 +89,7 @@ still matches the previously installed canonical profile. A user-edited
 `~/.local/libexec/grok-openai/openai.toml` for explicit review and merging.
 
 The installer does not add `~/.local/bin` to `PATH`. The full launcher path
-always works; if the directory is already on `PATH`, `grok-openai` is enough.
+always works; if the directory is already on `PATH`, `bandicot` is enough.
 The install destinations are overrideable by the script's documented
 environment variables, which the test suite uses to keep acceptance runs
 inside temporary directories.
@@ -100,7 +101,7 @@ Keychain. This is useful for CI, Linux, or a temporary project credential:
 
 ```sh
 OPENAI_API_KEY="${OPENAI_API_KEY:?set it through your secret manager}" \
-  ~/.local/bin/grok-openai
+  ~/.local/bin/bandicot
 ```
 
 Do not add the key to `.env`, `.envrc`, `config/openai.toml`, shell startup
@@ -136,8 +137,8 @@ context metadata in this profile.
 Examples:
 
 ```sh
-~/.local/bin/grok-openai -m openai-sol
-~/.local/bin/grok-openai -m openai-terra -p "Review this repository"
+~/.local/bin/bandicot -m openai-sol
+~/.local/bin/bandicot -m openai-terra -p "Review this repository"
 ```
 
 All entries use `api_backend = "responses"` and `agent_type = "codex"`. The

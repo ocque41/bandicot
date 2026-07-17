@@ -75,9 +75,9 @@ GIT_GRAFTS_PATH=$(git rev-parse --git-path info/grafts)
 [ -n "$(git config user.email 2>/dev/null || true)" ] || \
     openai_workflow_die 'Git user.email is required to create the upstream merge commit'
 
-DEFAULT_ORIGIN_HTTPS=https://github.com/ocque41/grok-build.git
-DEFAULT_ORIGIN_SSH=git@github.com:ocque41/grok-build.git
-DEFAULT_ORIGIN_SSH_URL=ssh://git@github.com/ocque41/grok-build.git
+DEFAULT_ORIGIN_HTTPS=https://github.com/ocque41/bandicot.git
+DEFAULT_ORIGIN_SSH=git@github.com:ocque41/bandicot.git
+DEFAULT_ORIGIN_SSH_URL=ssh://git@github.com/ocque41/bandicot.git
 DEFAULT_UPSTREAM_HTTPS=https://github.com/xai-org/grok-build.git
 DEFAULT_UPSTREAM_SSH=git@github.com:xai-org/grok-build.git
 DEFAULT_UPSTREAM_SSH_URL=ssh://git@github.com/xai-org/grok-build.git
@@ -112,7 +112,7 @@ case $ORIGIN_URLS in
 '*) openai_workflow_die 'origin must have exactly one fetch URL' ;;
 esac
 origin_url_allowed "$ORIGIN_URLS" || \
-    openai_workflow_die "origin is not the ocque41/grok-build fork: $ORIGIN_URLS"
+    openai_workflow_die "origin is not the ocque41/bandicot fork: $ORIGIN_URLS"
 
 ORIGIN_PUSH_URLS=$(git config --get-all remote.origin.pushurl 2>/dev/null || true)
 if [ -n "$ORIGIN_PUSH_URLS" ]; then
@@ -121,7 +121,7 @@ if [ -n "$ORIGIN_PUSH_URLS" ]; then
 '*) openai_workflow_die 'origin must have at most one explicit push URL' ;;
     esac
     origin_url_allowed "$ORIGIN_PUSH_URLS" || \
-        openai_workflow_die "origin push URL is not the ocque41/grok-build fork: $ORIGIN_PUSH_URLS"
+        openai_workflow_die "origin push URL is not the ocque41/bandicot fork: $ORIGIN_PUSH_URLS"
 fi
 
 if ! git config --get remote.upstream.url >/dev/null 2>&1; then

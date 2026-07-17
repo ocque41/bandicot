@@ -2,7 +2,7 @@
 
 The repository has two remotes:
 
-- `origin`: `git@github.com:ocque41/grok-build.git`, the user-owned fork;
+- `origin`: `git@github.com:ocque41/bandicot.git`, the user-owned fork;
 - `upstream`: `git@github.com:xai-org/grok-build.git`, the read-only source.
 
 The upstream remote has no usable push URL. Updates flow from upstream into the
