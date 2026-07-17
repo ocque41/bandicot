@@ -116,10 +116,10 @@ impl EnvKeys {
         mut getenv: impl FnMut(&str) -> Option<String>,
     ) -> Option<String> {
         for name in self.names() {
-            if let Some(value) = getenv(name) {
-                if !value.trim().is_empty() {
-                    return Some(value);
-                }
+            if let Some(value) = getenv(name)
+                && !value.trim().is_empty()
+            {
+                return Some(value);
             }
         }
         None
@@ -286,7 +286,8 @@ impl EndpointsConfig {
     }
     /// Layer the `[endpoints]` table from `config` over the env/default base.
     /// No field is derived from another — defaulting is done by the resolvers.
-    pub(crate) fn from_config_value(config: &toml::Value) -> Self {
+    /// `pub`: the pager resolves the voice STT base through this same path.
+    pub fn from_config_value(config: &toml::Value) -> Self {
         let default = Self::default();
         let external_otel_master_switch = default.external_otel_master_switch;
         let mut base = match toml::Value::try_from(default) {
@@ -3929,7 +3930,8 @@ impl ModelEntry {
     }
     /// The model's own (BYOK) credential: a non-empty `api_key`, else the first
     /// set, non-empty `env_key` value.
-    fn own_credential(&self) -> Option<String> {
+    /// `None` → fall through to session / global key.
+    pub(crate) fn own_credential(&self) -> Option<String> {
         first_own_credential(self.api_key.as_deref(), self.env_key.as_ref())
     }
     /// Whether this model explicitly selects its own credential source.
@@ -4408,7 +4410,7 @@ pub fn enforce_disable_api_key_auth(
 ) {
     if disable_api_key_auth
         && creds.auth_type == xai_chat_state::AuthType::ApiKey
-        && crate::util::is_first_party_xai_url(&creds.base_url)
+        && crate::util::is_xai_api_url(&creds.base_url)
     {
         creds.auth_type = xai_chat_state::AuthType::SessionToken;
         creds.api_key = session_key.map(str::to_owned);
@@ -9568,7 +9570,6 @@ agent_type = "cursor"
             url = "https://mcp.test.com"
             [toolset.bash]
             timeout_secs = 120
-            persistent_shell = true
             [shortcuts]
             ctrl_k = "search"
             [grok_com_config]
