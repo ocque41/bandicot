@@ -1166,6 +1166,7 @@ impl SessionActor {
             .iter()
             .any(|n| n == MEMORY_SEARCH_TOOL_NAME || n == MEMORY_GET_TOOL_NAME);
         let goal = self.sync_goal_harness_from_tools(tool_names);
+        let accounts = crate::accounts::storage::accounts_path().exists();
         slash_commands::CommandAvailability {
             feedback: self.feedback_manager.is_enabled(),
             memory: self.memory.is_enabled() && memory_read_registered,
@@ -1176,6 +1177,7 @@ impl SessionActor {
             hooks: self.hook_registry.borrow().is_some(),
             plugins: self.plugin_registry.borrow().is_some(),
             goal,
+            accounts,
         }
     }
     /// Names of every tool registered with the session's tool bridge.

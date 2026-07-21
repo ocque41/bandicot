@@ -258,6 +258,66 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
             }
         },
     },
+    BuiltinCommand {
+        name: "connect",
+        description: "Manage API accounts and provider fallback chain",
+        argument_hint: Some("[list|add <name> <provider> <key>|remove <name>|enable <name>|disable <name>|order <name> <pos>|status]"),
+        aliases: &[],
+        gate: BuiltinGate::Accounts,
+        resolve: |args| {
+            let trimmed = args.trim();
+            if trimmed.is_empty() {
+                BuiltinAction::ConnectBrowse
+            } else if let Some(rest) = trimmed.strip_prefix("add ") {
+                let parts: Vec<&str> = rest.splitn(3, ' ').collect();
+                match parts.as_slice() {
+                    [name, provider, key] => BuiltinAction::ConnectAdd {
+                        name: name.to_string(),
+                        provider: provider.to_string(),
+                        api_key: key.to_string(),
+                    },
+                    _ => BuiltinAction::ConnectAdd {
+                        name: String::new(),
+                        provider: String::new(),
+                        api_key: String::new(),
+                    },
+                }
+            } else if let Some(name) = trimmed.strip_prefix("remove ") {
+                BuiltinAction::ConnectRemove {
+                    name: name.trim().to_string(),
+                }
+            } else if trimmed == "list" {
+                BuiltinAction::ConnectList
+            } else if let Some(name) = trimmed.strip_prefix("enable ") {
+                BuiltinAction::ConnectEnable {
+                    name: name.trim().to_string(),
+                }
+            } else if let Some(name) = trimmed.strip_prefix("disable ") {
+                BuiltinAction::ConnectDisable {
+                    name: name.trim().to_string(),
+                }
+            } else if let Some(rest) = trimmed.strip_prefix("order ") {
+                let parts: Vec<&str> = rest.splitn(2, ' ').collect();
+                match parts.as_slice() {
+                    [name, pos] => {
+                        let position = pos.trim().parse().unwrap_or(0);
+                        BuiltinAction::ConnectOrder {
+                            name: name.trim().to_string(),
+                            position,
+                        }
+                    }
+                    _ => BuiltinAction::ConnectOrder {
+                        name: String::new(),
+                        position: 0,
+                    },
+                }
+            } else if trimmed == "status" {
+                BuiltinAction::ConnectStatus
+            } else {
+                BuiltinAction::ConnectBrowse
+            }
+        },
+    },
 ];
 
 /// Split a trailing `--budget <tokens>` flag off a `/goal` objective.
@@ -389,6 +449,8 @@ pub(crate) struct CommandAvailability {
     pub hooks: bool,
     pub plugins: bool,
     pub goal: bool,
+    /// Account management for `/connect` — always available when accounts.json exists.
+    pub accounts: bool,
 }
 
 impl CommandAvailability {
@@ -403,6 +465,7 @@ impl CommandAvailability {
             BuiltinGate::Hooks => self.hooks,
             BuiltinGate::Plugins => self.plugins,
             BuiltinGate::Goal => self.goal,
+            BuiltinGate::Accounts => self.accounts,
         }
     }
 
@@ -418,6 +481,7 @@ impl CommandAvailability {
             hooks: true,
             plugins: true,
             goal: true,
+            accounts: true,
         }
     }
 }

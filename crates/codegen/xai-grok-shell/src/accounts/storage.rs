@@ -142,13 +142,11 @@ pub fn save_accounts(file: &AccountsFile) -> Result<()> {
             .with_context(|| format!("failed to create directory {}", parent.display()))?;
     }
 
-    let content = serde_json::to_string_pretty(file)
-        .context("failed to serialize accounts")?;
+    let content = serde_json::to_string_pretty(file).context("failed to serialize accounts")?;
 
     // Write to temp file first, then rename for atomicity
     let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, &content)
-        .with_context(|| format!("failed to write {}", tmp.display()))?;
+    std::fs::write(&tmp, &content).with_context(|| format!("failed to write {}", tmp.display()))?;
 
     // Set strict permissions before rename (owner-only read/write)
     #[cfg(unix)]
@@ -274,19 +272,40 @@ mod tests {
 
     #[test]
     fn test_account_provider_from_str() {
-        assert_eq!(AccountProvider::from_str("zen"), Some(AccountProvider::OpencodeZen));
-        assert_eq!(AccountProvider::from_str("go"), Some(AccountProvider::OpencodeGo));
-        assert_eq!(AccountProvider::from_str("openai"), Some(AccountProvider::OpenaiPlatform));
-        assert_eq!(AccountProvider::from_str("anthropic"), Some(AccountProvider::AnthropicMessages));
-        assert_eq!(AccountProvider::from_str("ollama"), Some(AccountProvider::Ollama));
-        assert_eq!(AccountProvider::from_str("unknown"), Some(AccountProvider::Other));
+        assert_eq!(
+            AccountProvider::from_str("zen"),
+            Some(AccountProvider::OpencodeZen)
+        );
+        assert_eq!(
+            AccountProvider::from_str("go"),
+            Some(AccountProvider::OpencodeGo)
+        );
+        assert_eq!(
+            AccountProvider::from_str("openai"),
+            Some(AccountProvider::OpenaiPlatform)
+        );
+        assert_eq!(
+            AccountProvider::from_str("anthropic"),
+            Some(AccountProvider::AnthropicMessages)
+        );
+        assert_eq!(
+            AccountProvider::from_str("ollama"),
+            Some(AccountProvider::Ollama)
+        );
+        assert_eq!(
+            AccountProvider::from_str("unknown"),
+            Some(AccountProvider::Other)
+        );
     }
 
     #[test]
     fn test_account_provider_display() {
         assert_eq!(AccountProvider::OpencodeZen.to_string(), "OpenCode Zen");
         assert_eq!(AccountProvider::OpencodeGo.to_string(), "OpenCode Go");
-        assert_eq!(AccountProvider::OpenaiPlatform.to_string(), "OpenAI Platform");
+        assert_eq!(
+            AccountProvider::OpenaiPlatform.to_string(),
+            "OpenAI Platform"
+        );
     }
 
     #[test]

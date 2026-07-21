@@ -8,8 +8,8 @@ pub mod storage;
 
 use anyhow::{Context, Result};
 use storage::{
-    AccountEntry, AccountProvider, AccountsFile, add_account, disable_account, enable_account,
-    load_accounts, remove_account, reorder_account, save_accounts,
+    add_account, disable_account, enable_account, load_accounts, remove_account, reorder_account,
+    save_accounts, AccountEntry, AccountProvider, AccountsFile,
 };
 
 /// High-level account manager for the `/connect` command.
@@ -109,17 +109,18 @@ impl AccountManager {
         }
 
         let mut lines = Vec::new();
-        lines.push(format!("Accounts ({}/{} enabled):", self.enabled_count(), self.total_count()));
+        lines.push(format!(
+            "Accounts ({}/{} enabled):",
+            self.enabled_count(),
+            self.total_count()
+        ));
         lines.push(String::new());
 
         for (i, account) in self.file.accounts.iter().enumerate() {
             let status = if account.enabled { "✓" } else { "○" };
             let provider = account.provider.as_str();
             let name = &account.name;
-            let catalog = account
-                .catalog
-                .as_deref()
-                .unwrap_or(provider);
+            let catalog = account.catalog.as_deref().unwrap_or(provider);
             lines.push(format!("  {} {}  {}  {}", status, name, catalog, ""));
         }
 
@@ -135,8 +136,17 @@ impl AccountManager {
 
     /// Format a single account entry for display.
     pub fn format_account(account: &AccountEntry) -> String {
-        let status = if account.enabled { "enabled" } else { "disabled" };
-        format!("{} ({}) - {}", account.name, account.provider.as_str(), status)
+        let status = if account.enabled {
+            "enabled"
+        } else {
+            "disabled"
+        };
+        format!(
+            "{} ({}) - {}",
+            account.name,
+            account.provider.as_str(),
+            status
+        )
     }
 
     /// Format an error message for display.
@@ -147,6 +157,68 @@ impl AccountManager {
     /// Format a success message for display.
     pub fn format_success(message: &str) -> String {
         format!("✓ {}", message)
+    }
+
+    /// Generate a `FallbackConfig` from the enabled accounts.
+    ///
+    /// This converts the account list into the secret-free fallback chain
+    /// configuration used by the shell-level fallback system. Each account
+    /// becomes a hop with an environment variable reference for the API key.
+    pub fn to_fallback_config(&self) -> crate::fallback::FallbackConfig {
+        use crate::fallback::{FallbackChainHop, FallbackConfig, FallbackProvider};
+
+        let chain: Vec<FallbackChainHop> = self
+            .file
+            .accounts
+            .iter()
+            .filter(|a| a.enabled)
+            .map(|a| {
+                let provider = match a.provider {
+                    storage::AccountProvider::OpencodeZen => FallbackProvider::OpencodeZen,
+                    storage::AccountProvider::OpencodeGo => FallbackProvider::OpencodeGo,
+                    storage::AccountProvider::OpenaiPlatform => FallbackProvider::OpenaiPlatform,
+                    storage::AccountProvider::OpenaiCodexPlan => FallbackProvider::OpenaiCodexPlan,
+                    storage::AccountProvider::AnthropicMessages => {
+                        FallbackProvider::AnthropicMessages
+                    }
+                    storage::AccountProvider::Ollama => FallbackProvider::Ollama,
+                    storage::AccountProvider::Apple => FallbackProvider::Apple,
+                    storage::AccountProvider::Other => FallbackProvider::Other,
+                };
+                FallbackChainHop {
+                    id: a.name.clone(),
+                    provider,
+                    account: Some(a.name.clone()),
+                    env_key: format!("GROK_ACCOUNT_{}", a.name.to_uppercase().replace('-', "_")),
+                    catalog: a.catalog.clone(),
+                    cost_tier: a.cost_tier.clone(),
+                }
+            })
+            .collect();
+
+        FallbackConfig {
+            enabled: !chain.is_empty(),
+            chain,
+            ..FallbackConfig::default()
+        }
+    }
+
+    /// Set the API key as an environment variable for the fallback system.
+    ///
+    /// This is called when loading accounts to make the keys available to
+    /// the shell-level fallback system via environment variables.
+    pub fn export_env_keys(&self) {
+        for account in &self.file.accounts {
+            let env_name = format!(
+                "GROK_ACCOUNT_{}",
+                account.name.to_uppercase().replace('-', "_")
+            );
+            // SAFETY: We are setting environment variables for our own application
+            // credentials during initialization, not in a concurrent context.
+            unsafe {
+                std::env::set_var(&env_name, &account.api_key);
+            }
+        }
     }
 }
 
@@ -220,5 +292,70 @@ mod tests {
         };
         let formatted = AccountManager::format_account(&account);
         assert!(formatted.contains("disabled"));
+    }
+
+    #[test]
+    fn test_to_fallback_config_empty() {
+        let manager = AccountManager {
+            file: AccountsFile::default(),
+        };
+        let config = manager.to_fallback_config();
+        assert!(!config.enabled);
+        assert!(config.chain.is_empty());
+    }
+
+    #[test]
+    fn test_to_fallback_config_with_accounts() {
+        let manager = AccountManager {
+            file: AccountsFile {
+                accounts: vec![
+                    AccountEntry {
+                        name: "zen-a".to_string(),
+                        provider: AccountProvider::OpencodeZen,
+                        api_key: "sk-zen-a".to_string(),
+                        enabled: true,
+                        base_url: None,
+                        catalog: None,
+                        created_at: None,
+                        cost_tier: None,
+                    },
+                    AccountEntry {
+                        name: "go-a".to_string(),
+                        provider: AccountProvider::OpencodeGo,
+                        api_key: "sk-go-a".to_string(),
+                        enabled: false,
+                        base_url: None,
+                        catalog: None,
+                        created_at: None,
+                        cost_tier: None,
+                    },
+                ],
+            },
+        };
+        let config = manager.to_fallback_config();
+        assert!(config.enabled);
+        assert_eq!(config.chain.len(), 1);
+        assert_eq!(config.chain[0].id, "zen-a");
+        assert_eq!(config.chain[0].env_key, "GROK_ACCOUNT_ZEN_A");
+    }
+
+    #[test]
+    fn test_to_fallback_config_preserves_catalog() {
+        let manager = AccountManager {
+            file: AccountsFile {
+                accounts: vec![AccountEntry {
+                    name: "test".to_string(),
+                    provider: AccountProvider::OpencodeGo,
+                    api_key: "sk-test".to_string(),
+                    enabled: true,
+                    base_url: None,
+                    catalog: Some("go-kimi-k3".to_string()),
+                    created_at: None,
+                    cost_tier: None,
+                }],
+            },
+        };
+        let config = manager.to_fallback_config();
+        assert_eq!(config.chain[0].catalog, Some("go-kimi-k3".to_string()));
     }
 }

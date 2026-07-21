@@ -896,6 +896,177 @@ impl SessionActor {
                 self.send_slash_command_output("Goal cleared.").await;
                 ok_end_turn(0, None)
             }
+            BuiltinAction::ConnectBrowse => {
+                let text = match crate::accounts::AccountManager::load() {
+                    Ok(manager) => manager.format_list(),
+                    Err(e) => format!("Failed to load accounts: {e}"),
+                };
+                self.send_slash_command_output(&text).await;
+                ok_end_turn(0, None)
+            }
+            BuiltinAction::ConnectAdd {
+                name,
+                provider,
+                api_key,
+            } => {
+                if name.is_empty() || provider.is_empty() || api_key.is_empty() {
+                    self.send_slash_command_output(
+                        "Usage: /connect add <name> <provider> <key>\n\n\
+                         Providers: opencode_zen, opencode_go, openai, anthropic, ollama\n\
+                         Example: /connect add zen-a zen sk-ISEsbS...",
+                    )
+                    .await;
+                    return ok_end_turn(0, None);
+                }
+                let provider_type = crate::accounts::storage::AccountProvider::from_str(&provider)
+                    .unwrap_or(crate::accounts::storage::AccountProvider::Other);
+                match crate::accounts::AccountManager::load().and_then(|mut m| {
+                    m.add(
+                        name.clone(),
+                        provider_type,
+                        api_key,
+                        None,
+                        None,
+                    )
+                }) {
+                    Ok(entry) => {
+                        let msg = format!(
+                            "Account '{}' added ({})",
+                            entry.name,
+                            entry.provider.as_str(),
+                        );
+                        self.send_slash_command_output(&msg).await;
+                    }
+                    Err(e) => {
+                        self.send_slash_command_output(&format!("Error: {e}")).await;
+                    }
+                }
+                ok_end_turn(0, None)
+            }
+            BuiltinAction::ConnectRemove { name } => {
+                if name.is_empty() {
+                    self.send_slash_command_output(
+                        "Usage: /connect remove <name>",
+                    )
+                    .await;
+                    return ok_end_turn(0, None);
+                }
+                match crate::accounts::AccountManager::load().and_then(|mut m| m.remove(&name)) {
+                    Ok(entry) => {
+                        let msg = format!("Account '{}' removed", entry.name);
+                        self.send_slash_command_output(&msg).await;
+                    }
+                    Err(e) => {
+                        self.send_slash_command_output(&format!("Error: {e}")).await;
+                    }
+                }
+                ok_end_turn(0, None)
+            }
+            BuiltinAction::ConnectList => {
+                let text = match crate::accounts::AccountManager::load() {
+                    Ok(manager) => manager.format_list(),
+                    Err(e) => format!("Failed to load accounts: {e}"),
+                };
+                self.send_slash_command_output(&text).await;
+                ok_end_turn(0, None)
+            }
+            BuiltinAction::ConnectEnable { name } => {
+                if name.is_empty() {
+                    self.send_slash_command_output(
+                        "Usage: /connect enable <name>",
+                    )
+                    .await;
+                    return ok_end_turn(0, None);
+                }
+                match crate::accounts::AccountManager::load().and_then(|mut m| m.enable(&name)) {
+                    Ok(entry) => {
+                        let msg = format!(
+                            "Account '{}' enabled ({})",
+                            entry.name,
+                            entry.provider.as_str(),
+                        );
+                        self.send_slash_command_output(&msg).await;
+                    }
+                    Err(e) => {
+                        self.send_slash_command_output(&format!("Error: {e}")).await;
+                    }
+                }
+                ok_end_turn(0, None)
+            }
+            BuiltinAction::ConnectDisable { name } => {
+                if name.is_empty() {
+                    self.send_slash_command_output(
+                        "Usage: /connect disable <name>",
+                    )
+                    .await;
+                    return ok_end_turn(0, None);
+                }
+                match crate::accounts::AccountManager::load().and_then(|mut m| m.disable(&name)) {
+                    Ok(entry) => {
+                        let msg = format!(
+                            "Account '{}' disabled ({})",
+                            entry.name,
+                            entry.provider.as_str(),
+                        );
+                        self.send_slash_command_output(&msg).await;
+                    }
+                    Err(e) => {
+                        self.send_slash_command_output(&format!("Error: {e}")).await;
+                    }
+                }
+                ok_end_turn(0, None)
+            }
+            BuiltinAction::ConnectOrder { name, position } => {
+                if name.is_empty() {
+                    self.send_slash_command_output(
+                        "Usage: /connect order <name> <position>",
+                    )
+                    .await;
+                    return ok_end_turn(0, None);
+                }
+                match crate::accounts::AccountManager::load().and_then(|mut m| {
+                    m.reorder(&name, position)
+                }) {
+                    Ok(()) => {
+                        let msg = format!("Account '{}' moved to position {}", name, position);
+                        self.send_slash_command_output(&msg).await;
+                    }
+                    Err(e) => {
+                        self.send_slash_command_output(&format!("Error: {e}")).await;
+                    }
+                }
+                ok_end_turn(0, None)
+            }
+            BuiltinAction::ConnectStatus => {
+                let text = match crate::accounts::AccountManager::load() {
+                    Ok(manager) => {
+                        if !manager.has_accounts() {
+                            "No accounts configured.\n\nUse `/connect add <name> <provider> <key>` to add an account.".to_string()
+                        } else {
+                            let mut lines = vec!["Account status:".to_string(), String::new()];
+                            for account in manager.accounts() {
+                                let status = if account.enabled { "✓ enabled" } else { "○ disabled" };
+                                lines.push(format!(
+                                    "  {} ({}) - {}",
+                                    account.name,
+                                    account.provider.as_str(),
+                                    status,
+                                ));
+                            }
+                            lines.push(String::new());
+                            lines.push(format!(
+                                "Total: {} accounts, {} enabled",
+                                manager.total_count(),
+                                manager.enabled_count(),
+                            ));
+                            lines.join("\n")
+                        }
+                    }
+                    Err(e) => format!("Failed to load accounts: {e}"),
+                };
+                self.send_slash_command_output(&text).await;
+                ok_end_turn(0, None)
+            }
         }
     }
 
