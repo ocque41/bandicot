@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
@@ -6,7 +7,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::notification::types::ToolNotificationHandle;
 use crate::notification::{ScheduledTaskCreated, ScheduledTaskFired, ScheduledTaskRemoved};
-use crate::types::resources::{SharedResources, State};
+use crate::persistence::ResourcesPersistence;
+use crate::types::resources::{Resources, SharedResources, State};
 
 use super::interval::interval_to_human;
 use super::types::{ScheduledTask, SchedulerCommand, SchedulerError, SchedulerState};
@@ -30,10 +32,18 @@ pub struct SchedulerActor {
     pub(crate) notification_handle: ToolNotificationHandle,
     pub(crate) cmd_rx: mpsc::UnboundedReceiver<SchedulerCommand>,
     pub(crate) cancel_token: CancellationToken,
+    pub(crate) persistence: Arc<ResourcesPersistence>,
 }
 
 impl SchedulerActor {
+    async fn persist(&self, resources: &Resources) {
+        if let Err(error) = self.persistence.save_and_flush(resources.serialize()).await {
+            tracing::error!(?error, "Failed to durably persist scheduler state");
+        }
+    }
+
     pub async fn run(mut self) {
+        self.prune_expired_tasks().await;
         self.handle_missed_tasks().await;
         self.announce_existing_tasks().await;
 
@@ -63,11 +73,22 @@ impl SchedulerActor {
         let remaining: Vec<String> = {
             let mut res = self.resources.lock().await;
             let state = res.get_or_default::<State<SchedulerState>>();
-            state.tasks.drain(..).map(|t| t.id).collect()
+            state.tasks.iter().map(|t| t.id.clone()).collect()
         };
         for task_id in remaining {
             self.notification_handle
                 .send_scheduled_task_removed(ScheduledTaskRemoved { task_id });
+        }
+    }
+
+    async fn prune_expired_tasks(&mut self) {
+        let now = Utc::now();
+        let mut res = self.resources.lock().await;
+        let state = res.get_or_default::<State<SchedulerState>>();
+        let before = state.tasks.len();
+        state.tasks.retain(|task| !task.is_expired(now));
+        if state.tasks.len() != before {
+            self.persist(&res).await;
         }
     }
 
@@ -78,7 +99,8 @@ impl SchedulerActor {
             .map(|s| {
                 s.tasks
                     .iter()
-                    .map(|t| t.next_fire_at())
+                    .flat_map(|t| [Some(t.next_fire_at()), t.expires_at])
+                    .flatten()
                     .min()
                     .map(|next| {
                         let now = Utc::now();
@@ -97,9 +119,26 @@ impl SchedulerActor {
         let now = Utc::now();
         let mut res = self.resources.lock().await;
         let state = res.get_or_default::<State<SchedulerState>>();
+        let expired_ids: Vec<String> = state
+            .tasks
+            .iter()
+            .filter(|task| task.is_expired(now))
+            .map(|task| task.id.clone())
+            .collect();
+        if !expired_ids.is_empty() {
+            state.tasks.retain(|task| !task.is_expired(now));
+        }
         let idx = state.tasks.iter().position(|t| t.next_fire_at() <= now);
 
         let Some(idx) = idx else {
+            if !expired_ids.is_empty() {
+                self.persist(&res).await;
+            }
+            drop(res);
+            for task_id in expired_ids {
+                self.notification_handle
+                    .send_scheduled_task_removed(ScheduledTaskRemoved { task_id });
+            }
             return;
         };
 
@@ -112,21 +151,24 @@ impl SchedulerActor {
         // interval, so the task is not re-selected until it is due again.
         // Overlapping prompts are deduped downstream by stable queue-item-id.
         task.last_fired_at = Some(now);
-        let next_fire_at = Some(task.next_fire_at().to_rfc3339());
-
-        let should_remove = if !task.recurring {
-            true
-        } else {
-            task.is_expired(now)
-        };
+        let should_remove = !task.recurring;
+        let next_fire_at = (!should_remove).then(|| task.next_fire_at().to_rfc3339());
 
         if should_remove {
             state.tasks.remove(idx);
         }
+        self.persist(&res).await;
 
         // Drop the lock before sending the notification to avoid holding it
         // across potentially blocking operations.
         drop(res);
+
+        for expired_task_id in expired_ids {
+            self.notification_handle
+                .send_scheduled_task_removed(ScheduledTaskRemoved {
+                    task_id: expired_task_id,
+                });
+        }
 
         tracing::info!(
             task_id = %task_id,
@@ -166,27 +208,24 @@ impl SchedulerActor {
             return;
         }
 
+        let missed_ids: Vec<&str> = missed.iter().map(|(id, _, _)| id.as_str()).collect();
+        state
+            .tasks
+            .retain(|task| !missed_ids.contains(&task.id.as_str()));
+        self.persist(&res).await;
         drop(res);
 
-        let mut fired_ids = Vec::new();
-        for (task_id, prompt, interval_secs) in missed {
+        for (task_id, prompt, interval_secs) in &missed {
             tracing::info!(task_id = %task_id, "Firing missed one-shot task");
             self.notification_handle
                 .send_scheduled_task_fired(ScheduledTaskFired {
                     task_id: task_id.clone(),
-                    prompt,
-                    human_schedule: interval_to_human(interval_secs),
+                    prompt: prompt.clone(),
+                    human_schedule: interval_to_human(*interval_secs),
                     next_fire_at: None,
                 });
-            fired_ids.push(task_id);
         }
-
-        let mut res = self.resources.lock().await;
-        let state = res.get_or_default::<State<SchedulerState>>();
-        state.tasks.retain(|t| !fired_ids.contains(&t.id));
-        drop(res);
-
-        for task_id in fired_ids {
+        for (task_id, _, _) in missed {
             self.notification_handle
                 .send_scheduled_task_removed(ScheduledTaskRemoved { task_id });
         }
@@ -237,9 +276,10 @@ impl SchedulerActor {
                     let _ = reply.send(Err(SchedulerError::TaskLimitReached(MAX_SCHEDULED_TASKS)));
                     return;
                 }
+                state.tasks.push(task.clone());
+                self.persist(&res).await;
                 self.notification_handle
                     .send_scheduled_task_created(task_created_payload(&task));
-                state.tasks.push(task.clone());
                 let _ = reply.send(Ok(task));
             }
             SchedulerCommand::Delete { id, reply } => {
@@ -248,6 +288,9 @@ impl SchedulerActor {
                 let before = state.tasks.len();
                 state.tasks.retain(|t| t.id != id);
                 let removed = before != state.tasks.len();
+                if removed {
+                    self.persist(&res).await;
+                }
                 drop(res);
                 let _ = reply.send(removed);
                 if removed {
@@ -276,6 +319,17 @@ mod tests {
     use std::sync::Arc;
     use tokio::sync::Mutex;
 
+    async fn reload_tasks(path: &std::path::Path) -> Vec<ScheduledTask> {
+        let mut resources = Resources::new();
+        resources.register_state::<SchedulerState>();
+        let persistence = ResourcesPersistence::new(path.to_path_buf());
+        assert!(persistence.load(&mut resources));
+        resources
+            .get::<State<SchedulerState>>()
+            .map(|state| state.tasks.clone())
+            .unwrap_or_default()
+    }
+
     fn make_test_actor() -> (
         SchedulerHandle,
         CancellationToken,
@@ -294,6 +348,7 @@ mod tests {
             notification_handle: notif_handle,
             cmd_rx,
             cancel_token: cancel_token.clone(),
+            persistence: Arc::new(ResourcesPersistence::noop()),
         };
 
         tokio::spawn(actor.run());
@@ -384,6 +439,134 @@ mod tests {
         assert!(!removed);
 
         cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn durable_create_and_delete_survive_restart() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("resources_state.json");
+        let persistence = Arc::new(ResourcesPersistence::new(path.clone()));
+        let mut resources = Resources::new();
+        resources.register_state::<SchedulerState>();
+        let shared = Arc::new(Mutex::new(resources));
+        let (notif_handle, _notif_rx) = ToolNotificationHandle::channel();
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let cancel = CancellationToken::new();
+        let actor = SchedulerActor {
+            resources: shared,
+            notification_handle: notif_handle,
+            cmd_rx,
+            cancel_token: cancel.clone(),
+            persistence: persistence.clone(),
+        };
+        let actor_task = tokio::spawn(actor.run());
+        let task = ScheduledTask::new(300, "durable".into(), true, true);
+        let task_id = task.id.clone();
+        let (reply, response) = tokio::sync::oneshot::channel();
+        cmd_tx
+            .send(SchedulerCommand::Create { task, reply })
+            .unwrap();
+        response.await.unwrap().unwrap();
+        persistence.flush().await;
+        assert_eq!(reload_tasks(&path).await.len(), 1);
+
+        let (reply, response) = tokio::sync::oneshot::channel();
+        cmd_tx
+            .send(SchedulerCommand::Delete { id: task_id, reply })
+            .unwrap();
+        assert!(response.await.unwrap());
+        persistence.flush().await;
+        cancel.cancel();
+        actor_task.await.unwrap();
+        assert!(reload_tasks(&path).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn fire_state_survives_restart_without_catch_up_fanout() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("resources_state.json");
+        let persistence = Arc::new(ResourcesPersistence::new(path.clone()));
+        let mut resources = Resources::new();
+        resources.register_state::<SchedulerState>();
+        let state = resources.get_or_default::<State<SchedulerState>>();
+        let mut task = ScheduledTask::new(60, "overdue".into(), true, true);
+        task.created_at = Utc::now() - chrono::Duration::hours(3);
+        state.tasks.push(task);
+        persistence.save(&resources);
+        persistence.flush().await;
+
+        let shared = Arc::new(Mutex::new(resources));
+        let (notif_handle, mut notif_rx) = ToolNotificationHandle::channel();
+        let (_cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let cancel = CancellationToken::new();
+        let actor = SchedulerActor {
+            resources: shared,
+            notification_handle: notif_handle,
+            cmd_rx,
+            cancel_token: cancel.clone(),
+            persistence: persistence.clone(),
+        };
+        let actor_task = tokio::spawn(actor.run());
+        let mut fire_count = 0;
+        for _ in 0..2 {
+            let notification = tokio::time::timeout(Duration::from_secs(2), notif_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            if matches!(notification, ToolNotification::ScheduledTaskFired(_)) {
+                fire_count += 1;
+            }
+        }
+        assert_eq!(fire_count, 1);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), notif_rx.recv())
+                .await
+                .is_err()
+        );
+        persistence.flush().await;
+        cancel.cancel();
+        actor_task.await.unwrap();
+        let tasks = reload_tasks(&path).await;
+        assert_eq!(tasks.len(), 1);
+        assert!(tasks[0].last_fired_at.is_some());
+        assert!(tasks[0].next_fire_at() > Utc::now());
+    }
+
+    #[tokio::test]
+    async fn expired_task_is_pruned_and_persisted_on_restart() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("resources_state.json");
+        let persistence = Arc::new(ResourcesPersistence::new(path.clone()));
+        let mut resources = Resources::new();
+        resources.register_state::<SchedulerState>();
+        let state = resources.get_or_default::<State<SchedulerState>>();
+        let mut task = ScheduledTask::new(300, "expired".into(), true, true);
+        task.expires_at = Some(Utc::now() - chrono::Duration::seconds(1));
+        state.tasks.push(task);
+        persistence.save(&resources);
+        persistence.flush().await;
+
+        let shared = Arc::new(Mutex::new(resources));
+        let (notif_handle, mut notif_rx) = ToolNotificationHandle::channel();
+        let (_cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let cancel = CancellationToken::new();
+        let actor = SchedulerActor {
+            resources: shared,
+            notification_handle: notif_handle,
+            cmd_rx,
+            cancel_token: cancel.clone(),
+            persistence: persistence.clone(),
+        };
+        let actor_task = tokio::spawn(actor.run());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), notif_rx.recv())
+                .await
+                .is_err()
+        );
+        persistence.flush().await;
+        cancel.cancel();
+        actor_task.await.unwrap();
+        assert!(reload_tasks(&path).await.is_empty());
     }
 
     #[tokio::test]
@@ -501,6 +684,7 @@ mod tests {
             notification_handle: notif_handle,
             cmd_rx,
             cancel_token: cancel_token.clone(),
+            persistence: Arc::new(ResourcesPersistence::noop()),
         };
 
         tokio::spawn(actor.run());
@@ -585,6 +769,7 @@ mod tests {
             notification_handle: notif_handle,
             cmd_rx,
             cancel_token: cancel_token.clone(),
+            persistence: Arc::new(ResourcesPersistence::noop()),
         };
 
         actor.handle_missed_tasks().await;
@@ -632,6 +817,7 @@ mod tests {
             notification_handle: notif_handle,
             cmd_rx,
             cancel_token: cancel_token.clone(),
+            persistence: Arc::new(ResourcesPersistence::noop()),
         };
 
         let handle = tokio::spawn(actor.run());
@@ -669,6 +855,7 @@ mod tests {
             notification_handle: notif_handle,
             cmd_rx,
             cancel_token: cancel_token.clone(),
+            persistence: Arc::new(ResourcesPersistence::noop()),
         };
 
         let handle = tokio::spawn(actor.run());

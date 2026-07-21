@@ -1582,6 +1582,31 @@ pub(crate) fn execute(
                     TaskResult::CancelComplete
                 });
         }
+        Effect::CreateScheduledTask {
+            session_id,
+            interval,
+            prompt,
+        } => {
+            let tx = acp_tx.clone();
+            tasks.spawn(async move {
+                let params = serde_json::json!({
+                    "sessionId": session_id.0.to_string(),
+                    "interval": interval,
+                    "prompt": prompt,
+                });
+                let req = acp::ExtRequest::new(
+                    "x.ai/scheduler/create",
+                    serde_json::value::to_raw_value(&params)
+                        .expect("serialize scheduler create params")
+                        .into(),
+                );
+                let result = acp_send(req, &tx)
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| error.to_string());
+                TaskResult::ScheduledTaskCreateComplete { result }
+            });
+        }
         Effect::DemoteToBackground { session_id, tool_call_id } => {
             let tx = acp_tx.clone();
             tasks

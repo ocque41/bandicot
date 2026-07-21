@@ -268,6 +268,10 @@ fn field_parse_error(field: &str, value: &toml::Value) -> Option<toml::de::Error
 mod tests {
     use super::*;
     use crate::sampling::ApiBackend;
+    use xai_grok_sampler::{
+        AuthScheme, ChatMaxTokensField, InferenceTransport, ProviderCapabilities,
+        ReasoningResponseField, WireQuirks,
+    };
     use xai_grok_sampling_types::{
         CompactionAtTokens, CompactionsRemaining, ReasoningEffort, ReasoningEffortOption,
     };
@@ -510,6 +514,18 @@ mod tests {
             temperature: Some(0.5),
             top_p: Some(0.9),
             api_backend: Some(ApiBackend::Messages),
+            transport: Some(InferenceTransport::AppleFoundationModels),
+            auth_scheme: Some(AuthScheme::XApiKey),
+            capabilities: Some(ProviderCapabilities {
+                tools: true,
+                image_input: false,
+            }),
+            wire_quirks: Some(WireQuirks {
+                chat_max_tokens_field: ChatMaxTokensField::MaxCompletionTokens,
+                reasoning_response_field: ReasoningResponseField::Reasoning,
+                send_stream_options: false,
+                send_tool_choice: false,
+            }),
             extra_headers: [("x-team".to_owned(), "codegen".to_owned())]
                 .into_iter()
                 .collect(),

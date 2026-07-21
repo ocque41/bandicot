@@ -10,7 +10,8 @@
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use xai_grok_sampling_types::{
-    ApiBackend, CompactionAtTokens, CompactionsRemaining, DoomLoopRecoveryPolicy, ReasoningEffort,
+    ApiBackend, CompactionAtTokens, CompactionsRemaining, DoomLoopRecoveryPolicy,
+    InferenceTransport, ReasoningEffort,
 };
 
 use crate::attribution::SharedAttributionCallback;
@@ -19,9 +20,60 @@ use crate::retry::{DEFAULT_MAX_RETRIES, RATE_LIMIT_RETRY_THRESHOLD};
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthScheme {
+    None,
     #[default]
     Bearer,
     XApiKey,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatMaxTokensField {
+    #[default]
+    MaxTokens,
+    MaxCompletionTokens,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningResponseField {
+    #[default]
+    ReasoningContent,
+    Reasoning,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProviderCapabilities {
+    pub tools: bool,
+    pub image_input: bool,
+}
+
+impl Default for ProviderCapabilities {
+    fn default() -> Self {
+        Self {
+            tools: true,
+            image_input: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WireQuirks {
+    pub chat_max_tokens_field: ChatMaxTokensField,
+    pub reasoning_response_field: ReasoningResponseField,
+    pub send_stream_options: bool,
+    pub send_tool_choice: bool,
+}
+
+impl Default for WireQuirks {
+    fn default() -> Self {
+        Self {
+            chat_max_tokens_field: ChatMaxTokensField::MaxTokens,
+            reasoning_response_field: ReasoningResponseField::ReasoningContent,
+            send_stream_options: true,
+            send_tool_choice: true,
+        }
+    }
 }
 
 /// All knobs that control a single sampling request.
@@ -56,7 +108,13 @@ pub struct SamplerConfig {
     pub top_p: Option<f32>,
     pub api_backend: ApiBackend,
     #[serde(default)]
+    pub transport: InferenceTransport,
+    #[serde(default)]
     pub auth_scheme: AuthScheme,
+    #[serde(default)]
+    pub capabilities: ProviderCapabilities,
+    #[serde(default)]
+    pub wire_quirks: WireQuirks,
     /// Extra request headers supplied by the caller. The sampler does not
     /// derive them, but strips xAI-only headers before sending to a non-xAI
     /// base URL. Callers inject proxy auth and other access headers here.
@@ -138,7 +196,10 @@ impl Default for SamplerConfig {
             temperature: None,
             top_p: None,
             api_backend: ApiBackend::default(),
+            transport: InferenceTransport::default(),
             auth_scheme: AuthScheme::default(),
+            capabilities: ProviderCapabilities::default(),
+            wire_quirks: WireQuirks::default(),
             extra_headers: IndexMap::new(),
             context_window: 0,
             force_http1: false,

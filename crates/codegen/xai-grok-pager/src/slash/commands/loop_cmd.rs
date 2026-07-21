@@ -1,6 +1,6 @@
 use agent_client_protocol as acp;
 use xai_grok_tools::implementations::grok_build::{
-    SCHEDULER_CREATE_TOOL_NAME, loop_schedule_instruction, loop_usage_message,
+    SCHEDULER_CREATE_TOOL_NAME, loop_schedule_instruction, loop_usage_message, parse_explicit_loop,
 };
 
 use crate::slash::command::{CommandExecCtx, CommandResult, ScheduledTaskPreview, SlashCommand};
@@ -108,9 +108,27 @@ impl SlashCommand for LoopCommand {
         LOOP_REQUIRED_TOOLS
     }
 
-    fn run(&self, _ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
+    fn run(&self, ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
         if args.trim().is_empty() {
             return CommandResult::Message(loop_usage_message().to_string());
+        }
+
+        let composed = format!("/loop {}", args.trim());
+        if xai_grok_tools::implementations::grok_build::parse_approved_loop_workflow(&composed)
+            .is_some()
+        {
+            return CommandResult::PassThrough(composed);
+        }
+
+        if let Some(explicit) = parse_explicit_loop(args) {
+            let Some(session_id) = ctx.session_id else {
+                return CommandResult::Error("No active session".to_string());
+            };
+            return CommandResult::HostScheduleLoop {
+                session_id: session_id.clone(),
+                interval: explicit.interval.to_string(),
+                prompt: explicit.prompt.to_string(),
+            };
         }
 
         let (interval_token, prompt) = parse_loop_args(args);
@@ -256,9 +274,10 @@ mod tests {
     fn run_loop(args: &str) -> CommandResult {
         let models = ModelState::default();
         let bundle = BundleState::default();
+        let session_id = acp::SessionId::new("session-1");
         let mut ctx = CommandExecCtx {
             models: &models,
-            session_id: None,
+            session_id: Some(&session_id),
             bundle_state: &bundle,
             screen_mode: crate::app::ScreenMode::Inline,
             pager_state: crate::settings::PagerLocalSnapshot::default(),
@@ -269,14 +288,23 @@ mod tests {
     #[test]
     fn run_with_leading_token_shows_concrete_schedule() {
         match run_loop("30m check deploy status") {
-            CommandResult::InjectSkill {
-                scheduled_task_preview: Some(preview),
-                ..
+            CommandResult::HostScheduleLoop {
+                interval, prompt, ..
             } => {
-                assert_eq!(preview.human_schedule, "every 30 minutes");
-                assert_eq!(preview.prompt, "check deploy status");
+                assert_eq!(interval, "30m");
+                assert_eq!(prompt, "check deploy status");
             }
-            other => panic!("expected InjectSkill with preview, got {other:?}"),
+            other => panic!("expected host schedule, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn composed_workflow_passes_through_for_typed_shell_resolution() {
+        match run_loop("10m --plan --goal ship it") {
+            CommandResult::PassThrough(text) => {
+                assert_eq!(text, "/loop 10m --plan --goal ship it")
+            }
+            other => panic!("expected PassThrough, got {other:?}"),
         }
     }
 
@@ -351,7 +379,7 @@ mod tests {
     // `loop_prompt_matches_pager_wording`, this pins full shell↔pager parity.
     #[test]
     fn run_instruction_matches_shared_helper() {
-        let args = "2h run tests";
+        let args = "run tests every 2 hours";
         match run_loop(args) {
             CommandResult::InjectSkill { prompt_blocks, .. } => {
                 let acp::ContentBlock::Text(text) = &prompt_blocks[0] else {

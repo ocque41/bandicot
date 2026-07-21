@@ -1,0 +1,3 @@
+module BandicotAppleFoundationModelsPackageTests {
+    header "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/BandicotAppleFoundationModelsPackageTests.build/include/BandicotAppleFoundationModelsPackageTests-Swift.h"
+}

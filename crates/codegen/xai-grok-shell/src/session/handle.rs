@@ -227,6 +227,28 @@ impl SessionHandle {
         }
         rx.await.unwrap_or(Err("session actor died".to_string()))
     }
+    pub async fn create_scheduled_task(
+        &self,
+        interval: &str,
+        prompt: &str,
+    ) -> Result<
+        xai_grok_tools::implementations::grok_build::scheduler::create::SchedulerCreateOutput,
+        String,
+    > {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(SessionCommand::CreateScheduledTask {
+                interval: interval.to_string(),
+                prompt: prompt.to_string(),
+                respond_to: tx,
+            })
+            .is_err()
+        {
+            return Err("session not found".to_string());
+        }
+        rx.await.unwrap_or(Err("session actor died".to_string()))
+    }
     /// Returns `true` if the session has work in flight: a running turn or
     /// queued inputs (`running_task.is_some() || !pending_inputs.is_empty()`).
     ///

@@ -42,6 +42,11 @@ pub enum CommandResult {
     Error(String),
     /// Command produced a user-visible message.
     Message(String),
+    HostScheduleLoop {
+        session_id: acp::SessionId,
+        interval: String,
+        prompt: String,
+    },
     /// Command produced a pager Action to dispatch (e.g., SwitchModel, Quit).
     Action(Action),
     /// Command should be sent through the queued command pipeline

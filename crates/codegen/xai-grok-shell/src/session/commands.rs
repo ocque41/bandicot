@@ -443,6 +443,11 @@ pub enum SessionCommand {
         task_id: String,
         respond_to: oneshot::Sender<Result<bool, String>>,
     },
+    CreateScheduledTask {
+        interval: String,
+        prompt: String,
+        respond_to: oneshot::Sender<Result<xai_grok_tools::implementations::grok_build::scheduler::create::SchedulerCreateOutput, String>>,
+    },
     /// List all background tasks.
     /// Routes through the ToolBridge's TerminalBackend.
     ListTasks {

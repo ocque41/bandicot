@@ -348,7 +348,13 @@ pub(super) async fn run_session(
             .send(result); } SessionCommand::DeleteScheduledTask { task_id, respond_to }
             => { let result = session.agent.borrow().tool_bridge()
             .delete_scheduled_task(& task_id). await .map_err(| e | e.to_string()); let _
-            = respond_to.send(result); } SessionCommand::ListTasks { respond_to } => {
+            = respond_to.send(result); } SessionCommand::CreateScheduledTask { interval,
+            prompt, respond_to } => { let prompt = crate::session::loop_context::augment_loop_prompt(&
+            session.session_info.cwd, & prompt).await; let result = session.agent.borrow().tool_bridge()
+            .create_scheduled_task(xai_grok_tools::implementations::grok_build::scheduler::create::SchedulerCreateInput {
+            interval, prompt, recurring : true, durable : Some(true), fire_immediately :
+            true, }).await.map_err(| e | e.to_string()); let _ = respond_to.send(result); }
+            SessionCommand::ListTasks { respond_to } => {
             let result = session.agent.borrow().tool_bridge().list_tasks(). await; let _
             = respond_to.send(result); } SessionCommand::GetHooksList { respond_to } => {
             use crate ::extensions::hooks::hook_spec_to_info; let hooks = match &*

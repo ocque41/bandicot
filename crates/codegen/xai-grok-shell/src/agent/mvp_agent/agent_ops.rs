@@ -1911,6 +1911,20 @@ impl MvpAgent {
             Err("session not found".to_string())
         }
     }
+    pub async fn create_scheduled_task(
+        &self,
+        session_id: &str,
+        interval: &str,
+        prompt: &str,
+    ) -> Result<xai_grok_tools::implementations::grok_build::scheduler::create::SchedulerCreateOutput, String>
+    {
+        let sid = acp::SessionId::new(session_id);
+        if let Some(handle) = self.get_session_handle(&sid) {
+            handle.create_scheduled_task(interval, prompt).await
+        } else {
+            Err("session not found".to_string())
+        }
+    }
     /// Cancel a subagent by id, returning a typed outcome that backs the pager's
     /// `x.ai/subagent/cancel`. Active/pending → cancelled (a finish follows);
     /// already-finished → its terminal status; unknown id → `NotFound`.

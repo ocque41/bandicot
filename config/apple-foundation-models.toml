@@ -1,0 +1,45 @@
+# Secret-free on-device Apple Foundation Models profile for macOS 26+.
+# No URL, API key, credential environment variable, or network service is used.
+# BANDICOT_NATIVE_ONLY_PROFILE=1
+
+[cli]
+auto_update = false
+
+[models]
+default = "apple-on-device"
+session_summary = "apple-on-device"
+prompt_suggestion = "apple-on-device"
+allowed_models = ["apple-*"]
+
+[features]
+telemetry = false
+feedback = false
+managed_config = false
+remote_fetch = false
+backend_tools = false
+video_gen = false
+voice_mode = false
+
+[telemetry]
+trace_upload = false
+mixpanel_enabled = false
+otel_enabled = false
+
+[diagnostics]
+error_reporting = false
+
+[model.apple-on-device]
+model = "apple-system-language-model"
+base_url = "native://apple-foundation-models"
+name = "Apple On-Device Foundation Model"
+description = "Private on-device inference through macOS FoundationModels"
+transport = "apple_foundation_models"
+# Retained only as the backend-neutral structured-output capability selector;
+# this transport never constructs or sends a Chat Completions request.
+api_backend = "chat_completions"
+auth_scheme = "none"
+capabilities = { tools = false, image_input = false }
+context_window = 4096
+max_completion_tokens = 2048
+agent_type = "codex"
+supports_backend_search = false

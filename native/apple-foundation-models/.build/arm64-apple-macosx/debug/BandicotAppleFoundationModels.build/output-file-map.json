@@ -1,0 +1,12 @@
+{
+  "": {
+    "swift-dependencies": "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/debug/BandicotAppleFoundationModels.build/primary.swiftdeps"
+  },
+  "/Users/miguel/Documents/bandicot/native/apple-foundation-models/Sources/BandicotAppleFoundationModels/main.swift": {
+    "dependencies": "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/debug/BandicotAppleFoundationModels.build/main.d",
+    "object": "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/debug/BandicotAppleFoundationModels.build/main.swift.o",
+    "swiftmodule": "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/debug/BandicotAppleFoundationModels.build/main~partial.swiftmodule",
+    "swift-dependencies": "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/debug/BandicotAppleFoundationModels.build/main.swiftdeps",
+    "diagnostics": "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/debug/BandicotAppleFoundationModels.build/main.dia"
+  }
+}

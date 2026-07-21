@@ -573,6 +573,57 @@ impl ToolBridge {
         })
     }
 
+    pub async fn create_scheduled_task(
+        &self,
+        input: crate::implementations::grok_build::scheduler::create::SchedulerCreateInput,
+    ) -> Result<
+        crate::implementations::grok_build::scheduler::create::SchedulerCreateOutput,
+        xai_tool_runtime::ToolError,
+    > {
+        use crate::implementations::grok_build::scheduler::{
+            create::create_scheduled_task, types::SchedulerHandle,
+        };
+        let handle = {
+            let res = self.registry.resources.lock().await;
+            res.get::<SchedulerHandle>()
+                .ok_or_else(|| {
+                    xai_tool_runtime::ToolError::custom("missing_resource", "SchedulerHandle")
+                })?
+                .clone()
+        };
+        create_scheduled_task(&handle, input)
+            .await
+            .map_err(|error| xai_tool_runtime::ToolError::invalid_arguments(error.to_string()))
+    }
+
+    pub async fn list_scheduled_tasks(
+        &self,
+    ) -> Result<
+        Vec<crate::implementations::grok_build::scheduler::types::ScheduledTask>,
+        xai_tool_runtime::ToolError,
+    > {
+        use crate::implementations::grok_build::scheduler::types::{
+            SchedulerCommand, SchedulerHandle,
+        };
+        let sender = {
+            let resources = self.registry.resources.lock().await;
+            resources
+                .get::<SchedulerHandle>()
+                .ok_or_else(|| {
+                    xai_tool_runtime::ToolError::custom("missing_resource", "SchedulerHandle")
+                })?
+                .0
+                .clone()
+        };
+        let (reply, response) = tokio::sync::oneshot::channel();
+        sender.send(SchedulerCommand::List { reply }).map_err(|_| {
+            xai_tool_runtime::ToolError::custom("process_manager", "Scheduler actor stopped")
+        })?;
+        response.await.map_err(|_| {
+            xai_tool_runtime::ToolError::custom("process_manager", "Scheduler actor dropped reply")
+        })
+    }
+
     /// Move a foreground command to background by tool_call_id.
     /// Returns `true` if a matching foreground process was found and unblocked.
     pub async fn background_foreground_command(&self, tool_call_id: &str) -> bool {

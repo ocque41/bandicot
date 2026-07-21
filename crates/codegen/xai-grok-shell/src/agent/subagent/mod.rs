@@ -912,9 +912,7 @@ async fn read_parent_sampling_config(
                 creds.alpha_test_key.as_deref(),
                 &cfg.base_url,
             );
-            let auth_scheme = crate::agent::config::try_resolve_model_credentials(&cfg.model, None)
-                .map(|r| r.auth_scheme)
-                .unwrap_or_default();
+            let provider_facts = crate::agent::config::resolve_model_auth_facts(&cfg.model);
             let inherited = xai_grok_sampler::SamplerConfig {
                 api_key: creds.api_key,
                 base_url: cfg.base_url,
@@ -923,7 +921,10 @@ async fn read_parent_sampling_config(
                 temperature: cfg.temperature,
                 top_p: cfg.top_p,
                 api_backend: cfg.api_backend,
-                auth_scheme,
+                transport: provider_facts.transport,
+                auth_scheme: provider_facts.auth_scheme,
+                capabilities: provider_facts.capabilities,
+                wire_quirks: provider_facts.wire_quirks,
                 extra_headers,
                 context_window: cfg.context_window.get(),
                 client_version: creds.client_version,

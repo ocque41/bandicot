@@ -434,6 +434,16 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             tracing::trace!("Cancel notification sent successfully");
             vec![]
         }
+        TaskResult::ScheduledTaskCreateComplete { result } => {
+            if let Err(error) = result
+                && let Some(agent) = get_active_agent_mut(app)
+            {
+                agent.scrollback.push_block(RenderBlock::system(format!(
+                    "Couldn't create scheduled task: {error}"
+                )));
+            }
+            vec![]
+        }
         TaskResult::KillSubagentComplete {
             session_id,
             subagent_id,

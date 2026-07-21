@@ -72,7 +72,7 @@ pub fn maybe_commit_welcome(app: &mut AppView, terminal: &mut PagerTerminal) {
     let mut info: Vec<Line<'static>> = Vec::new();
     info.push(Line::from(vec![
         Span::styled(
-            "Grok Build",
+            "Bandicot",
             Style::default()
                 .fg(theme.accent_user)
                 .add_modifier(Modifier::BOLD),
@@ -90,7 +90,7 @@ pub fn maybe_commit_welcome(app: &mut AppView, terminal: &mut PagerTerminal) {
     }
     info.push(Line::from(Span::styled("/help for commands", theme.dim())));
 
-    let logo_lines = minimal_api::compact_logo_line_count();
+    let logo_lines = minimal_api::compact_logo_line_count(width.saturating_sub(2));
     // logo (+ a blank separator row) when present, then the info lines, wrapped
     // in a border with one row of vertical padding top and bottom.
     let logo_block = if logo_lines > 0 { logo_lines + 1 } else { 0 };

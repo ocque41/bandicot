@@ -2,8 +2,8 @@
 //!
 //! The profile test is intentionally file-backed: changing
 //! `config/openai.toml` changes the test input. The ignored binary test copies
-//! that same profile into an isolated `GROK_HOME` and changes only its OpenAI
-//! base URLs to a local Responses API mock.
+//! that same profile into an isolated `GROK_HOME` and supplies a local Responses
+//! API URL through the same Bandicot-owned environment used by the launcher.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -24,6 +24,8 @@ use xai_grok_test_support::{
 
 const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 const OPENAI_TEST_KEY: &str = "openai-profile-test-key";
+const BANDICOT_BASE_URL_VAR: &str = "BANDICOT_OPENAI_BASE_URL";
+const BANDICOT_TOKEN_VAR: &str = "BANDICOT_OPENAI_TOKEN";
 
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -135,6 +137,8 @@ fn checked_in_openai_profile_is_complete_secret_free_and_warning_free() {
         EnvGuard::unset("GROK_PROMPT_SUGGESTIONS_MODEL"),
         EnvGuard::unset("GROK_VOICE_MODE"),
         EnvGuard::unset("OPENAI_API_KEY"),
+        EnvGuard::set(BANDICOT_BASE_URL_VAR, OPENAI_BASE_URL),
+        EnvGuard::unset(BANDICOT_TOKEN_VAR),
         EnvGuard::set("XAI_API_KEY", "xai-credential-must-not-cross-provider"),
         EnvGuard::set(
             "GROK_CODE_XAI_API_KEY",
@@ -145,7 +149,9 @@ fn checked_in_openai_profile_is_complete_secret_free_and_warning_free() {
     let raw = parse_profile(&source);
     assert_raw_profile_is_secret_free(&raw, "");
 
-    let (config, warning_log) = load_profile_strict(&raw);
+    let mut expanded = raw.clone();
+    xai_grok_shell::config::expand_env_vars_in_toml(&mut expanded);
+    let (config, warning_log) = load_profile_strict(&expanded);
     assert!(
         warning_log.trim().is_empty(),
         "checked-in profile must have no unknown, unused, malformed, or deprecated keys:\n{warning_log}"
@@ -178,10 +184,17 @@ fn checked_in_openai_profile_is_complete_secret_free_and_warning_free() {
         config.models.prompt_suggestion.as_deref(),
         Some("openai-luna")
     );
-    assert!(matches!(
-        config.models.allowed_models.as_deref(),
-        Some([only]) if only == "openai-*"
-    ));
+    assert_eq!(
+        config
+            .models
+            .allowed_models
+            .as_deref()
+            .unwrap()
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["openai-*", "go-*", "ollama-*", "apple-*"]
+    );
     assert_eq!(config.web_search_model, "openai-luna");
     assert_eq!(config.session_summary_model.as_deref(), Some("openai-luna"));
     assert_eq!(
@@ -223,35 +236,64 @@ fn checked_in_openai_profile_is_complete_secret_free_and_warning_free() {
         (
             "openai-latest",
             "gpt-5.6",
-            1_050_000,
+            362_000,
             &["none", "low", "medium", "high", "xhigh", "max"][..],
         ),
         (
             "openai-sol",
             "gpt-5.6-sol",
-            1_050_000,
+            362_000,
             &["none", "low", "medium", "high", "xhigh", "max"][..],
         ),
         (
             "openai-terra",
             "gpt-5.6-terra",
-            1_050_000,
+            362_000,
             &["none", "low", "medium", "high", "xhigh", "max"][..],
         ),
         (
             "openai-luna",
             "gpt-5.6-luna",
-            1_050_000,
+            362_000,
             &["none", "low", "medium", "high", "xhigh", "max"][..],
         ),
         (
             "openai-codex",
             "gpt-5.3-codex",
-            400_000,
+            362_000,
             &["low", "medium", "high", "xhigh"][..],
         ),
     ];
-    assert_eq!(config.config_models.len(), expected.len());
+    let additional_selectable = [
+        "go-kimi-k3",
+        "go-kimi-k2.7-code",
+        "go-kimi-k2.6",
+        "go-kimi-k2.5",
+        "go-glm-5.2",
+        "go-glm-5.1",
+        "go-glm-5",
+        "go-minimax-m3",
+        "go-minimax-m2.7",
+        "go-minimax-m2.5",
+        "go-mimo-v2.5-pro",
+        "go-mimo-v2.5",
+        "go-mimo-v2-pro",
+        "go-mimo-v2-omni",
+        "go-deepseek-v4-pro",
+        "go-deepseek-v4-flash",
+        "go-qwen3.7-max",
+        "go-qwen3.7-plus",
+        "go-qwen3.6-plus",
+        "go-qwen3.5-plus",
+        "go-grok-4.5",
+        "ollama-gpt-oss-20b",
+        "ollama-qwen3-8b",
+        "apple-on-device",
+    ];
+    assert_eq!(
+        config.config_models.len(),
+        expected.len() + additional_selectable.len()
+    );
 
     let catalog = resolve_model_catalog(&config, None);
     let mut selectable: Vec<_> = catalog
@@ -260,6 +302,7 @@ fn checked_in_openai_profile_is_complete_secret_free_and_warning_free() {
         .map(|(key, _)| key.as_str())
         .collect();
     let mut expected_selectable: Vec<_> = expected.iter().map(|(key, ..)| *key).collect();
+    expected_selectable.extend(additional_selectable);
     selectable.sort_unstable();
     expected_selectable.sort_unstable();
     assert_eq!(
@@ -295,12 +338,17 @@ fn checked_in_openai_profile_is_complete_secret_free_and_warning_free() {
         );
         assert_eq!(entry.info.temperature, None, "{key} temperature");
         assert_eq!(entry.info.top_p, None, "{key} top_p");
+        assert_eq!(
+            config.config_models[key].auto_compact_threshold_percent,
+            Some(51),
+            "{key} compact threshold"
+        );
         assert!(!entry.info.supports_backend_search, "{key} hosted search");
         assert!(entry.info.supports_reasoning_effort, "{key} reasoning gate");
         assert!(entry.api_key.is_none(), "{key} must not contain an API key");
         assert_eq!(
             entry.env_key.as_ref().map(ToString::to_string).as_deref(),
-            Some("OPENAI_API_KEY"),
+            Some(BANDICOT_TOKEN_VAR),
             "{key} credential environment"
         );
         assert!(
@@ -350,7 +398,7 @@ fn checked_in_openai_profile_is_complete_secret_free_and_warning_free() {
     );
 
     {
-        let _openai_key = EnvGuard::set("OPENAI_API_KEY", "openai-provider-test-key");
+        let _openai_key = EnvGuard::set(BANDICOT_TOKEN_VAR, "openai-provider-test-key");
         let own_provider_key = resolve_credentials(
             &catalog["openai-latest"],
             Some("xai-session-credential-must-not-cross-provider"),
@@ -367,13 +415,13 @@ fn checked_in_openai_profile_is_complete_secret_free_and_warning_free() {
 fn write_mock_profile(grok_home: &Path, mock_url: &str) {
     let source = read_profile();
     assert_eq!(
-        source.matches(OPENAI_BASE_URL).count(),
+        source.matches("${BANDICOT_OPENAI_BASE_URL}").count(),
         5,
-        "every curated model must use the reviewed OpenAI base URL"
+        "every curated model must use the launcher-selected provider URL"
     );
-    let mock_profile = source.replace(OPENAI_BASE_URL, mock_url);
+    assert!(mock_url.starts_with("http://127.0.0.1:"));
     std::fs::create_dir_all(grok_home).expect("create isolated GROK_HOME");
-    std::fs::write(grok_home.join("config.toml"), mock_profile)
+    std::fs::write(grok_home.join("config.toml"), source)
         .expect("write mock-routed OpenAI profile");
 }
 
@@ -404,7 +452,7 @@ async fn built_binary_uses_checked_in_openai_profile_end_to_end() {
     server.set_response("OPENAI_PROFILE_OK");
 
     let home = tempfile::tempdir().expect("create isolated HOME");
-    let grok_home = home.path().join(".grok-openai");
+    let grok_home = home.path().join(".bandicot");
     write_mock_profile(&grok_home, &server.url());
     let workdir = git_workdir();
 
@@ -429,7 +477,8 @@ async fn built_binary_uses_checked_in_openai_profile_end_to_end() {
         .env("HOME", home.path())
         .env("USERPROFILE", home.path())
         .env("GROK_HOME", &grok_home)
-        .env("OPENAI_API_KEY", OPENAI_TEST_KEY)
+        .env(BANDICOT_BASE_URL_VAR, server.url())
+        .env(BANDICOT_TOKEN_VAR, OPENAI_TEST_KEY)
         .env("GROK_TELEMETRY_ENABLED", "false")
         .env("GROK_FEEDBACK_ENABLED", "false")
         .env("GROK_TRACE_UPLOAD", "false")
@@ -478,7 +527,7 @@ async fn built_binary_uses_checked_in_openai_profile_end_to_end() {
         assert_eq!(
             request.authorization.as_deref(),
             Some("Bearer openai-profile-test-key"),
-            "every inference request must use only OPENAI_API_KEY"
+            "every inference request must use only BANDICOT_OPENAI_TOKEN"
         );
         assert!(
             request.headers.iter().all(|(name, _)| {

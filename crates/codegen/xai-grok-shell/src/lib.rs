@@ -7,6 +7,7 @@
 )]
 pub(crate) use xai_grok_telemetry::unified_log;
 pub use xai_tracing_macros::{teprintln, timed, tprintln};
+pub mod accounts;
 pub mod active_sessions;
 pub mod agent;
 pub mod auth;
@@ -19,6 +20,7 @@ pub mod config;
 pub use xai_grok_shell_base::cpu_profile;
 pub use xai_grok_shell_base::env;
 pub mod extensions;
+pub mod fallback;
 pub use xai_grok_workspace::foreign_sessions;
 pub mod heap_profile;
 pub use xai_grok_http as http;
@@ -31,6 +33,7 @@ pub use xai_grok_models as models;
 pub mod plugin;
 pub mod relay;
 pub mod remote;
+pub mod resource_migration;
 pub mod sampling;
 pub mod session;
 pub mod terminal;

@@ -37,7 +37,10 @@ pub fn test_sampler_config(
         temperature: Some(0.7),
         top_p: None,
         api_backend,
+        transport: Default::default(),
         auth_scheme: Default::default(),
+        capabilities: Default::default(),
+        wire_quirks: Default::default(),
         extra_headers: extra_headers
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))

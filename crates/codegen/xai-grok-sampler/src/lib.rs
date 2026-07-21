@@ -17,6 +17,7 @@
 //! and the actor with its per-request task tie these layers together.
 
 pub mod actor;
+pub mod apple;
 pub mod attribution;
 pub mod client;
 pub mod commands;
@@ -38,8 +39,9 @@ pub use attribution::{
 };
 pub use client::{ApiBackend, SamplingClient, user_agent_string_for};
 pub use config::{
-    AuthScheme, BearerResolver, HeaderInjector, OriginClientInfo, RetryPolicy, SamplerConfig,
-    SharedBearerResolver, SharedHeaderInjector,
+    AuthScheme, BearerResolver, ChatMaxTokensField, HeaderInjector, OriginClientInfo,
+    ProviderCapabilities, ReasoningResponseField, RetryPolicy, SamplerConfig, SharedBearerResolver,
+    SharedHeaderInjector, WireQuirks,
 };
 pub use doom_loop::DoomLoopSignalCollector;
 pub use events::{SamplingChannel, SamplingErrorInfo, SamplingErrorKind, SamplingEvent};
@@ -52,3 +54,4 @@ pub use retry::{
 pub use sampling_log::AuthInfo;
 pub use stream::{collect_response, stream_chat_completions, stream_messages, stream_responses};
 pub use types::RequestId;
+pub use xai_grok_sampling_types::InferenceTransport;

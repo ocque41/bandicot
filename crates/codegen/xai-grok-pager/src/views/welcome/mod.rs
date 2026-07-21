@@ -288,7 +288,7 @@ impl WelcomeLayout {
         let logo_rows = if compact {
             0
         } else {
-            logo_line_count(content_area.height)
+            logo_line_count(content_area.width, content_area.height)
         };
 
         let gap_after_logo = if error_height > 0 { 1 } else { 0 };
@@ -376,11 +376,11 @@ impl WelcomeLayout {
 
 /// Controls what the version badge renders.
 pub(super) enum VersionBadgeMode<'a> {
-    /// Full badge: team | tier | api_key | **Grok Build** VERSION+channel **Beta** (right-aligned).
+    /// Full badge: team | tier | api_key | **Bandicot** VERSION+channel **Beta** (right-aligned).
     Full { subscription_tier: Option<&'a str> },
-    /// Hero footer: team | api_key | Grok Build Beta [channel] (right-aligned, gray).
+    /// Hero footer: team | api_key | Bandicot Beta [channel] (right-aligned, gray).
     HeroFooter,
-    /// Hero inline: **Grok Build Beta**  VERSION (left-aligned).
+    /// Hero inline: **Bandicot Beta**  VERSION (left-aligned).
     HeroInline,
 }
 
@@ -724,7 +724,7 @@ pub fn render_welcome(
             }
         }
         AuthState::Authenticating { auth_url, mode, .. } => {
-            let llc = logo_line_count(content_area.height);
+            let llc = logo_line_count(content_area.width, content_area.height);
             let (url_rect, fallback_rect) = render_welcome_authenticating(
                 content_area,
                 buf,
@@ -760,7 +760,7 @@ pub fn render_welcome(
                 content_area,
                 buf,
                 Some((
-                    "Grok Build is not yet available for this account.",
+                    "Bandicot is not yet available for this account.",
                     theme.gray_bright,
                 )),
                 &menu,
@@ -918,7 +918,7 @@ fn render_welcome_blocked(
 
 /// Render the folder-trust question. Mirrors [`render_welcome_blocked`]'s
 /// stacked layout (logo + message + menu + version badge), but the message is a
-/// multi-line block showing the workspace path and the warning that Grok Build
+/// multi-line block showing the workspace path and the warning that Bandicot
 /// may run or modify contents in this directory (a security risk). The y/N
 /// answer is handled by the welcome input interceptor, so this only paints;
 /// `menu_rects` are returned for parity with the other welcome arms.
@@ -1516,7 +1516,7 @@ fn render_changelog_section(
     clickable: bool,
     mouse_pos: Option<(u16, u16)>,
 ) -> Option<Rect> {
-    let menu_width = logo::logo_visual_width(content_height)
+    let menu_width = logo::logo_visual_width(area.width, content_height)
         .max(30)
         .max(min_width_hint);
     let [_, centered, _] = Layout::horizontal([
@@ -1574,7 +1574,7 @@ fn render_changelog_section(
 /// go through here — same width, no drift. `logo_height` selects the min menu
 /// width.
 fn stacked_info_width(avail_width: u16, logo_height: u16, min_width_hint: u16) -> u16 {
-    logo::logo_visual_width(logo_height)
+    logo::logo_visual_width(avail_width, logo_height)
         .max(30)
         .max(min_width_hint)
         .min(avail_width)
@@ -1592,7 +1592,7 @@ fn stacked_info_budget(
     if compact {
         return 0;
     }
-    let logo_rows = logo_line_count(content_area.height);
+    let logo_rows = logo_line_count(content_area.width, content_area.height);
     let gap_after_logo = if error_height > 0 { 1u16 } else { 0 };
     let fixed_above = logo_rows + 1 + gap_after_logo + error_height;
     let fixed_below = WelcomeLayout::fixed_below(tip_height);
@@ -3040,7 +3040,7 @@ mod tests {
 
     #[test]
     fn changelog_boundary_exact_fit() {
-        // No logo at h < 22. fixed_above = 0 + 1 + 0 + 0 = 1.
+        // No logo at h < 19. fixed_above = 0 + 1 + 0 + 0 = 1.
         // fixed_below = 0 (tip) + 0 (tip_gap) + 3 (prompt) + 1 (ver_gap) + 1 (ver) = 5.
         // min_without_changelog = 1 + 4 (menu) + 1 (flex) + 5 = 11.
         // changelog slot = 1 (gap) + 5 (height) = 6. Threshold = 11 + 6 = 17.
@@ -3066,9 +3066,10 @@ mod tests {
     #[test]
     fn changelog_hidden_when_tip_steals_space() {
         // Use narrow width to avoid hero box path, keeping stacked layout.
-        // With tip_height=2: fixed_below(2) = 8. min = 1 + 4 + 1 + 8 = 14.
-        // Threshold = 14 + 6 = 20. At h=19 the tip pushes changelog out.
-        let with_tip = Rect::new(0, 0, 60, 19);
+        // At h>=24 the 11-row logo shows: fixed_above = 11 + 1 = 12.
+        // With tip_height=2: fixed_below(2) = 8. min = 12 + 4 + 1 + 8 = 25.
+        // Threshold = 25 + 6 = 31. At h=28 the tip pushes changelog out.
+        let with_tip = Rect::new(0, 0, 60, 28);
         let layout = WelcomeLayout::compute(WelcomeLayoutInput {
             content_area: with_tip,
             menu_height: 4,
@@ -3078,8 +3079,8 @@ mod tests {
         });
         assert_eq!(layout.changelog.height, 0);
 
-        // Same size without tip: threshold = 17 <= 19, changelog fits.
-        let without_tip = Rect::new(0, 0, 60, 19);
+        // Same size without tip: threshold = 28 <= 28, changelog fits.
+        let without_tip = Rect::new(0, 0, 60, 28);
         let layout = WelcomeLayout::compute(WelcomeLayoutInput {
             content_area: without_tip,
             menu_height: 4,
@@ -3171,9 +3172,9 @@ mod tests {
 
     #[test]
     fn hero_box_inactive_on_short_terminal() {
-        // 16 rows is one short of the 17 the box needs (11 box + 1 flex gap +
+        // 20 rows is one short of the 21 the box needs (15 box + 1 flex gap +
         // 5 fixed-below), so it falls back to the stacked layout.
-        let area = Rect::new(0, 0, 90, 16);
+        let area = Rect::new(0, 0, 90, 20);
         let layout = WelcomeLayout::compute(WelcomeLayoutInput {
             content_area: area,
             menu_height: 4,
@@ -3181,17 +3182,17 @@ mod tests {
         });
         assert!(
             !layout.has_hero_box(),
-            "hero box should be inactive at 90x16 (needs 17 rows)"
+            "hero box should be inactive at 90x20 (needs 21 rows)"
         );
     }
 
     #[test]
     fn hero_box_inactive_when_warning_would_overflow() {
-        // Regression: the box is forced to the full 7-row logo, so even a
-        // 3-item menu needs 11 box rows. A startup warning (error_height = 2)
-        // pushes the total past height 19, so the gate must fall back to the
+        // Regression: the box is forced to the full 11-row logo, so even a
+        // 3-item menu needs 15 box rows. A startup warning (error_height = 2)
+        // pushes the total past height 21, so the gate must fall back to the
         // stacked layout instead of overflowing by a row.
-        let area = Rect::new(0, 0, 90, 19);
+        let area = Rect::new(0, 0, 90, 21);
         let with_warning = WelcomeLayout::compute(WelcomeLayoutInput {
             content_area: area,
             error_height: 2,
@@ -3245,9 +3246,9 @@ mod tests {
         // A 6-item menu makes the box 2 rows taller than the default-4 box, so
         // the centering pad (derived from the default box) must be clamped or
         // the box gets pushed down and the version row clips at exactly
-        // min_content_height. 19 == min_content_height(0, 6, 0, 0): a 13-row box
+        // min_content_height. 21 == min_content_height(0, 6, 0, 0): a 15-row box
         // + 1 flex gap + 5 fixed-below.
-        let area = Rect::new(0, 0, 100, 19);
+        let area = Rect::new(0, 0, 100, 21);
         let layout = WelcomeLayout::compute(WelcomeLayoutInput {
             content_area: area,
             menu_height: 6,
@@ -3273,9 +3274,9 @@ mod tests {
 
     #[test]
     fn hero_box_height_accounts_for_borders_and_padding() {
-        // At h >= 26, logo07 is used (7 lines). With menu_height=3:
-        // right_col = 2 + 0 + 0 + 1 + 3 = 6, inner = max(7, 6) = 7.
-        // hero_box_height = 2 (borders) + 2 (v_pad) + 7 = 11.
+        // At h >= 24, logo11 is used (11 lines). With menu_height=3:
+        // right_col = 2 + 0 + 0 + 1 + 3 = 6, inner = max(11, 6) = 11.
+        // hero_box_height = 2 (borders) + 2 (v_pad) + 11 = 15.
         let area = Rect::new(0, 0, 100, 50);
         let layout = WelcomeLayout::compute(WelcomeLayoutInput {
             content_area: area,
@@ -3283,7 +3284,7 @@ mod tests {
             ..Default::default()
         });
         assert!(layout.has_hero_box());
-        assert_eq!(layout.hero_box.height, 11);
+        assert_eq!(layout.hero_box.height, 15);
     }
 
     #[test]
@@ -3363,7 +3364,7 @@ mod tests {
         // A real announcement can't disable the hero box: the slot is clamped to
         // whatever still fits (the renderer trails a `…`), so the box stays
         // active rather than falling back to the stacked layout.
-        let area = Rect::new(0, 0, 100, 17);
+        let area = Rect::new(0, 0, 100, 21);
         let a = long_ann();
         let without = WelcomeLayout::compute(WelcomeLayoutInput {
             content_area: area,
@@ -3392,7 +3393,8 @@ mod tests {
     fn hero_box_keeps_one_bottom_pad_below_actions() {
         // With a changelog/announcement the subtitle is hidden, but there's
         // still exactly one padding row between the actions and the bottom
-        // border. (menu=4 + info=3 fills the inner, so the menu reaches the pad.)
+        // border. (menu=5 + info=3 fills the 11-row inner, so the menu reaches
+        // the pad.)
         let area = Rect::new(0, 0, 100, 50);
         let a = long_ann();
         let no_info = WelcomeLayout::compute(WelcomeLayoutInput {
@@ -3402,7 +3404,7 @@ mod tests {
         });
         let with_info = WelcomeLayout::compute(WelcomeLayoutInput {
             content_area: area,
-            menu_height: 4,
+            menu_height: 5,
             announcement: Some(&a),
             ..Default::default()
         });
@@ -3463,7 +3465,7 @@ mod tests {
             area,
             &mut buf,
             &theme,
-            logo_line_count(area.height),
+            logo_line_count(area.width, area.height),
             Some(url),
             AuthMode::Device,
             "",    // auth_code_input — unused in device mode
@@ -3517,7 +3519,7 @@ mod tests {
             area,
             &mut buf,
             &theme,
-            logo_line_count(area.height),
+            logo_line_count(area.width, area.height),
             Some(url),
             AuthMode::Device,
             "",
@@ -3543,7 +3545,7 @@ mod tests {
             area,
             &mut buf,
             &theme,
-            logo_line_count(area.height),
+            logo_line_count(area.width, area.height),
             Some(url),
             AuthMode::Device,
             "",
@@ -3580,7 +3582,7 @@ mod tests {
             area,
             &mut buf,
             &theme,
-            logo_line_count(area.height),
+            logo_line_count(area.width, area.height),
             Some(url),
             AuthMode::Device,
             "",
@@ -3619,7 +3621,7 @@ mod tests {
             area,
             &mut buf,
             &theme,
-            logo_line_count(area.height),
+            logo_line_count(area.width, area.height),
             Some(url),
             AuthMode::Command,
             "",    // auth_code_input — unused
@@ -3773,7 +3775,7 @@ the usual channels. "
     #[test]
     fn stacked_info_width_clamps_to_available() {
         // Min menu width is MENU_MIN_WIDTH, capped at the available (inset) slot.
-        let unclamped = logo::logo_visual_width(50).max(30).max(MENU_MIN_WIDTH);
+        let unclamped = logo::logo_visual_width(200, 50).max(30).max(MENU_MIN_WIDTH);
         assert_eq!(stacked_info_width(200, 50, MENU_MIN_WIDTH), unclamped);
         assert_eq!(stacked_info_width(40, 50, MENU_MIN_WIDTH), 40);
     }

@@ -72,16 +72,8 @@ pub fn emit_notification(
     body: &str,
     ctx: &TerminalContext,
 ) {
-    // For body-only protocols (OSC 9, OSC 99), fold the title (session
-    // name) into the body so it's visible.  For OSC 777 (Ghostty), the
-    // tab title already appears as the notification subtitle, so we use
-    // the app name to avoid showing the session name twice.
-    let sequence: Cow<'_, str> = match protocol {
-        NotificationProtocol::Osc9 => format!("\x1b]9;{body} \u{b7} {title}\x07").into(),
-        NotificationProtocol::Osc99 => format!("\x1b]99;i=grok;{body} \u{b7} {title}\x1b\\").into(),
-        NotificationProtocol::Osc777 => format!("\x1b]777;notify;Grok;{body}\x1b\\").into(),
-        NotificationProtocol::Bel => Cow::Borrowed("\x07"),
-        NotificationProtocol::None => return,
+    let Some(sequence) = notification_sequence(protocol, title, body) else {
+        return;
     };
 
     if ctx.is_tmux_backed() {
@@ -102,6 +94,25 @@ pub fn emit_notification(
             let _ = stderr.flush();
         });
     }
+}
+
+fn notification_sequence<'a>(
+    protocol: NotificationProtocol,
+    title: &'a str,
+    body: &'a str,
+) -> Option<Cow<'a, str>> {
+    // For body-only protocols (OSC 9, OSC 99), fold the title (session
+    // name) into the body so it's visible.  For OSC 777 (Ghostty), the
+    // tab title already appears as the notification subtitle, so we use
+    // the app name to avoid showing the session name twice.
+    let sequence = match protocol {
+        NotificationProtocol::Osc9 => format!("\x1b]9;{body} \u{b7} {title}\x07").into(),
+        NotificationProtocol::Osc99 => format!("\x1b]99;i=grok;{body} \u{b7} {title}\x1b\\").into(),
+        NotificationProtocol::Osc777 => format!("\x1b]777;notify;Bandicot;{body}\x1b\\").into(),
+        NotificationProtocol::Bel => Cow::Borrowed("\x07"),
+        NotificationProtocol::None => return None,
+    };
+    Some(sequence)
 }
 
 #[cfg(test)]
@@ -329,6 +340,14 @@ mod tests {
     fn emit_osc777_does_not_panic() {
         let ctx = ctx_with_brand(TerminalName::Ghostty);
         emit_notification(NotificationProtocol::Osc777, "title", "body", &ctx);
+    }
+
+    #[test]
+    fn osc777_uses_bandicot_app_name() {
+        assert_eq!(
+            notification_sequence(NotificationProtocol::Osc777, "session", "Complete").as_deref(),
+            Some("\x1b]777;notify;Bandicot;Complete\x1b\\")
+        );
     }
 
     // --- exhaustive brand coverage in a table-driven test ---

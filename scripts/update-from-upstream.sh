@@ -29,7 +29,7 @@ Usage: scripts/update-from-upstream.sh [--accept-upstream-rewrite=<previous-sha>
 
 Safely merge xai-org/grok-build main into this fork. A temporary candidate
 worktree is validated and release-built before origin/main, local main, or the
-installed grok-openai binary changes. This command never force-pushes, rebases,
+installed Bandicot binary changes. This command never force-pushes, rebases,
 stashes, resets, or pushes to upstream.
 
 The pinned --accept-upstream-rewrite option is required only when fetched
@@ -229,10 +229,10 @@ report_retained_candidate() {
         printf 'Candidate branch: %s\n' "$CANDIDATE_BRANCH" >&2
         printf 'Inspect with: git -C %s status\n' "$CANDIDATE" >&2
         if [ "$PUBLISHED" -eq 0 ]; then
-            printf '%s\n' 'Local main, origin/main, and the installed grok-openai were not changed.' >&2
+            printf '%s\n' 'Local main, origin/main, and the installed Bandicot were not changed.' >&2
         else
             printf '%s\n' 'The validated merge was published, but installation did not finish.' >&2
-            printf '%s\n' 'Re-run scripts/install-openai.sh from main after resolving the local error.' >&2
+            printf '%s\n' 'Re-run scripts/install-bandicot.sh from main after resolving the local error.' >&2
         fi
     fi
     exit "$_ow_rc"
@@ -377,12 +377,12 @@ if ! env -i \
     PATH="${PATH:-/usr/bin:/bin}" \
     TMPDIR="$VALIDATION_TMP" \
     LC_ALL=C \
-    GROK_OPENAI_HOME="$STAGE_HOME/.grok-openai" \
-    GROK_OPENAI_BIN_DIR="$STAGE_HOME/.local/bin" \
-    GROK_OPENAI_LIBEXEC_DIR="$STAGE_HOME/.local/libexec/grok-openai" \
-    GROK_OPENAI_PROFILE_SOURCE="$CANDIDATE/config/openai.toml" \
-    GROK_OPENAI_PREBUILT="$RELEASE_BINARY" \
-    "$CANDIDATE/scripts/install-openai.sh" >/dev/null; then
+    BANDICOT_HOME="$STAGE_HOME/.bandicot" \
+    BANDICOT_BIN_DIR="$STAGE_HOME/.local/bin" \
+    BANDICOT_LIBEXEC_DIR="$STAGE_HOME/.local/libexec/bandicot" \
+    BANDICOT_PROFILE_SOURCE="$CANDIDATE/config/openai.toml" \
+    BANDICOT_PREBUILT="$RELEASE_BINARY" \
+    "$CANDIDATE/scripts/install-bandicot.sh" >/dev/null; then
     printf '%s\n' 'error: staged installation gate failed' >&2
     exit 1
 fi
@@ -424,20 +424,20 @@ PUBLISHED=1
 git -c core.hooksPath=/dev/null merge --ff-only "$CANDIDATE_COMMIT"
 
 openai_workflow_note 'Installing the validated OpenAI build...'
-LIVE_GROK_OPENAI_HOME=${GROK_OPENAI_HOME:-$HOME/.grok-openai}
-LIVE_GROK_OPENAI_BIN_DIR=${GROK_OPENAI_BIN_DIR:-$HOME/.local/bin}
-LIVE_GROK_OPENAI_LIBEXEC_DIR=${GROK_OPENAI_LIBEXEC_DIR:-$HOME/.local/libexec/grok-openai}
+LIVE_BANDICOT_HOME=${BANDICOT_HOME:-$HOME/.bandicot}
+LIVE_BANDICOT_BIN_DIR=${BANDICOT_BIN_DIR:-$HOME/.local/bin}
+LIVE_BANDICOT_LIBEXEC_DIR=${BANDICOT_LIBEXEC_DIR:-$HOME/.local/libexec/bandicot}
 env -i \
 HOME="$HOME" \
 PATH="${PATH:-/usr/bin:/bin}" \
 TMPDIR="${TMPDIR:-/tmp}" \
 LC_ALL=C \
-GROK_OPENAI_HOME="$LIVE_GROK_OPENAI_HOME" \
-GROK_OPENAI_BIN_DIR="$LIVE_GROK_OPENAI_BIN_DIR" \
-GROK_OPENAI_LIBEXEC_DIR="$LIVE_GROK_OPENAI_LIBEXEC_DIR" \
-GROK_OPENAI_PROFILE_SOURCE="$REPO_ROOT/config/openai.toml" \
-GROK_OPENAI_PREBUILT="$RELEASE_BINARY" \
-    "$REPO_ROOT/scripts/install-openai.sh"
+    BANDICOT_HOME="$LIVE_BANDICOT_HOME" \
+    BANDICOT_BIN_DIR="$LIVE_BANDICOT_BIN_DIR" \
+    BANDICOT_LIBEXEC_DIR="$LIVE_BANDICOT_LIBEXEC_DIR" \
+    BANDICOT_PROFILE_SOURCE="$REPO_ROOT/config/openai.toml" \
+    BANDICOT_PREBUILT="$RELEASE_BINARY" \
+    "$REPO_ROOT/scripts/install-bandicot.sh"
 
 SUCCESS=1
 trap - 0
@@ -451,4 +451,4 @@ openai_workflow_note "Fork before: $BASE_COMMIT"
 openai_workflow_note "Previously integrated upstream: $PREVIOUS_UPSTREAM_COMMIT"
 openai_workflow_note "Fetched upstream: $UPSTREAM_COMMIT"
 openai_workflow_note "Fork after: $CANDIDATE_COMMIT"
-openai_workflow_note 'origin/main, local main, and grok-openai now use the validated merge.'
+openai_workflow_note 'origin/main, local main, and Bandicot now use the validated merge.'

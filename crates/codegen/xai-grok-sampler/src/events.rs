@@ -212,6 +212,7 @@ impl From<&SamplingError> for SamplingErrorInfo {
             }
             SamplingError::EventStreamError(_) => (SamplingErrorKind::Http, None, None, None),
             SamplingError::StreamError { .. } => (SamplingErrorKind::Api, None, None, None),
+            SamplingError::NativeTransport { .. } => (SamplingErrorKind::Api, None, None, None),
             SamplingError::IdleTimeout { .. } => (SamplingErrorKind::IdleTimeout, None, None, None),
             SamplingError::EmptyResponse { .. } => {
                 (SamplingErrorKind::EmptyResponse, None, None, None)

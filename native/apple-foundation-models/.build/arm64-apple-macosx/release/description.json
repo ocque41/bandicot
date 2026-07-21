@@ -1,0 +1,778 @@
+{
+  "builtTestProducts" : [
+    {
+      "binaryPath" : "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/BandicotAppleFoundationModelsPackageTests.xctest/Contents/MacOS/BandicotAppleFoundationModelsPackageTests",
+      "packagePath" : "/Users/miguel/Documents/bandicot/native/apple-foundation-models",
+      "productName" : "BandicotAppleFoundationModelsPackageTests"
+    }
+  ],
+  "copyCommands" : {
+
+  },
+  "explicitTargetDependencyImportCheckingMode" : {
+    "none" : {
+
+    }
+  },
+  "generatedSourceTargetSet" : [
+
+  ],
+  "pluginDescriptions" : [
+
+  ],
+  "swiftCommands" : {
+    "C.BandicotAppleFoundationModels-arm64-apple-macosx-release.module" : {
+      "executable" : "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "fileList" : "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/BandicotAppleFoundationModels.build/sources",
+      "importPath" : "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/Modules",
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/miguel/Documents/bandicot/native/apple-foundation-models/Sources/BandicotAppleFoundationModels/main.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/swift-version--58304C5D6DBC2206.txt"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/Modules/BandicotFoundationModelsBridgeCore.swiftmodule"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/BandicotAppleFoundationModels.build/sources"
+        }
+      ],
+      "isLibrary" : false,
+      "moduleName" : "BandicotAppleFoundationModels",
+      "moduleOutputPath" : "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/Modules/BandicotAppleFoundationModels.swiftmodule",
+      "objects" : [
+        "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/BandicotAppleFoundationModels.build/main.swift.o"
+      ],
+      "otherArguments" : [
+        "-target",
+        "arm64-apple-macosx13.0",
+        "-whole-module-optimization",
+        "-num-threads",
+        "10",
+        "-serialize-diagnostics",
+        "-O",
+        "-j10",
+        "-DSWIFT_PACKAGE",
+        "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+        "-module-cache-path",
+        "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/ModuleCache",
+        "-parseable-output",
+        "-Xfrontend",
+        "-entry-point-function-name",
+        "-Xfrontend",
+        "BandicotAppleFoundationModels_main",
+        "-parse-as-library",
+        "-swift-version",
+        "6",
+        "-plugin-path",
+        "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+        "-sdk",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.4.sdk",
+        "-F",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-I",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-L",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-g",
+        "-Xcc",
+        "-isysroot",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.4.sdk",
+        "-Xcc",
+        "-F",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-Xcc",
+        "-fPIC",
+        "-Xcc",
+        "-g",
+        "-package-name",
+        "apple_foundation_models"
+      ],
+      "outputFileMapPath" : "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/BandicotAppleFoundationModels.build/output-file-map.json",
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/BandicotAppleFoundationModels.build/main.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/Modules/BandicotAppleFoundationModels.swiftmodule"
+        }
+      ],
+      "prepareForIndexing" : false,
+      "sources" : [
+        "/Users/miguel/Documents/bandicot/native/apple-foundation-models/Sources/BandicotAppleFoundationModels/main.swift"
+      ],
+      "tempsPath" : "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/BandicotAppleFoundationModels.build",
+      "wholeModuleOptimization" : true
+    },
+    "C.BandicotAppleFoundationModelsPackageTests-arm64-apple-macosx-release.module" : {
+      "executable" : "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "fileList" : "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/BandicotAppleFoundationModelsPackageTests.build/sources",
+      "importPath" : "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/Modules",
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/BandicotAppleFoundationModelsPackageTests.derived/runner.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/swift-version--58304C5D6DBC2206.txt"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/Modules/BandicotFoundationModelsBridgeCoreTests.swiftmodule"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/BandicotAppleFoundationModelsPackageTests.build/sources"
+        }
+      ],
+      "isLibrary" : true,
+      "moduleName" : "BandicotAppleFoundationModelsPackageTests",
+      "moduleOutputPath" : "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/Modules/BandicotAppleFoundationModelsPackageTests.swiftmodule",
+      "objects" : [
+        "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/BandicotAppleFoundationModelsPackageTests.build/runner.swift.o"
+      ],
+      "otherArguments" : [
+        "-target",
+        "arm64-apple-macosx13.0",
+        "-whole-module-optimization",
+        "-num-threads",
+        "10",
+        "-serialize-diagnostics",
+        "-O",
+        "-enable-testing",
+        "-Xfrontend",
+        "-enable-cross-import-overlays",
+        "-j10",
+        "-DSWIFT_PACKAGE",
+        "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+        "-module-cache-path",
+        "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/ModuleCache",
+        "-parseable-output",
+        "-parse-as-library",
+        "-emit-objc-header",
+        "-emit-objc-header-path",
+        "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/BandicotAppleFoundationModelsPackageTests.build/include/BandicotAppleFoundationModelsPackageTests-Swift.h",
+        "-plugin-path",
+        "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+        "-sdk",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.4.sdk",
+        "-F",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-I",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-L",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-g",
+        "-Xcc",
+        "-isysroot",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.4.sdk",
+        "-Xcc",
+        "-F",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-Xcc",
+        "-fPIC",
+        "-Xcc",
+        "-g",
+        "-package-name",
+        "apple_foundation_models"
+      ],
+      "outputFileMapPath" : "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/BandicotAppleFoundationModelsPackageTests.build/output-file-map.json",
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/BandicotAppleFoundationModelsPackageTests.build/runner.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/Modules/BandicotAppleFoundationModelsPackageTests.swiftmodule"
+        }
+      ],
+      "prepareForIndexing" : false,
+      "sources" : [
+        "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/BandicotAppleFoundationModelsPackageTests.derived/runner.swift"
+      ],
+      "tempsPath" : "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/BandicotAppleFoundationModelsPackageTests.build",
+      "wholeModuleOptimization" : true
+    },
+    "C.BandicotFoundationModelsBridgeCore-arm64-apple-macosx-release.module" : {
+      "executable" : "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "fileList" : "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/BandicotFoundationModelsBridgeCore.build/sources",
+      "importPath" : "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/Modules",
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/miguel/Documents/bandicot/native/apple-foundation-models/Sources/BandicotFoundationModelsBridgeCore/Protocol.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/swift-version--58304C5D6DBC2206.txt"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/BandicotFoundationModelsBridgeCore.build/sources"
+        }
+      ],
+      "isLibrary" : true,
+      "moduleName" : "BandicotFoundationModelsBridgeCore",
+      "moduleOutputPath" : "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/Modules/BandicotFoundationModelsBridgeCore.swiftmodule",
+      "objects" : [
+        "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/BandicotFoundationModelsBridgeCore.build/Protocol.swift.o"
+      ],
+      "otherArguments" : [
+        "-target",
+        "arm64-apple-macosx13.0",
+        "-whole-module-optimization",
+        "-num-threads",
+        "10",
+        "-serialize-diagnostics",
+        "-O",
+        "-j10",
+        "-DSWIFT_PACKAGE",
+        "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+        "-module-cache-path",
+        "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/ModuleCache",
+        "-parseable-output",
+        "-parse-as-library",
+        "-emit-objc-header",
+        "-emit-objc-header-path",
+        "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/BandicotFoundationModelsBridgeCore.build/include/BandicotFoundationModelsBridgeCore-Swift.h",
+        "-swift-version",
+        "6",
+        "-plugin-path",
+        "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+        "-sdk",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.4.sdk",
+        "-F",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-I",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-L",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-g",
+        "-Xcc",
+        "-isysroot",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.4.sdk",
+        "-Xcc",
+        "-F",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-Xcc",
+        "-fPIC",
+        "-Xcc",
+        "-g",
+        "-package-name",
+        "apple_foundation_models"
+      ],
+      "outputFileMapPath" : "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/BandicotFoundationModelsBridgeCore.build/output-file-map.json",
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/BandicotFoundationModelsBridgeCore.build/Protocol.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/Modules/BandicotFoundationModelsBridgeCore.swiftmodule"
+        }
+      ],
+      "prepareForIndexing" : false,
+      "sources" : [
+        "/Users/miguel/Documents/bandicot/native/apple-foundation-models/Sources/BandicotFoundationModelsBridgeCore/Protocol.swift"
+      ],
+      "tempsPath" : "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/BandicotFoundationModelsBridgeCore.build",
+      "wholeModuleOptimization" : true
+    },
+    "C.BandicotFoundationModelsBridgeCoreTests-arm64-apple-macosx-release.module" : {
+      "executable" : "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "fileList" : "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/BandicotFoundationModelsBridgeCoreTests.build/sources",
+      "importPath" : "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/Modules",
+      "inputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/miguel/Documents/bandicot/native/apple-foundation-models/Tests/BandicotFoundationModelsBridgeCoreTests/ProtocolTests.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/swift-version--58304C5D6DBC2206.txt"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/Modules/BandicotFoundationModelsBridgeCore.swiftmodule"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/BandicotFoundationModelsBridgeCoreTests.build/sources"
+        }
+      ],
+      "isLibrary" : true,
+      "moduleName" : "BandicotFoundationModelsBridgeCoreTests",
+      "moduleOutputPath" : "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/Modules/BandicotFoundationModelsBridgeCoreTests.swiftmodule",
+      "objects" : [
+        "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/BandicotFoundationModelsBridgeCoreTests.build/ProtocolTests.swift.o"
+      ],
+      "otherArguments" : [
+        "-target",
+        "arm64-apple-macosx14.0",
+        "-whole-module-optimization",
+        "-num-threads",
+        "10",
+        "-serialize-diagnostics",
+        "-index-store-path",
+        "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/index/store",
+        "-O",
+        "-enable-testing",
+        "-Xfrontend",
+        "-enable-cross-import-overlays",
+        "-j10",
+        "-DSWIFT_PACKAGE",
+        "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+        "-module-cache-path",
+        "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/ModuleCache",
+        "-parseable-output",
+        "-parse-as-library",
+        "-swift-version",
+        "6",
+        "-plugin-path",
+        "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+        "-sdk",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.4.sdk",
+        "-F",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-I",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-L",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+        "-g",
+        "-Xcc",
+        "-isysroot",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.4.sdk",
+        "-Xcc",
+        "-F",
+        "-Xcc",
+        "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+        "-Xcc",
+        "-fPIC",
+        "-Xcc",
+        "-g",
+        "-package-name",
+        "apple_foundation_models"
+      ],
+      "outputFileMapPath" : "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/BandicotFoundationModelsBridgeCoreTests.build/output-file-map.json",
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/BandicotFoundationModelsBridgeCoreTests.build/ProtocolTests.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/Modules/BandicotFoundationModelsBridgeCoreTests.swiftmodule"
+        }
+      ],
+      "prepareForIndexing" : false,
+      "sources" : [
+        "/Users/miguel/Documents/bandicot/native/apple-foundation-models/Tests/BandicotFoundationModelsBridgeCoreTests/ProtocolTests.swift"
+      ],
+      "tempsPath" : "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/BandicotFoundationModelsBridgeCoreTests.build",
+      "wholeModuleOptimization" : true
+    }
+  },
+  "swiftFrontendCommands" : {
+
+  },
+  "swiftTargetScanArgs" : {
+    "BandicotAppleFoundationModels" : [
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "-module-name",
+      "BandicotAppleFoundationModels",
+      "-package-name",
+      "apple_foundation_models",
+      "-c",
+      "/Users/miguel/Documents/bandicot/native/apple-foundation-models/Sources/BandicotAppleFoundationModels/main.swift",
+      "-I",
+      "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/Modules",
+      "-target",
+      "arm64-apple-macosx13.0",
+      "-whole-module-optimization",
+      "-num-threads",
+      "10",
+      "-serialize-diagnostics",
+      "-O",
+      "-j10",
+      "-DSWIFT_PACKAGE",
+      "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+      "-module-cache-path",
+      "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/ModuleCache",
+      "-parseable-output",
+      "-Xfrontend",
+      "-entry-point-function-name",
+      "-Xfrontend",
+      "BandicotAppleFoundationModels_main",
+      "-parse-as-library",
+      "-swift-version",
+      "6",
+      "-plugin-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+      "-sdk",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.4.sdk",
+      "-F",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-I",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-L",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-g",
+      "-Xcc",
+      "-isysroot",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.4.sdk",
+      "-Xcc",
+      "-F",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-Xcc",
+      "-fPIC",
+      "-Xcc",
+      "-g",
+      "-package-name",
+      "apple_foundation_models",
+      "-driver-use-frontend-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
+    ],
+    "BandicotAppleFoundationModelsPackageTests" : [
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "-module-name",
+      "BandicotAppleFoundationModelsPackageTests",
+      "-package-name",
+      "apple_foundation_models",
+      "-c",
+      "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/BandicotAppleFoundationModelsPackageTests.derived/runner.swift",
+      "-I",
+      "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/Modules",
+      "-target",
+      "arm64-apple-macosx13.0",
+      "-whole-module-optimization",
+      "-num-threads",
+      "10",
+      "-serialize-diagnostics",
+      "-O",
+      "-enable-testing",
+      "-Xfrontend",
+      "-enable-cross-import-overlays",
+      "-j10",
+      "-DSWIFT_PACKAGE",
+      "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+      "-module-cache-path",
+      "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/ModuleCache",
+      "-parseable-output",
+      "-parse-as-library",
+      "-emit-objc-header",
+      "-emit-objc-header-path",
+      "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/BandicotAppleFoundationModelsPackageTests.build/include/BandicotAppleFoundationModelsPackageTests-Swift.h",
+      "-plugin-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+      "-sdk",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.4.sdk",
+      "-F",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-I",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-L",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-g",
+      "-Xcc",
+      "-isysroot",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.4.sdk",
+      "-Xcc",
+      "-F",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-Xcc",
+      "-fPIC",
+      "-Xcc",
+      "-g",
+      "-package-name",
+      "apple_foundation_models",
+      "-driver-use-frontend-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
+    ],
+    "BandicotFoundationModelsBridgeCore" : [
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "-module-name",
+      "BandicotFoundationModelsBridgeCore",
+      "-package-name",
+      "apple_foundation_models",
+      "-c",
+      "/Users/miguel/Documents/bandicot/native/apple-foundation-models/Sources/BandicotFoundationModelsBridgeCore/Protocol.swift",
+      "-I",
+      "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/Modules",
+      "-target",
+      "arm64-apple-macosx13.0",
+      "-whole-module-optimization",
+      "-num-threads",
+      "10",
+      "-serialize-diagnostics",
+      "-O",
+      "-j10",
+      "-DSWIFT_PACKAGE",
+      "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+      "-module-cache-path",
+      "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/ModuleCache",
+      "-parseable-output",
+      "-parse-as-library",
+      "-emit-objc-header",
+      "-emit-objc-header-path",
+      "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/BandicotFoundationModelsBridgeCore.build/include/BandicotFoundationModelsBridgeCore-Swift.h",
+      "-swift-version",
+      "6",
+      "-plugin-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+      "-sdk",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.4.sdk",
+      "-F",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-I",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-L",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-g",
+      "-Xcc",
+      "-isysroot",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.4.sdk",
+      "-Xcc",
+      "-F",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-Xcc",
+      "-fPIC",
+      "-Xcc",
+      "-g",
+      "-package-name",
+      "apple_foundation_models",
+      "-driver-use-frontend-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
+    ],
+    "BandicotFoundationModelsBridgeCoreTests" : [
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc",
+      "-module-name",
+      "BandicotFoundationModelsBridgeCoreTests",
+      "-package-name",
+      "apple_foundation_models",
+      "-c",
+      "/Users/miguel/Documents/bandicot/native/apple-foundation-models/Tests/BandicotFoundationModelsBridgeCoreTests/ProtocolTests.swift",
+      "-I",
+      "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/Modules",
+      "-target",
+      "arm64-apple-macosx14.0",
+      "-whole-module-optimization",
+      "-num-threads",
+      "10",
+      "-serialize-diagnostics",
+      "-index-store-path",
+      "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/index/store",
+      "-O",
+      "-enable-testing",
+      "-Xfrontend",
+      "-enable-cross-import-overlays",
+      "-j10",
+      "-DSWIFT_PACKAGE",
+      "-DSWIFT_MODULE_RESOURCE_BUNDLE_UNAVAILABLE",
+      "-module-cache-path",
+      "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/ModuleCache",
+      "-parseable-output",
+      "-parse-as-library",
+      "-swift-version",
+      "6",
+      "-plugin-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/host/plugins/testing",
+      "-sdk",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.4.sdk",
+      "-F",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-I",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-L",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib",
+      "-g",
+      "-Xcc",
+      "-isysroot",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.4.sdk",
+      "-Xcc",
+      "-F",
+      "-Xcc",
+      "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/Library/Frameworks",
+      "-Xcc",
+      "-fPIC",
+      "-Xcc",
+      "-g",
+      "-package-name",
+      "apple_foundation_models",
+      "-driver-use-frontend-path",
+      "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
+    ]
+  },
+  "targetDependencyMap" : {
+    "BandicotAppleFoundationModels" : [
+      "BandicotFoundationModelsBridgeCore"
+    ],
+    "BandicotAppleFoundationModelsPackageTests" : [
+      "BandicotFoundationModelsBridgeCoreTests",
+      "BandicotFoundationModelsBridgeCore"
+    ],
+    "BandicotFoundationModelsBridgeCore" : [
+
+    ],
+    "BandicotFoundationModelsBridgeCoreTests" : [
+      "BandicotFoundationModelsBridgeCore"
+    ]
+  },
+  "testDiscoveryCommands" : {
+
+  },
+  "testEntryPointCommands" : {
+    "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/BandicotAppleFoundationModelsPackageTests.derived/runner.swift" : {
+      "inputs" : [
+
+      ],
+      "outputs" : [
+        {
+          "kind" : "file",
+          "name" : "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/BandicotAppleFoundationModelsPackageTests.derived/runner.swift"
+        }
+      ]
+    }
+  },
+  "traitConfiguration" : {
+    "default" : {
+
+    }
+  },
+  "writeCommands" : {
+    "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/BandicotAppleFoundationModels.build/sources" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<sources-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/miguel/Documents/bandicot/native/apple-foundation-models/Sources/BandicotAppleFoundationModels/main.swift"
+        }
+      ],
+      "outputFilePath" : "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/BandicotAppleFoundationModels.build/sources"
+    },
+    "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/BandicotAppleFoundationModelsPackageTests.build/sources" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<sources-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/BandicotAppleFoundationModelsPackageTests.derived/runner.swift"
+        }
+      ],
+      "outputFilePath" : "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/BandicotAppleFoundationModelsPackageTests.build/sources"
+    },
+    "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/BandicotAppleFoundationModelsPackageTests.product/Objects.LinkFileList" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<link-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/BandicotAppleFoundationModelsPackageTests.build/runner.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/BandicotFoundationModelsBridgeCore.build/Protocol.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/BandicotFoundationModelsBridgeCoreTests.build/ProtocolTests.swift.o"
+        }
+      ],
+      "outputFilePath" : "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/BandicotAppleFoundationModelsPackageTests.product/Objects.LinkFileList"
+    },
+    "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/BandicotFoundationModelsBridgeCore.build/sources" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<sources-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/miguel/Documents/bandicot/native/apple-foundation-models/Sources/BandicotFoundationModelsBridgeCore/Protocol.swift"
+        }
+      ],
+      "outputFilePath" : "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/BandicotFoundationModelsBridgeCore.build/sources"
+    },
+    "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/BandicotFoundationModelsBridgeCoreTests.build/sources" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<sources-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/miguel/Documents/bandicot/native/apple-foundation-models/Tests/BandicotFoundationModelsBridgeCoreTests/ProtocolTests.swift"
+        }
+      ],
+      "outputFilePath" : "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/BandicotFoundationModelsBridgeCoreTests.build/sources"
+    },
+    "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/bandicot-apple-foundation-models.product/Objects.LinkFileList" : {
+      "alwaysOutOfDate" : false,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<link-file-list>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/BandicotAppleFoundationModels.build/main.swift.o"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/BandicotFoundationModelsBridgeCore.build/Protocol.swift.o"
+        }
+      ],
+      "outputFilePath" : "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/bandicot-apple-foundation-models.product/Objects.LinkFileList"
+    },
+    "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/swift-version--58304C5D6DBC2206.txt" : {
+      "alwaysOutOfDate" : true,
+      "inputs" : [
+        {
+          "kind" : "virtual",
+          "name" : "<swift-get-version>"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc"
+        }
+      ],
+      "outputFilePath" : "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/swift-version--58304C5D6DBC2206.txt"
+    }
+  }
+}

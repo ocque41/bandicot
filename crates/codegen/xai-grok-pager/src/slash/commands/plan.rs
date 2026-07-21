@@ -47,6 +47,12 @@ impl SlashCommand for PlanCommand {
         if trimmed.is_empty() {
             return CommandResult::Action(Action::SetPlanMode(PlanModeKind::On));
         }
+        let composed = format!("/plan {trimmed}");
+        if xai_grok_tools::implementations::grok_build::parse_approved_loop_workflow(&composed)
+            .is_some()
+        {
+            return CommandResult::PassThrough(composed);
+        }
         CommandResult::Action(Action::EnterPlanMode {
             description: Some(trimmed.to_string()),
         })
@@ -157,6 +163,20 @@ mod tests {
                 );
             }
             other => panic!("expected Action::EnterPlanMode, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compatibility_workflow_passes_through_for_typed_shell_resolution() {
+        let cmd = PlanCommand;
+        let models = ModelState::default();
+        let bundle = BundleState::default();
+        let mut ctx = make_ctx_inactive_plan_mode(&models, &bundle);
+        match cmd.run(&mut ctx, "/goal /loop 10m ship it") {
+            CommandResult::PassThrough(text) => {
+                assert_eq!(text, "/plan /goal /loop 10m ship it")
+            }
+            other => panic!("expected PassThrough, got {other:?}"),
         }
     }
 

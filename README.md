@@ -7,6 +7,7 @@
 OpenAI Platform or ChatGPT account.**
 
 [OpenAI quick start](#openai-quick-start) ·
+[Approved workflows](#approved-workflows) ·
 [Assumptions](#assumptions) ·
 [Building from source](#building-from-source) ·
 [Documentation](#documentation) ·
@@ -52,12 +53,27 @@ TUI against a loopback-only CLIProxyAPI Responses endpoint backed by the user's
 existing Codex OAuth login. To use direct Platform billing instead, first run
 `./scripts/setup-openai-key.sh`; the key setup delegates the secret prompt and
 storage to macOS Keychain. The
-installer creates an isolated launcher at `~/.local/bin/bandicot`, installs
-the compiled binary under `~/.local/libexec/grok-openai/`, and uses
-`~/.grok-openai` for Platform mode and `~/.grok-codex-plan` for plan mode. It
+installer creates the only public command at `~/.local/bin/bandicot`, installs
+one compiled payload at `~/.local/libexec/bandicot/bandicot`, and uses
+`~/.bandicot` for both Platform and ChatGPT-plan modes. The launcher exports
+that path internally as `GROK_HOME` for compatibility with the upstream crates. It
 does not edit `PATH`, shell startup files, terminal settings, or an existing
 `~/.grok` installation. If `~/.local/bin` is not already on `PATH`, keep using
 the full path shown above.
+
+On macOS 26+, `config/apple-foundation-models.toml` enables credential-free,
+on-device inference through a native Swift helper installed beside the payload.
+See [provider profiles](docs/PROVIDERS.md#apple-foundation-models).
+
+For Cerebras Cloud, store the key in macOS Keychain and install the dedicated
+profile. It exposes the models configured for the Cerebras account through
+`bandicot models` and the in-app model picker:
+
+```sh
+./scripts/setup-cerebras-key.sh
+BANDICOT_PROFILE_SOURCE="$PWD/config/cerebras.toml" ./scripts/install-bandicot.sh
+bandicot models
+```
 
 On other platforms, or for a temporary session, supply an OpenAI Platform key
 through the environment and run the installer/launcher normally:
@@ -85,6 +101,21 @@ setup, model choices, security boundaries, and troubleshooting are in
   on Linux; Windows is still upstream best-effort.
 - The fork is intentionally installed alongside any official `grok` binary.
   It does not replace, authenticate, or reconfigure the official installation.
+
+## Approved workflows
+
+Compose planning, autonomous goal execution, and delayed retries with:
+
+```text
+/loop 10m --plan --goal objective
+```
+
+The compatibility form `/plan /goal /loop 10m objective` is equivalent. Both
+forms create one typed host workflow: Bandicot writes one canonical `plan.md`,
+waits for explicit approval, leaves restrictive plan mode, and activates the
+goal from that approved plan. While the verified goal remains incomplete, the
+host keeps at most one durable one-shot wakeup pending; overlapping wakeups are
+skipped and verified completion cancels any pending wakeup.
 
 ## Building from source
 
@@ -115,14 +146,15 @@ cargo check -p xai-grok-pager-bin            # fast validation
 
 The binary artifact is named `xai-grok-pager`; this fork's installer exposes it
 as `bandicot`. Direct Platform mode uses `OPENAI_API_KEY`. Without that key,
-the launcher keeps the Grok Build TUI and selects the isolated
-`~/.grok-codex-plan` profile plus CLIProxyAPI's protected local client token.
+  the launcher keeps the Grok Build TUI and selects CLIProxyAPI through the
+  single `~/.bandicot` profile plus CLIProxyAPI's protected local client token.
 
 ## Documentation
 
 Fork-specific documents:
 
 - [OpenAI setup and operation](docs/OPENAI.md)
+- [Provider profiles and isolation](docs/PROVIDERS.md)
 - [One-command upstream updates](docs/UPDATING.md)
 - [Fork change and attribution notice](FORK-NOTICE.md)
 

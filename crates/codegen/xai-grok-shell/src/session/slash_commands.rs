@@ -42,6 +42,8 @@ pub(crate) enum BuiltinGate {
     Hooks,
     Plugins,
     Goal,
+    /// Account management for `/connect` — always available when accounts.json exists.
+    Accounts,
 }
 
 /// All built-in slash commands. Order here = display order in autocomplete.
@@ -590,6 +592,12 @@ pub(crate) struct ParsedSkillRef {
 pub(super) enum SlashCommandOutcome {
     /// Execute directly, no model round-trip.
     Builtin(BuiltinAction),
+    ScheduleLoop {
+        interval: String,
+        prompt: String,
+    },
+    ApprovedLoopWorkflow(xai_grok_tools::implementations::grok_build::ApprovedLoopWorkflow),
+    ApprovedLoopWake(String),
     /// One or more skills detected in user input.
     ///
     /// The original prompt `blocks` are preserved verbatim — they are NOT
@@ -659,6 +667,35 @@ pub(super) enum BuiltinAction {
     GoalPause,
     GoalResume,
     GoalClear,
+    /// Open interactive account picker.
+    ConnectBrowse,
+    /// Add a new account: `/connect add <name> <provider> <key>`.
+    ConnectAdd {
+        name: String,
+        provider: String,
+        api_key: String,
+    },
+    /// Remove an account: `/connect remove <name>`.
+    ConnectRemove {
+        name: String,
+    },
+    /// List all accounts: `/connect list`.
+    ConnectList,
+    /// Enable an account: `/connect enable <name>`.
+    ConnectEnable {
+        name: String,
+    },
+    /// Disable an account: `/connect disable <name>`.
+    ConnectDisable {
+        name: String,
+    },
+    /// Reorder an account: `/connect order <name> <position>`.
+    ConnectOrder {
+        name: String,
+        position: usize,
+    },
+    /// Show health status of all accounts: `/connect status`.
+    ConnectStatus,
 }
 
 impl BuiltinAction {
@@ -691,6 +728,14 @@ impl BuiltinAction {
             | BuiltinAction::GoalPause
             | BuiltinAction::GoalResume
             | BuiltinAction::GoalClear => "goal",
+            BuiltinAction::ConnectBrowse
+            | BuiltinAction::ConnectAdd { .. }
+            | BuiltinAction::ConnectRemove { .. }
+            | BuiltinAction::ConnectList
+            | BuiltinAction::ConnectEnable { .. }
+            | BuiltinAction::ConnectDisable { .. }
+            | BuiltinAction::ConnectOrder { .. }
+            | BuiltinAction::ConnectStatus => "connect",
         }
     }
 
@@ -723,6 +768,14 @@ impl BuiltinAction {
             | BuiltinAction::GoalPause
             | BuiltinAction::GoalResume
             | BuiltinAction::GoalClear => false,
+            BuiltinAction::ConnectBrowse => false,
+            BuiltinAction::ConnectAdd { .. } => true,
+            BuiltinAction::ConnectRemove { .. } => true,
+            BuiltinAction::ConnectList => false,
+            BuiltinAction::ConnectEnable { .. } => true,
+            BuiltinAction::ConnectDisable { .. } => true,
+            BuiltinAction::ConnectOrder { .. } => true,
+            BuiltinAction::ConnectStatus => false,
         }
     }
 }
@@ -964,6 +1017,26 @@ pub(super) fn resolve(
     availability: CommandAvailability,
     _skill_rewrite: SkillSlashRewrite,
 ) -> Result<Vec<acp::ContentBlock>, SlashCommandOutcome> {
+    let full_text = prompt_blocks.iter().fold(String::new(), |mut text, block| {
+        if let acp::ContentBlock::Text(content) = block {
+            text.push_str(&content.text);
+        }
+        text
+    });
+    if let Some(workflow) =
+        xai_grok_tools::implementations::grok_build::parse_approved_loop_workflow(&full_text)
+    {
+        return Err(SlashCommandOutcome::ApprovedLoopWorkflow(workflow));
+    }
+    if let Some(workflow_id) = full_text
+        .trim()
+        .strip_prefix("/__approved-loop-wake ")
+        .filter(|id| !id.is_empty() && !id.contains(char::is_whitespace))
+    {
+        return Err(SlashCommandOutcome::ApprovedLoopWake(
+            workflow_id.to_string(),
+        ));
+    }
     let Some((command_name, args)) = parse_slash_prefix(&prompt_blocks) else {
         return Ok(prompt_blocks);
     };
@@ -976,6 +1049,15 @@ pub(super) fn resolve(
     if let Some(prompt_cmd) = PROMPT_COMMANDS.iter().find(|c| c.name == command_name)
         && availability.allows(prompt_cmd.gate)
     {
+        if prompt_cmd.name == "loop"
+            && let Some(explicit) =
+                xai_grok_tools::implementations::grok_build::parse_explicit_loop(args)
+        {
+            return Err(SlashCommandOutcome::ScheduleLoop {
+                interval: explicit.interval.to_string(),
+                prompt: explicit.prompt.to_string(),
+            });
+        }
         // Dispatch by name so a future PROMPT_COMMANDS entry without a
         // matching arm fails loudly at the call site instead of silently
         // reusing /loop's prompt builder.
@@ -1104,6 +1186,44 @@ mod tests {
 
     fn text_block(s: &str) -> acp::ContentBlock {
         acp::ContentBlock::Text(acp::TextContent::new(s.to_string()))
+    }
+
+    #[test]
+    fn resolves_both_approved_workflow_forms_to_the_same_typed_action() {
+        for input in [
+            "/loop 10m --plan --goal ship the objective",
+            "/plan /goal /loop 10m ship the objective",
+        ] {
+            match resolve(
+                vec![text_block(input)],
+                &[],
+                all_gated(),
+                SkillSlashRewrite::default(),
+            )
+            .unwrap_err()
+            {
+                SlashCommandOutcome::ApprovedLoopWorkflow(workflow) => {
+                    assert_eq!(workflow.interval, "10m");
+                    assert_eq!(workflow.objective, "ship the objective");
+                }
+                _ => panic!("expected typed approved workflow for {input}"),
+            }
+        }
+    }
+
+    #[test]
+    fn resolves_internal_workflow_wake_as_typed_outcome() {
+        match resolve(
+            vec![text_block("/__approved-loop-wake workflow-1")],
+            &[],
+            all_gated(),
+            SkillSlashRewrite::default(),
+        )
+        .unwrap_err()
+        {
+            SlashCommandOutcome::ApprovedLoopWake(id) => assert_eq!(id, "workflow-1"),
+            _ => panic!("expected typed workflow wake"),
+        }
     }
 
     fn make_skill(name: &str, user_invocable: bool) -> SkillInfo {
@@ -1360,7 +1480,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_loop_annotates_block_with_compact_display_text() {
+    fn resolve_explicit_loop_schedules_without_model_prompt() {
         let outcome = resolve(
             vec![text_block("/loop 1m echo hello")],
             &[],
@@ -1368,33 +1488,11 @@ mod tests {
             SkillSlashRewrite::default(),
         )
         .unwrap_err();
-        let blocks = match outcome {
-            SlashCommandOutcome::InvokeSkill { blocks, skills } => {
-                assert!(skills.is_empty(), "/loop is a prompt-only command");
-                blocks
-            }
-            _ => panic!("expected InvokeSkill for /loop"),
+        let SlashCommandOutcome::ScheduleLoop { interval, prompt } = outcome else {
+            panic!("expected direct ScheduleLoop");
         };
-        let acp::ContentBlock::Text(tb) = blocks.first().expect("one block") else {
-            panic!("expected a text block");
-        };
-        assert!(
-            tb.text.len() > "/loop 1m echo hello".len(),
-            "wire text should be the expanded instruction"
-        );
-        let display = tb
-            .meta
-            .as_ref()
-            .and_then(|m| m.get("displayText"))
-            .and_then(|v| v.as_str());
-        assert_eq!(display, Some("/loop 1m echo hello"));
-        assert!(
-            tb.meta
-                .as_ref()
-                .and_then(|m| m.get("displayAsSkill"))
-                .is_none(),
-            "/loop renders as a plain prompt, not a skill"
-        );
+        assert_eq!(interval, "1m");
+        assert_eq!(prompt, "echo hello");
     }
 
     #[test]

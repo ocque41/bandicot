@@ -1,0 +1,13 @@
+{
+  "": {
+    "dependencies": "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/BandicotAppleFoundationModelsPackageTests.build/BandicotAppleFoundationModelsPackageTests.d",
+    "object": "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/BandicotAppleFoundationModelsPackageTests.build/BandicotAppleFoundationModelsPackageTests.o",
+    "swift-dependencies": "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/BandicotAppleFoundationModelsPackageTests.build/primary.swiftdeps"
+  },
+  "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/BandicotAppleFoundationModelsPackageTests.derived/runner.swift": {
+    "object": "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/BandicotAppleFoundationModelsPackageTests.build/runner.swift.o",
+    "swiftmodule": "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/BandicotAppleFoundationModelsPackageTests.build/runner~partial.swiftmodule",
+    "swift-dependencies": "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/BandicotAppleFoundationModelsPackageTests.build/runner.swiftdeps",
+    "diagnostics": "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/release/BandicotAppleFoundationModelsPackageTests.build/runner.dia"
+  }
+}

@@ -72,21 +72,37 @@ required.
 `setup-openai-key.sh` invokes `/usr/bin/security` so Keychain performs the
 interactive secret prompt. The script does not read the key itself and places
 no key in an argument, configuration file, log, or repository file. The
-Keychain service name is `ocque41.grok-build.openai`.
+The canonical Keychain service is `bandicot.openai`. The launcher can read the
+legacy `ocque41.grok-build.openai` entry during migration, but new keys are
+stored only under the Bandicot service name.
 
-`install-openai.sh` builds the release binary and installs an isolated layout:
+`install-bandicot.sh` is the canonical installer. `install-openai.sh` remains a
+deprecated compatibility wrapper for automation that has not migrated yet.
+The canonical installer creates this layout:
 
 | Item | Default path |
 |---|---|
 | Launcher | `~/.local/bin/bandicot` |
-| Compiled binary | `~/.local/libexec/grok-openai/bandicot` |
-| Runtime home | `~/.grok-openai` |
-| Runtime profile | `~/.grok-openai/config.toml` |
+| Compiled binary | `~/.local/libexec/bandicot/bandicot` |
+| Runtime home | `~/.bandicot` |
+| Runtime profile | `~/.bandicot/config.toml` |
 
 On later installs, the runtime profile is upgraded automatically only when it
 still matches the previously installed canonical profile. A user-edited
 `config.toml` is preserved; the new canonical copy is written to
-`~/.local/libexec/grok-openai/openai.toml` for explicit review and merging.
+`~/.bandicot/.canonical-config.toml` for explicit review and merging.
+
+On the first install, an existing Bandicot home at `~/.grok-openai` or
+`~/.grok-codex-plan` is copied into `~/.bandicot` and recursively compared
+before activation. The source remains unchanged. Existing `~/.bandicot` data
+always wins, and legacy source homes remain available for manual recovery.
+The installer never treats `~/.grok` as a migration source.
+
+The launcher always exports `GROK_HOME=~/.bandicot` internally because the
+upstream crates still use that environment variable. Public setup and paths use
+Bandicot names. It exports a process-only Bandicot provider URL and token so the
+same profile can select either OpenAI Platform or loopback CLIProxyAPI without
+splitting sessions and configuration across homes.
 
 The installer does not add `~/.local/bin` to `PATH`. The full launcher path
 always works; if the directory is already on `PATH`, `bandicot` is enough.
@@ -110,8 +126,8 @@ or another process-level secret injector.
 
 If no Platform key exists, the launcher accepts the CLIProxyAPI client token
 only from a regular, non-symlink file with mode `0400` or `0600`. It exposes
-that value only as `GROK_CODEX_PROXY_TOKEN` to the child Grok Build process and
-selects the loopback-only profile. It never falls back to a cached xAI session
+that value only as `BANDICOT_OPENAI_TOKEN` to the child process and selects the
+loopback-only URL. It never falls back to a cached xAI session
 or `XAI_API_KEY`.
 
 ## Models
@@ -179,7 +195,7 @@ scripts, or run the relevant Rust packages directly during development. A live
 account acceptance check is optional and separate:
 
 ```sh
-~/.local/bin/grok-openai -m openai-luna -p "Reply with exactly: OPENAI_OK"
+~/.local/bin/bandicot -m openai-luna -p "Reply with exactly: OPENAI_OK"
 ```
 
 That command incurs normal OpenAI usage and succeeds only if the private key,
@@ -217,7 +233,7 @@ account quota.
 
 ### The launcher is not found
 
-Run `~/.local/bin/grok-openai`. The installer intentionally does not edit
+Run `~/.local/bin/bandicot`. The installer intentionally does not edit
 `PATH` or any shell startup file.
 
 ### Build prerequisites are missing
@@ -225,6 +241,21 @@ Run `~/.local/bin/grok-openai`. The installer intentionally does not edit
 Install Rust/protoc using the host's normal, user-approved workflow, then rerun
 the installer. This repository does not reconfigure Homebrew or shell startup
 files on the user's behalf.
+
+### Remove an old fork installation
+
+Preview cleanup first, then explicitly apply it:
+
+```sh
+./scripts/uninstall-bandicot.sh --dry-run
+./scripts/uninstall-bandicot.sh --apply
+```
+
+The script removes commands only after matching Bandicot installer provenance.
+It can remove the legacy Bandicot-owned `grok-openai` alias and duplicate
+payloads. It reports an official `@xai-official/grok` installation but never
+removes it, and it always preserves `~/.bandicot`, all legacy profile homes,
+and `~/.grok` data.
 
 ## Updating
 

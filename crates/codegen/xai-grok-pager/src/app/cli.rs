@@ -48,6 +48,12 @@ pub enum Command {
     Plugin(crate::plugin_cmd::PluginArgs),
     /// Manage cross-session memory
     Memory(crate::memory_cmd::MemoryArgs),
+    /// Copy portable Claude, Codex, legacy, and enabled-plugin resources into .bandicot
+    MigrateResources {
+        /// Show planned copies and collisions without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// List available models and exit
     Models,
     /// List, search, or restore sessions
@@ -923,6 +929,15 @@ mod tests {
             "-v must exit 0; got {}",
             err.exit_code()
         );
+    }
+    #[test]
+    fn migrate_resources_parses_dry_run() {
+        let args = PagerArgs::try_parse_from(["bandicot", "migrate-resources", "--dry-run"])
+            .expect("migration command parses");
+        assert!(matches!(
+            args.command,
+            Some(Command::MigrateResources { dry_run: true })
+        ));
     }
     #[test]
     fn resume_target_classifies_flags() {

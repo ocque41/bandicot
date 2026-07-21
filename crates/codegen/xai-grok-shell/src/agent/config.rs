@@ -10,7 +10,9 @@ use std::num::NonZeroU64;
 use std::path::PathBuf;
 use std::sync::Arc;
 use xai_grok_agent::prompt::skills::SkillsConfig;
-use xai_grok_sampler::{AuthScheme, SamplerConfig};
+use xai_grok_sampler::{
+    AuthScheme, InferenceTransport, ProviderCapabilities, SamplerConfig, WireQuirks,
+};
 use xai_grok_sampling_types::{
     CompactionAtTokens, CompactionsRemaining, REASONING_EFFORT_META_KEY,
     REASONING_EFFORTS_META_KEY, ReasoningEffort, ReasoningEffortOption,
@@ -1234,12 +1236,10 @@ pub struct StorageConfig {
     /// Number of days to keep stale sessions before cleanup. Default: 30.
     pub cleanup_ttl_days: Option<u32>,
 }
-/// `[paths]` configuration: extra directories to scan for skills, rules, etc.
+/// `[paths]` compatibility configuration for imported rules and legacy skills.
 ///
-/// These supplement the built-in scan locations (`.grok/skills/`,
-/// `.agents/skills/`, `~/.grok/skills/`). They're written by `/import-claude`
-/// to preserve previously-discovered Claude directories after the runtime
-/// `.claude/` cutoff (see `[claude_compat] imported`).
+/// New skill imports use `[skills].paths`. `extra_skill_dirs` remains readable
+/// so configs written by older `/import-claude` versions keep working.
 ///
 /// Example:
 /// ```toml
@@ -1388,6 +1388,9 @@ pub struct Config {
     /// `[marketplace]` — also read by `xai_grok_plugin_marketplace::load_sources()`.
     #[serde(default, skip_serializing)]
     pub marketplace: MarketplaceConfig,
+    /// `[fallback]` — account/provider failover chain (secret-free).
+    #[serde(default, skip_serializing)]
+    pub fallback: crate::fallback::FallbackConfig,
     /// `[diagnostics]` — recognized crash/error-reporting policy switches; the
     /// startup resolvers still read the raw layered configuration.
     #[serde(default, skip_serializing)]
@@ -1753,6 +1756,7 @@ impl Default for Config {
             storage: StorageConfig::default(),
             suggestions: SuggestionsConfig::default(),
             marketplace: MarketplaceConfig::default(),
+            fallback: crate::fallback::FallbackConfig::default(),
             diagnostics: DiagnosticsConfig::default(),
             storage_mode: StorageMode::resolve(None, None),
             default_model_override: None,
@@ -1874,6 +1878,11 @@ impl Config {
         }
         config.config_models = config_models;
         config.model_override_warnings = model_override_warnings;
+        for path in &config.paths.extra_skill_dirs {
+            if !config.skills.paths.contains(path) {
+                config.skills.paths.push(path.clone());
+            }
+        }
         if config.grok_com_config.oidc.is_none() {
             config.grok_com_config.oidc = OidcAuthConfig::from_env();
         }
@@ -3355,6 +3364,8 @@ struct DefaultModelJson {
     top_p: Option<f32>,
     max_completion_tokens: Option<u32>,
     api_backend: ApiBackend,
+    #[serde(default)]
+    transport: InferenceTransport,
     #[serde(default = "default_agent_type")]
     agent_type: String,
     inference_idle_timeout_secs: Option<u64>,
@@ -3415,7 +3426,10 @@ fn default_models(endpoints: &EndpointsConfig) -> IndexMap<String, ModelEntryCon
                 top_p: m.top_p,
                 max_completion_tokens: m.max_completion_tokens,
                 api_backend: m.api_backend,
+                transport: m.transport,
                 auth_scheme: None,
+                capabilities: ProviderCapabilities::default(),
+                wire_quirks: WireQuirks::default(),
                 agent_type: m.agent_type,
                 inference_idle_timeout_secs: m.inference_idle_timeout_secs,
                 max_retries: None,
@@ -3477,8 +3491,16 @@ pub struct ModelEntryConfig {
     /// Values: "chat_completions" (default), "responses"
     #[serde(default)]
     pub api_backend: ApiBackend,
+    /// I/O boundary for inference. Native transports ignore `base_url`, auth,
+    /// HTTP headers, and HTTP wire quirks.
+    #[serde(default)]
+    pub transport: InferenceTransport,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_scheme: Option<AuthScheme>,
+    #[serde(default)]
+    pub capabilities: ProviderCapabilities,
+    #[serde(default)]
+    pub wire_quirks: WireQuirks,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<ReasoningEffort>,
     #[serde(default, skip_serializing_if = "is_false")]
@@ -3592,6 +3614,10 @@ pub struct ConfigModelOverride {
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
     pub api_backend: Option<ApiBackend>,
+    pub transport: Option<InferenceTransport>,
+    pub auth_scheme: Option<AuthScheme>,
+    pub capabilities: Option<ProviderCapabilities>,
+    pub wire_quirks: Option<WireQuirks>,
     #[serde(default)]
     pub extra_headers: IndexMap<String, String>,
     pub context_window: Option<u64>,
@@ -3636,6 +3662,10 @@ impl ConfigModelOverride {
             if self.api_base_url.is_none() {
                 entry.api_base_url = None;
             }
+            if self.api_key.is_none() && self.env_key.is_none() {
+                entry.api_key = None;
+                entry.env_key = None;
+            }
         }
         if self.name.is_some() {
             entry.info.name.clone_from(&self.name);
@@ -3654,6 +3684,18 @@ impl ConfigModelOverride {
         }
         if let Some(ref v) = self.api_backend {
             entry.info.api_backend = v.clone();
+        }
+        if let Some(v) = self.transport {
+            entry.info.transport = v;
+        }
+        if let Some(v) = self.auth_scheme {
+            entry.info.auth_scheme = v;
+        }
+        if let Some(v) = self.capabilities {
+            entry.info.capabilities = v;
+        }
+        if let Some(v) = self.wire_quirks {
+            entry.info.wire_quirks = v;
         }
         if !self.extra_headers.is_empty() {
             entry.info.extra_headers = self.extra_headers.clone();
@@ -3742,7 +3784,10 @@ pub struct ModelInfo {
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
     pub api_backend: ApiBackend,
+    pub transport: InferenceTransport,
     pub auth_scheme: AuthScheme,
+    pub capabilities: ProviderCapabilities,
+    pub wire_quirks: WireQuirks,
     pub extra_headers: IndexMap<String, String>,
     pub context_window: NonZeroU64,
     /// Per-model auto-compact threshold (0-100). `None` defers to the
@@ -3807,7 +3852,10 @@ impl ModelInfo {
             temperature: None,
             top_p: None,
             api_backend: ApiBackend::default(),
+            transport: InferenceTransport::default(),
             auth_scheme: Default::default(),
+            capabilities: ProviderCapabilities::default(),
+            wire_quirks: WireQuirks::default(),
             extra_headers: IndexMap::new(),
             context_window: NonZeroU64::new(200_000).unwrap(),
             auto_compact_threshold_percent: None,
@@ -3842,7 +3890,10 @@ impl ModelInfo {
             temperature: entry.temperature,
             top_p: entry.top_p,
             api_backend: entry.api_backend.clone(),
+            transport: entry.transport,
             auth_scheme: entry.auth_scheme.unwrap_or_default(),
+            capabilities: entry.capabilities,
+            wire_quirks: entry.wire_quirks,
             extra_headers: entry.extra_headers.clone(),
             context_window: entry.context_window,
             auto_compact_threshold_percent: entry.auto_compact_threshold_percent,
@@ -4467,6 +4518,9 @@ pub fn try_resolve_model_credentials(
 pub struct ModelAuthFacts {
     pub byok: ModelByok,
     pub auth_scheme: AuthScheme,
+    pub capabilities: ProviderCapabilities,
+    pub wire_quirks: WireQuirks,
+    pub transport: InferenceTransport,
 }
 /// Resolve `model_id` to its auth facts from one effective-config load.
 /// Load/parse failure, a model absent from the catalog, or an empty `model_id`
@@ -4479,6 +4533,9 @@ pub fn resolve_model_auth_facts(model_id: &str) -> ModelAuthFacts {
         return ModelAuthFacts {
             byok: ModelByok::Unknown,
             auth_scheme: AuthScheme::default(),
+            capabilities: ProviderCapabilities::default(),
+            wire_quirks: WireQuirks::default(),
+            transport: InferenceTransport::default(),
         };
     }
     with_resolved_model(model_id, |lookup| ModelAuthFacts {
@@ -4486,6 +4543,18 @@ pub fn resolve_model_auth_facts(model_id: &str) -> ModelAuthFacts {
         auth_scheme: match lookup {
             ModelLookup::Loaded(Some(e)) => e.info().auth_scheme,
             _ => AuthScheme::default(),
+        },
+        capabilities: match lookup {
+            ModelLookup::Loaded(Some(e)) => e.info().capabilities,
+            _ => ProviderCapabilities::default(),
+        },
+        wire_quirks: match lookup {
+            ModelLookup::Loaded(Some(e)) => e.info().wire_quirks,
+            _ => WireQuirks::default(),
+        },
+        transport: match lookup {
+            ModelLookup::Loaded(Some(e)) => e.info().transport,
+            _ => InferenceTransport::default(),
         },
     })
 }
@@ -4586,7 +4655,10 @@ pub fn resolve_aux_model_sampling_config(
                 temperature: None,
                 top_p: None,
                 api_backend: ApiBackend::Responses,
+                transport: InferenceTransport::Http,
                 auth_scheme: Default::default(),
+                capabilities: ProviderCapabilities::default(),
+                wire_quirks: WireQuirks::default(),
                 extra_headers: IndexMap::new(),
                 context_window: NonZeroU64::new(200_000).unwrap(),
                 auto_compact_threshold_percent: None,
@@ -4720,7 +4792,10 @@ pub fn sampling_config_for_model(
         temperature,
         top_p,
         api_backend,
+        transport: info.transport,
         auth_scheme: credentials.auth_scheme,
+        capabilities: info.capabilities,
+        wire_quirks: info.wire_quirks,
         extra_headers,
         context_window: info.context_window.get(),
         client_version,
@@ -4814,7 +4889,10 @@ fn resolve_hidden_default_web_search_sampling_config(
             temperature: None,
             top_p: None,
             api_backend: ApiBackend::Responses,
+            transport: InferenceTransport::Http,
             auth_scheme: Default::default(),
+            capabilities: ProviderCapabilities::default(),
+            wire_quirks: WireQuirks::default(),
             extra_headers: IndexMap::new(),
             context_window: NonZeroU64::new(200_000).unwrap(),
             auto_compact_threshold_percent: None,
@@ -5586,6 +5664,26 @@ reasoning_effort = "low"
         assert_eq!(model.info.base_url, "https://api.example.com/v1");
         assert_eq!(model.api_key, Some("sk-test-key-12345".to_string()));
     }
+    #[test]
+    fn changing_catalog_base_url_does_not_inherit_credential_owner() {
+        let endpoints = EndpointsConfig::default();
+        let base = test_model_entry(
+            "catalog-model",
+            "https://provider-a.example/v1",
+            None,
+            Some("PROVIDER_A_API_KEY"),
+            None,
+        );
+        let moved = ConfigModelOverride {
+            base_url: Some("https://provider-b.example/v1".to_owned()),
+            ..ConfigModelOverride::default()
+        }
+        .apply("catalog-model", Some(base), &endpoints);
+
+        assert!(moved.api_key.is_none());
+        assert!(moved.env_key.is_none());
+        assert_eq!(moved.info.base_url, "https://provider-b.example/v1");
+    }
     fn test_model_entry(
         model: &str,
         base_url: &str,
@@ -5605,7 +5703,10 @@ reasoning_effort = "low"
                 temperature: None,
                 top_p: None,
                 api_backend: ApiBackend::default(),
+                transport: InferenceTransport::Http,
                 auth_scheme: Default::default(),
+                capabilities: ProviderCapabilities::default(),
+                wire_quirks: WireQuirks::default(),
                 extra_headers: IndexMap::new(),
                 context_window: NonZeroU64::new(200_000).unwrap(),
                 auto_compact_threshold_percent: None,
@@ -6619,6 +6720,31 @@ reasoning_effort = "low"
         let model = resolved.get("my-chat-model").expect("model should exist");
         assert_eq!(model.info.api_backend, ApiBackend::ChatCompletions);
     }
+    #[test]
+    fn apple_transport_is_secret_free_and_reaches_sampler_config() {
+        let raw_config: toml::Value = toml::from_str(
+            r#"
+            [model.apple-on-device]
+            model = "apple-system-language-model"
+            base_url = "native://apple-foundation-models"
+            context_window = 4096
+            transport = "apple_foundation_models"
+            auth_scheme = "none"
+            capabilities = { tools = false, image_input = false }
+            "#,
+        )
+        .unwrap();
+        let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
+        let resolved = resolve_model_list(&cfg, None);
+        let model = resolved.get("apple-on-device").expect("model should exist");
+        let credentials = resolve_credentials(model, Some("must-not-cross-boundary"));
+        assert!(credentials.api_key.is_none());
+        assert_eq!(credentials.auth_scheme, AuthScheme::None);
+        let sampler = sampling_config_for_model(model, credentials, None, None, None, None);
+        assert_eq!(sampler.transport, InferenceTransport::AppleFoundationModels);
+        assert!(!sampler.capabilities.tools);
+        assert!(!sampler.capabilities.image_input);
+    }
     /// Messages backend (Anthropic) auto-defaults supports_reasoning_effort=true.
     /// Without this, `--reasoning-effort` is silently dropped in
     /// xai-grok-shell/src/agent/models.rs:857 for any BYOK Claude config.
@@ -6767,7 +6893,10 @@ reasoning_effort = "low"
             api_key: None,
             env_key: None,
             api_backend: ApiBackend::default(),
+            transport: InferenceTransport::Http,
             auth_scheme: None,
+            capabilities: ProviderCapabilities::default(),
+            wire_quirks: WireQuirks::default(),
             extra_headers: IndexMap::new(),
             context_window: NonZeroU64::new(200_000).unwrap(),
             auto_compact_threshold_percent: None,
@@ -6926,7 +7055,10 @@ reasoning_effort = "low"
             api_key: None,
             env_key: None,
             api_backend: ApiBackend::default(),
+            transport: InferenceTransport::Http,
             auth_scheme: None,
+            capabilities: ProviderCapabilities::default(),
+            wire_quirks: WireQuirks::default(),
             extra_headers: IndexMap::new(),
             context_window: NonZeroU64::new(200_000).unwrap(),
             auto_compact_threshold_percent: None,
@@ -7377,7 +7509,10 @@ reasoning_effort = "low"
             api_key: None,
             env_key: None,
             api_backend: ApiBackend::default(),
+            transport: InferenceTransport::Http,
             auth_scheme: None,
+            capabilities: ProviderCapabilities::default(),
+            wire_quirks: WireQuirks::default(),
             extra_headers: IndexMap::new(),
             context_window: NonZeroU64::new(200_000).unwrap(),
             auto_compact_threshold_percent: None,
@@ -10941,7 +11076,10 @@ default = "grok-4.5"
                 temperature: None,
                 top_p: None,
                 api_backend,
+                transport: InferenceTransport::Http,
                 auth_scheme: Default::default(),
+                capabilities: ProviderCapabilities::default(),
+                wire_quirks: WireQuirks::default(),
                 extra_headers: IndexMap::new(),
                 context_window: NonZeroU64::new(context_window).unwrap(),
                 use_concise: false,

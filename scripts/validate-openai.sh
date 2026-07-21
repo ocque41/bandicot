@@ -52,6 +52,7 @@ printf '%s\n' 'Checking shell workflows...'
 /bin/sh -n \
     scripts/install-openai.sh \
     scripts/install-bandicot.sh \
+    scripts/uninstall-bandicot.sh \
     scripts/setup-openai-key.sh \
     scripts/update-from-upstream.sh \
     scripts/validate-openai.sh \

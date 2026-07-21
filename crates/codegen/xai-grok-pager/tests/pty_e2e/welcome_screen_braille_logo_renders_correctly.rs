@@ -18,7 +18,7 @@ async fn welcome_screen_braille_logo_renders_correctly() {
     let content = ContentController::start().await.expect("start content");
 
     let binary = pager_binary().expect("resolve pager binary");
-    // Use a tall terminal so pick_logo() selects the 7-line logo (≥26 rows).
+    // Use a tall terminal so pick_logo() selects the 11-line logo (≥24 rows).
     let mut harness =
         PtyHarness::spawn_with_content(&binary, DEFAULT_ROWS, DEFAULT_COLS, &content, &[])
             .expect("spawn pager");
@@ -35,16 +35,16 @@ async fn welcome_screen_braille_logo_renders_correctly() {
     // byte characters each (e.g. Cyrillic). Check for a few that only
     // appear in the logo — not in any ASCII menu label.
     //
-    // From logo07.txt line 2: ⣠⣾⠿⠛
+    // From logo11.txt: ⣸ (row 7), ⣤ (row 9)
     assert!(
-        screen.contains('⣾'),
-        "Braille character ⣾ (U+28FE) not found in screen — \
+        screen.contains('⣸'),
+        "Braille character ⣸ (U+28F8) not found in screen — \
          logo may be garbled by code-page misinterpretation.\n\
          Screen contents:\n{screen}"
     );
     assert!(
-        screen.contains('⣿'),
-        "Braille character ⣿ (U+28FF) not found in screen — \
+        screen.contains('⣤'),
+        "Braille character ⣤ (U+28E4) not found in screen — \
          logo may be garbled.\n\
          Screen contents:\n{screen}"
     );

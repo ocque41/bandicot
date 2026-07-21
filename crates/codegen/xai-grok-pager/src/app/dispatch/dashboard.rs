@@ -1462,6 +1462,7 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
         }
         CommandResult::QueueCommand(_)
         | CommandResult::InjectSkill { .. }
+        | CommandResult::HostScheduleLoop { .. }
         | CommandResult::PassThrough(_) => {
             // These results all expect an agent session to consume
             // them. The dashboard has none, so route the original

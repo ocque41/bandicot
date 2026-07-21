@@ -1,0 +1,57 @@
+# Secret-free local Ollama profile. No API key or authorization header is used.
+# Pull the listed models first, or replace them with locally available models.
+
+[cli]
+auto_update = false
+
+[models]
+default = "ollama-gpt-oss-20b"
+default_reasoning_effort = "medium"
+web_search = "ollama-gpt-oss-20b"
+session_summary = "ollama-qwen3-8b"
+image_description = "ollama-qwen3-8b"
+prompt_suggestion = "ollama-qwen3-8b"
+allowed_models = ["ollama-*"]
+
+[features]
+telemetry = false
+feedback = false
+managed_config = false
+remote_fetch = false
+backend_tools = false
+video_gen = false
+voice_mode = false
+
+[telemetry]
+trace_upload = false
+mixpanel_enabled = false
+otel_enabled = false
+
+[diagnostics]
+error_reporting = false
+
+[model.ollama-gpt-oss-20b]
+model = "gpt-oss:20b"
+base_url = "http://127.0.0.1:11434/v1"
+name = "Ollama GPT OSS 20B"
+description = "Local Chat Completions with tools and reasoning"
+api_backend = "chat_completions"
+auth_scheme = "none"
+context_window = 131072
+max_completion_tokens = 32768
+agent_type = "codex"
+reasoning_efforts = ["none", "low", "medium", "high", "max"]
+capabilities = { tools = true, image_input = false }
+wire_quirks = { chat_max_tokens_field = "max_tokens", reasoning_response_field = "reasoning_content", send_stream_options = true, send_tool_choice = false }
+
+[model.ollama-qwen3-8b]
+model = "qwen3:8b"
+base_url = "http://127.0.0.1:11434/v1"
+name = "Ollama Qwen3 8B"
+description = "Local stateless Responses API example"
+api_backend = "responses"
+auth_scheme = "none"
+context_window = 32768
+max_completion_tokens = 8192
+agent_type = "codex"
+capabilities = { tools = true, image_input = false }

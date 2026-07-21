@@ -39,7 +39,7 @@ pub fn render_menu(
         .map(|(key, label)| (key.len() + label.len() + 4) as u16)
         .max()
         .unwrap_or(0);
-    let menu_width = logo_visual_width(area.height)
+    let menu_width = logo_visual_width(area.width, area.height)
         .max(30)
         .max(content_min)
         .max(min_width_hint);

@@ -340,6 +340,12 @@ pub fn format_sampling_error(err: &SamplingError, retry_count: Option<u32>) -> S
                 retry_prefix, error_type, message
             )
         }
+        SamplingError::NativeTransport { code, message, .. } => {
+            format!(
+                "{}Native inference error ({}): {}",
+                retry_prefix, code, message
+            )
+        }
         SamplingError::IdleTimeout { elapsed_secs } => {
             format!(
                 "{}Model stopped responding after {}s. The model may be overloaded or stuck. Try again or use a different model.",
@@ -416,6 +422,15 @@ pub(crate) fn clone_error(err: &SamplingError) -> SamplingError {
         } => SamplingError::StreamError {
             error_type: error_type.clone(),
             message: message.clone(),
+        },
+        SamplingError::NativeTransport {
+            code,
+            message,
+            retryable,
+        } => SamplingError::NativeTransport {
+            code: code.clone(),
+            message: message.clone(),
+            retryable: *retryable,
         },
         SamplingError::IdleTimeout { elapsed_secs } => SamplingError::IdleTimeout {
             elapsed_secs: *elapsed_secs,

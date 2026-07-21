@@ -144,6 +144,9 @@ pub fn map_sampling_err_to_acp(err: SamplingError) -> acp::Error {
             error_type,
             message,
         } => acp::Error::internal_error().data(format!("{error_type}: {message}")),
+        SamplingError::NativeTransport { code, message, .. } => {
+            acp::Error::internal_error().data(format!("{code}: {message}"))
+        }
         SamplingError::EmptyResponse { context } => acp::Error::internal_error().data(format!(
             "empty response from model ({}): model={}, had_reasoning={}, finish_reason={}",
             context.reason,

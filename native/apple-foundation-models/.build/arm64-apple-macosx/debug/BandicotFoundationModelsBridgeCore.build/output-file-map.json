@@ -1,0 +1,12 @@
+{
+  "": {
+    "swift-dependencies": "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/debug/BandicotFoundationModelsBridgeCore.build/primary.swiftdeps"
+  },
+  "/Users/miguel/Documents/bandicot/native/apple-foundation-models/Sources/BandicotFoundationModelsBridgeCore/Protocol.swift": {
+    "dependencies": "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/debug/BandicotFoundationModelsBridgeCore.build/Protocol.d",
+    "object": "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/debug/BandicotFoundationModelsBridgeCore.build/Protocol.swift.o",
+    "swiftmodule": "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/debug/BandicotFoundationModelsBridgeCore.build/Protocol~partial.swiftmodule",
+    "swift-dependencies": "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/debug/BandicotFoundationModelsBridgeCore.build/Protocol.swiftdeps",
+    "diagnostics": "/Users/miguel/Documents/bandicot/native/apple-foundation-models/.build/arm64-apple-macosx/debug/BandicotFoundationModelsBridgeCore.build/Protocol.dia"
+  }
+}

@@ -54,21 +54,10 @@ fn matches_trusted_base_url(candidate: &str, trusted_base: &str) -> bool {
         && candidate.port_or_known_default() == trusted.port_or_known_default()
         && path_matches
 }
-/// True for cli-chat-proxy URLs (production, plus local-dev hosts when the
-/// optional non-production feature is enabled). When that feature is on,
-/// runtime env overrides can extend this trust set. Loopback is always
-/// accepted (unit tests and local mock servers on arbitrary ports).
+/// True only for the production cli-chat-proxy URL. Generic loopback services
+/// are separate provider boundaries and must not receive xAI proxy headers.
 pub fn is_cli_chat_proxy_url(url: &str) -> bool {
-    if matches_trusted_base_url(url, crate::env::PROD_CLI_CHAT_PROXY_BASE_URL) {
-        return true;
-    }
-    if let Ok(u) = reqwest::Url::parse(url)
-        && let Some(h) = u.host_str()
-        && (h == "localhost" || h == "127.0.0.1" || h == "::1")
-    {
-        return true;
-    }
-    false
+    matches_trusted_base_url(url, crate::env::PROD_CLI_CHAT_PROXY_BASE_URL)
 }
 /// True for xAI-operated endpoints (`*.x.ai`, cli-chat-proxy, and optional
 /// non-production xAI hosts when that feature is enabled).
@@ -304,7 +293,8 @@ mod tests {
         assert!(!is_xai_api_url("not-a-url"));
         assert!(!is_xai_api_url(""));
         assert!(is_xai_api_url("http://api.x.ai/v1"));
-        assert!(is_xai_api_url("http://localhost:11434/v1"));
+        assert!(!is_xai_api_url("http://localhost:11434/v1"));
+        assert!(!is_cli_chat_proxy_url("http://127.0.0.1:8317/v1"));
     }
     #[test]
     fn test_is_xai_api_bearer_url() {

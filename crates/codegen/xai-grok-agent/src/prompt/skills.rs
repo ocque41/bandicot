@@ -48,8 +48,8 @@ pub struct SkillsConfig {
 
 /// List all discovered skills with their metadata.
 ///
-/// Priority order: Local (cwd/.grok/skills, cwd/.agents/skills, cwd/.claude/skills) → Intermediate dirs →
-/// Repo (repo_root/.grok/skills, repo_root/.agents/skills, repo_root/.claude/skills) → User (~/.grok/skills, ~/.agents/skills, ~/.claude/skills)
+/// Priority order: Local (cwd/.bandicot/skills, cwd/.grok/skills, cwd/.agents/skills, cwd/.claude/skills) → Intermediate dirs →
+/// Repo (repo_root/.bandicot/skills, repo_root/.grok/skills, repo_root/.agents/skills, repo_root/.claude/skills) → User (~/.bandicot/skills, ~/.grok/skills, ~/.agents/skills, ~/.claude/skills)
 /// → additional paths from `config.paths`
 /// → Server (injected `config.server_skill_dirs`)
 /// → Bundled (injected `config.bundled_skill_dirs` + `~/.grok/bundled`; lowest precedence).
@@ -168,8 +168,7 @@ pub fn collect_skill_config_dirs(
     };
 
     // Vendor dirs (`.claude`/`.cursor`) are gated by the resolved compat
-    // config; `.grok` and `.agents` are always present. When all cells are on
-    // this list equals the historical `[".grok", ".agents", ".claude", ".cursor"]`.
+    // config; canonical `.bandicot` precedes legacy `.grok` and `.agents`.
     let config_dir_names = compat.skill_config_dirs();
 
     // Priority 1 & 2: Walk from cwd up to the git root.
@@ -199,12 +198,14 @@ pub fn collect_skill_config_dirs(
         }
     }
 
-    // Priority 3: Global user dirs. `.grok` comes from `grok_home` (which may
-    // be overridden), so it's handled separately; `.agents` is always added,
+    // Priority 3: Global user dirs. Canonical `~/.bandicot` is checked before
+    // `grok_home` (which may resolve to legacy `~/.grok`); `.agents` is always added,
     // while `.claude`/`.cursor` are gated by the skills compat cells.
-    try_add(grok_home);
     #[allow(deprecated)]
     if let Some(home) = std::env::home_dir() {
+        try_add(home.join(".bandicot"));
+        try_add(grok_home);
+        try_add(home.join(".grok"));
         try_add(home.join(".agents"));
         if compat.claude.skills {
             try_add(home.join(".claude"));
@@ -212,6 +213,8 @@ pub fn collect_skill_config_dirs(
         if compat.cursor.skills {
             try_add(home.join(".cursor"));
         }
+    } else {
+        try_add(grok_home);
     }
 
     // Priority 4: Config paths (skills.paths entries).
@@ -2439,7 +2442,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let cwd = tmp.path();
         // Not a git repo → falls to the cwd-only branch (no upward walk).
-        for name in [".grok", ".agents", ".claude", ".cursor"] {
+        for name in [".bandicot", ".grok", ".agents", ".claude", ".cursor"] {
             fs::create_dir_all(cwd.join(name)).unwrap();
         }
 
@@ -2450,6 +2453,15 @@ mod tests {
             collect_skill_config_dirs(Some(cwd), None, tmp.path(), &[], CompatConfig::default());
         assert!(ends_with(&all, ".claude"), "claude missing: {all:?}");
         assert!(ends_with(&all, ".cursor"), "cursor missing: {all:?}");
+        let bandicot = all
+            .iter()
+            .position(|dir| dir.ends_with(".bandicot"))
+            .unwrap();
+        let grok = all.iter().position(|dir| dir.ends_with(".grok")).unwrap();
+        assert!(
+            bandicot < grok,
+            "canonical .bandicot must precede .grok: {all:?}"
+        );
 
         // cursor.skills off → .cursor dropped, .claude kept.
         let mut compat = CompatConfig::default();

@@ -1381,6 +1381,7 @@ pub(crate) async fn spawn_session_actor(
             ),
         )
         .await;
+    session.restore_approved_loop().await;
     if let Some(ref display_cwd) = prompt_display_cwd {
         session
             .agent

@@ -368,9 +368,37 @@ struct DeleteScheduledTaskResponse {
     deleted: bool,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateScheduledTaskRequest {
+    session_id: String,
+    interval: String,
+    prompt: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateScheduledTaskResponse {
+    task_id: String,
+    human_schedule: String,
+    recurring: bool,
+}
+
 /// Handle `x.ai/scheduler/*` extension methods.
 pub async fn handle_scheduler(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     match args.method.as_ref() {
+        "x.ai/scheduler/create" => {
+            let req: CreateScheduledTaskRequest = parse(args)?;
+            let result = agent
+                .create_scheduled_task(&req.session_id, &req.interval, &req.prompt)
+                .await
+                .map(|created| CreateScheduledTaskResponse {
+                    task_id: created.id,
+                    human_schedule: created.human_schedule,
+                    recurring: created.recurring,
+                });
+            respond(result)
+        }
         "x.ai/scheduler/delete" => {
             let req: DeleteScheduledTaskRequest = parse(args)?;
             let result = agent
@@ -468,6 +496,15 @@ mod tests {
         let req: DeleteScheduledTaskRequest = serde_json::from_str(json).expect("should parse");
         assert_eq!(req.session_id, "sess-1");
         assert_eq!(req.task_id, "task-42");
+    }
+
+    #[test]
+    fn create_scheduled_task_request_deserializes_camel_case() {
+        let json = r#"{"sessionId":"sess-1","interval":"5m","prompt":"check deploy"}"#;
+        let req: CreateScheduledTaskRequest = serde_json::from_str(json).expect("should parse");
+        assert_eq!(req.session_id, "sess-1");
+        assert_eq!(req.interval, "5m");
+        assert_eq!(req.prompt, "check deploy");
     }
 
     #[test]

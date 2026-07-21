@@ -1,7 +1,4 @@
-//! Logo component — renders the braille art logo.
-//!
-//! Hidden entirely on legacy Windows consoles: the U+2800 braille block is
-//! not covered by the ConHost raster fonts and would render as tofu.
+//! Bandicot logo component with braille and ASCII-safe variants.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Alignment, Rect};
@@ -12,31 +9,49 @@ use ratatui::widgets::{Paragraph, Widget};
 use crate::render::color::blend_color;
 use crate::theme::Theme;
 
-const LOGO: &str = include_str!("../../../assets/logo/logo07.txt");
-const LOGO_SMALL: &str = include_str!("../../../assets/logo/logo05.txt");
+const LOGO: &str = include_str!("../../../assets/logo/logo11.txt");
+const LOGO_SMALL: &str = include_str!("../../../assets/logo/logo06.txt");
+const LOGO_NARROW: &str = include_str!("../../../assets/logo/logo_ascii.txt");
 
-/// Height at or above which the small logo is shown (below it, no logo).
-const SMALL_LOGO_MIN_HEIGHT: u16 = 22;
+/// Height at or above which the compact braille logo is shown.
+const SMALL_LOGO_MIN_HEIGHT: u16 = 19;
 /// Height at or above which the full logo is shown.
-const FULL_LOGO_MIN_HEIGHT: u16 = 26;
+const FULL_LOGO_MIN_HEIGHT: u16 = 24;
+/// The fallback is short enough to remain useful in constrained terminals.
+const NARROW_LOGO_MIN_HEIGHT: u16 = 4;
 
-fn pick_logo(window_height: u16) -> Option<&'static str> {
-    pick_logo_for(window_height, logo_hidden())
+fn pick_logo(window_width: u16, window_height: u16) -> Option<&'static str> {
+    pick_logo_for(window_width, window_height, braille_unsupported())
 }
 
 /// Pure tier selection so tests can drive the legacy-console flag directly.
-fn pick_logo_for(window_height: u16, hidden: bool) -> Option<&'static str> {
-    if hidden || window_height < SMALL_LOGO_MIN_HEIGHT {
+/// Braille-capable terminals always get the dithered braille art (animated);
+/// the plain ASCII stand-in is only for legacy Windows consoles whose raster
+/// fonts lack the U+2800 braille block.
+fn pick_logo_for(
+    window_width: u16,
+    window_height: u16,
+    braille_unsupported: bool,
+) -> Option<&'static str> {
+    if braille_unsupported {
+        return if window_height >= NARROW_LOGO_MIN_HEIGHT
+            && window_width >= visual_width(LOGO_NARROW)
+        {
+            Some(LOGO_NARROW)
+        } else {
+            None
+        };
+    }
+    if window_height < SMALL_LOGO_MIN_HEIGHT || window_width < visual_width(LOGO_SMALL) {
         None
-    } else if window_height < FULL_LOGO_MIN_HEIGHT {
+    } else if window_height < FULL_LOGO_MIN_HEIGHT || window_width < visual_width(LOGO) {
         Some(LOGO_SMALL)
     } else {
         Some(LOGO)
     }
 }
 
-/// The braille art has no ASCII stand-in; see the module doc.
-fn logo_hidden() -> bool {
+fn braille_unsupported() -> bool {
     crate::glyphs::is_legacy_windows_console()
 }
 
@@ -69,12 +84,18 @@ fn anim_phase_secs() -> f32 {
 /// repaints.
 const SHIMMER_FPS: f32 = 12.0;
 
+fn ear_twitch_offset(row: usize, rows: usize, secs: f32) -> usize {
+    let phase = secs % 5.0;
+    let twitching = (3.60..3.72).contains(&phase) || (3.84..3.96).contains(&phase);
+    usize::from(twitching && row < rows.div_ceil(4)) * 2
+}
+
 /// Quantized shimmer frame for the current wall-clock phase. The welcome screen
 /// redraws only when this advances, throttling the animation to ~`SHIMMER_FPS`
 /// rather than the full event-loop tick rate. Pinned to 0 when the logo is
-/// hidden.
+/// using the static ASCII fallback.
 pub fn shimmer_frame() -> u64 {
-    if logo_hidden() {
+    if braille_unsupported() {
         return 0;
     }
     (anim_phase_secs() * SHIMMER_FPS) as u64
@@ -129,7 +150,7 @@ fn render_into(area: Rect, buf: &mut Buffer, theme: &Theme, logo: &str) {
         .enumerate()
         .map(|(row, line)| {
             let mut spans: Vec<Span> = Vec::new();
-            let mut run = String::new();
+            let mut run = " ".repeat(ear_twitch_offset(row, lines.len(), secs));
             let mut run_color: Option<Color> = None;
             for (col, ch) in line.chars().enumerate() {
                 // Sweep along the bottom-left → top-right diagonal: the
@@ -156,61 +177,65 @@ fn render_into(area: Rect, buf: &mut Buffer, theme: &Theme, logo: &str) {
     Paragraph::new(logo_lines).render(area, buf);
 }
 
-pub fn logo_line_count(window_height: u16) -> u16 {
-    pick_logo(window_height).map_or(0, count_lines)
+pub fn logo_line_count(window_width: u16, window_height: u16) -> u16 {
+    pick_logo(window_width, window_height).map_or(0, count_lines)
 }
 
-pub fn logo_visual_width(window_height: u16) -> u16 {
-    pick_logo(window_height).map_or(24, visual_width)
+pub fn logo_visual_width(window_width: u16, window_height: u16) -> u16 {
+    pick_logo(window_width, window_height).map_or(0, visual_width)
 }
 
 pub fn render_logo(area: Rect, buf: &mut Buffer, theme: &Theme, window_height: u16) {
-    if let Some(logo) = pick_logo(window_height) {
+    if let Some(logo) = pick_logo(area.width, window_height) {
         render_into(area, buf, theme, logo);
     }
 }
 
 /// The hero box always shows the full logo: it is laid out beside the menu, so
 /// it fits whenever the box does. These report and render that logo directly,
-/// independent of the height-based [`pick_logo`] tiers used by the stacked
-/// layout. When [`logo_hidden`], they report 0 and render nothing.
+/// independent of the size-based [`pick_logo`] tiers used by the stacked
+/// layout.
 pub fn full_logo_line_count() -> u16 {
-    full_logo_line_count_for(logo_hidden())
-}
-
-fn full_logo_line_count_for(hidden: bool) -> u16 {
-    if hidden { 0 } else { count_lines(LOGO) }
+    count_lines(LOGO)
 }
 
 pub fn full_logo_visual_width() -> u16 {
-    full_logo_visual_width_for(logo_hidden())
-}
-
-fn full_logo_visual_width_for(hidden: bool) -> u16 {
-    if hidden { 0 } else { visual_width(LOGO) }
+    visual_width(LOGO)
 }
 
 pub fn render_full_logo(area: Rect, buf: &mut Buffer, theme: &Theme) {
-    if !logo_hidden() {
-        render_into(area, buf, theme, LOGO);
-    }
-}
-
-/// Line count of the small logo used in minimal's committed welcome card
-/// (0 on a legacy Windows console, where the braille art is suppressed).
-pub fn compact_logo_line_count() -> u16 {
-    if logo_hidden() {
-        0
+    let logo = if braille_unsupported() {
+        LOGO_NARROW
     } else {
-        count_lines(LOGO_SMALL)
+        LOGO
+    };
+    render_into(area, buf, theme, logo);
+}
+
+/// Line count of the compact or narrow logo used in minimal's welcome card.
+pub fn compact_logo_line_count(width: u16) -> u16 {
+    compact_logo(width).map_or(0, count_lines)
+}
+
+fn compact_logo(width: u16) -> Option<&'static str> {
+    if braille_unsupported() {
+        return if width >= visual_width(LOGO_NARROW) {
+            Some(LOGO_NARROW)
+        } else {
+            None
+        };
+    }
+    if width < visual_width(LOGO_SMALL) {
+        None
+    } else {
+        Some(LOGO_SMALL)
     }
 }
 
-/// Render the small braille logo (centered) into `area` for minimal's welcome
-/// card. No-op when the logo is hidden.
+/// Render the compact logo centered in minimal's welcome card.
 pub fn render_compact_logo(area: Rect, buf: &mut Buffer, theme: &Theme) {
-    if !logo_hidden() {
-        render_into(area, buf, theme, LOGO_SMALL);
+    if let Some(logo) = compact_logo(area.width) {
+        render_into(area, buf, theme, logo);
     }
 }
 
@@ -220,55 +245,78 @@ mod tests {
 
     #[test]
     fn logo_sizes_by_height() {
-        assert!(pick_logo_for(SMALL_LOGO_MIN_HEIGHT - 1, false).is_none());
+        let wide = visual_width(LOGO);
+        assert_eq!(pick_logo_for(wide, SMALL_LOGO_MIN_HEIGHT - 1, false), None);
         assert_eq!(
-            pick_logo_for(SMALL_LOGO_MIN_HEIGHT, false),
+            pick_logo_for(wide, SMALL_LOGO_MIN_HEIGHT, false),
             Some(LOGO_SMALL)
         );
         assert_eq!(
-            pick_logo_for(FULL_LOGO_MIN_HEIGHT - 1, false),
+            pick_logo_for(wide, FULL_LOGO_MIN_HEIGHT - 1, false),
             Some(LOGO_SMALL)
         );
-        assert_eq!(pick_logo_for(FULL_LOGO_MIN_HEIGHT, false), Some(LOGO));
+        assert_eq!(pick_logo_for(wide, FULL_LOGO_MIN_HEIGHT, false), Some(LOGO));
     }
 
-    // The braille art has no legacy-safe stand-in, so every height tier must
-    // collapse to no logo when the legacy-console flag is set.
     #[test]
-    fn logo_hidden_on_legacy_console_at_every_height() {
-        for h in [0, SMALL_LOGO_MIN_HEIGHT, FULL_LOGO_MIN_HEIGHT, u16::MAX] {
-            assert!(pick_logo_for(h, true).is_none(), "height {h}");
+    fn legacy_console_uses_ascii_fallback() {
+        assert_eq!(
+            pick_logo_for(visual_width(LOGO_NARROW), FULL_LOGO_MIN_HEIGHT, true),
+            Some(LOGO_NARROW)
+        );
+        assert_eq!(
+            pick_logo_for(visual_width(LOGO_NARROW) - 1, FULL_LOGO_MIN_HEIGHT, true),
+            None
+        );
+    }
+
+    #[test]
+    fn logo_sizes_by_width() {
+        assert!(pick_logo_for(visual_width(LOGO_SMALL) - 1, u16::MAX, false).is_none());
+        assert_eq!(
+            pick_logo_for(visual_width(LOGO) - 1, u16::MAX, false),
+            Some(LOGO_SMALL)
+        );
+        assert_eq!(
+            pick_logo_for(visual_width(LOGO), u16::MAX, false),
+            Some(LOGO)
+        );
+    }
+
+    #[test]
+    fn hero_box_uses_large_logo_dimensions() {
+        assert_eq!(full_logo_line_count(), count_lines(LOGO));
+        assert_eq!(full_logo_visual_width(), visual_width(LOGO));
+        assert!(full_logo_line_count() > count_lines(LOGO_SMALL));
+        assert!(full_logo_visual_width() > visual_width(LOGO_SMALL));
+    }
+
+    #[test]
+    fn logo_assets_fit_their_reported_widths() {
+        for logo in [LOGO, LOGO_SMALL, LOGO_NARROW] {
+            assert!(non_empty_lines(logo).all(|line| {
+                unicode_width::UnicodeWidthStr::width(line) <= visual_width(logo) as usize
+            }));
+        }
+        assert!(LOGO_NARROW.is_ascii());
+    }
+
+    #[test]
+    fn selected_logo_never_exceeds_terminal_width() {
+        for width in 0..=visual_width(LOGO) {
+            if let Some(logo) = pick_logo_for(width, u16::MAX, false) {
+                assert!(visual_width(logo) <= width, "width {width}");
+            }
         }
     }
 
     #[test]
-    fn hero_box_always_uses_full_logo() {
-        // The box renders the full logo regardless of height (it's laid out
-        // beside the menu), and it's the large variant — never the small one.
-        assert_eq!(full_logo_line_count_for(false), count_lines(LOGO));
-        assert_eq!(full_logo_visual_width_for(false), visual_width(LOGO));
-        assert!(full_logo_line_count_for(false) > count_lines(LOGO_SMALL));
-        assert!(full_logo_visual_width_for(false) > visual_width(LOGO_SMALL));
-    }
-
-    #[test]
-    fn full_logo_helpers_collapse_when_hidden() {
-        assert_eq!(full_logo_line_count_for(true), 0);
-        assert_eq!(full_logo_visual_width_for(true), 0);
-    }
-
-    #[test]
-    fn compact_logo_line_count_matches_small_logo_when_visible() {
-        // The minimal welcome card budgets exactly the small logo's rows. When
-        // the logo isn't hidden, the count equals the small art's line count and
-        // is strictly shorter than the full logo.
-        if !logo_hidden() {
-            assert_eq!(compact_logo_line_count(), count_lines(LOGO_SMALL));
-            assert!(compact_logo_line_count() < count_lines(LOGO));
-            assert!(compact_logo_line_count() > 0);
-        } else {
-            assert_eq!(compact_logo_line_count(), 0);
-        }
+    fn compact_logo_shows_dither_art_when_it_fits() {
+        assert_eq!(compact_logo_line_count(visual_width(LOGO_SMALL) - 1), 0);
+        assert_eq!(
+            compact_logo_line_count(visual_width(LOGO_SMALL)),
+            count_lines(LOGO_SMALL)
+        );
     }
 
     #[test]
@@ -314,5 +362,14 @@ mod tests {
         // glyph falls back to at most the gentle pulse — never full bright.
         let op = shine_opacity(0.5, 6.0); // secs % 4.0 = 2.0 → past SWEEP_FRAC, in the rest phase
         assert!(op < 0.2, "resting opacity {op} should stay dim");
+    }
+
+    #[test]
+    fn ears_twitch_twice_without_moving_the_body() {
+        let rows = count_lines(LOGO) as usize;
+        assert_eq!(ear_twitch_offset(0, rows, 3.65), 2);
+        assert_eq!(ear_twitch_offset(0, rows, 3.90), 2);
+        assert_eq!(ear_twitch_offset(0, rows, 4.10), 0);
+        assert_eq!(ear_twitch_offset(rows / 2, rows, 3.65), 0);
     }
 }

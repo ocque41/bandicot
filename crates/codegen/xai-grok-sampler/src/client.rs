@@ -25,11 +25,15 @@ use xai_grok_sampling_types::error::{parse_error_bytes, try_parse_stream_error};
 use xai_grok_sampling_types::{
     CANONICAL_REASONING_EFFORT_METADATA_KEY, ChatCompletionChunk, ChatCompletionRequest,
     ChatCompletionResponse, ConversationRequest, ConversationResponse, CreateResponseWrapper,
-    DOOM_LOOP_CHECK_HEADER, MessagesRequestWrapper, ReasoningEffort, ResponseModelMetadata, Result,
-    SamplingError, build_messages_request, is_check_event, messages, rs,
+    DOOM_LOOP_CHECK_HEADER, InferenceTransport, MessagesRequestWrapper, ReasoningEffort,
+    ResponseModelMetadata, Result, SamplingError, build_messages_request, is_check_event, messages,
+    rs,
 };
 
-use crate::config::{AuthScheme, OriginClientInfo, SamplerConfig};
+use crate::config::{
+    AuthScheme, ChatMaxTokensField, OriginClientInfo, ProviderCapabilities, ReasoningResponseField,
+    SamplerConfig, WireQuirks,
+};
 
 // Re-export ApiBackend from the shared types crate for downstream callers.
 pub use xai_grok_sampling_types::ApiBackend;
@@ -146,6 +150,21 @@ fn response_event_type(data: &str) -> Option<&str> {
     serde_json::from_str::<ResponseEventEnvelope<'_>>(data)
         .ok()
         .map(|envelope| envelope.event_type)
+}
+
+/// True when an SSE `data` payload on the chat/completions wire is valid JSON
+/// but cannot be a [`ChatCompletionChunk`] because the required `id` field is
+/// absent. Providers use such payloads for out-of-band extension events that
+/// carry no assistant content -- e.g. OpenCode Go emits an
+/// `x-opencode-type: inference-cost` summary (`{"choices":[],"cost":...}`)
+/// immediately before `[DONE]`. Like unknown Responses event types, these are
+/// skipped so a provider extension cannot break an otherwise valid stream;
+/// malformed JSON and malformed real chunks remain hard errors.
+fn is_chat_chunk_extension_event(data: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(data) else {
+        return false;
+    };
+    value.get("id").is_none()
 }
 
 fn is_known_response_event_type(event_type: &str) -> bool {
@@ -480,7 +499,8 @@ struct StreamingChatRequest<'a> {
     #[serde(flatten)]
     inner: &'a ChatCompletionRequest,
     stream: bool,
-    stream_options: StreamOptions,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_options: Option<StreamOptions>,
 }
 
 #[derive(Serialize)]
@@ -532,7 +552,10 @@ struct ClientDefaults {
     temperature: Option<f32>,
     top_p: Option<f32>,
     api_backend: ApiBackend,
+    transport: InferenceTransport,
     auth_scheme: AuthScheme,
+    capabilities: ProviderCapabilities,
+    wire_quirks: WireQuirks,
     reasoning_effort: Option<ReasoningEffort>,
     stream_tool_calls: bool,
     doom_loop_recovery: Option<xai_grok_sampling_types::DoomLoopRecoveryPolicy>,
@@ -624,6 +647,7 @@ impl SamplingClient {
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         if let Some(ref api_key) = config.api_key {
             match config.auth_scheme {
+                AuthScheme::None => {}
                 AuthScheme::XApiKey => {
                     let header_value = HeaderValue::from_str(api_key).map_err(|_| {
                         tracing::debug!(
@@ -751,7 +775,10 @@ impl SamplingClient {
             temperature: config.temperature,
             top_p: config.top_p,
             api_backend: config.api_backend,
+            transport: config.transport,
             auth_scheme: config.auth_scheme,
+            capabilities: config.capabilities,
+            wire_quirks: config.wire_quirks,
             reasoning_effort: config.reasoning_effort,
             stream_tool_calls: config.stream_tool_calls,
             doom_loop_recovery: config.doom_loop_recovery,
@@ -774,6 +801,20 @@ impl SamplingClient {
         self.defaults.api_backend.clone()
     }
 
+    /// The I/O transport used for inference. Native transports do not call
+    /// any of this client's HTTP request methods.
+    pub fn transport(&self) -> InferenceTransport {
+        self.defaults.transport
+    }
+
+    pub(crate) fn apple_defaults(&self) -> (String, Option<f32>, Option<u32>) {
+        (
+            self.defaults.model.clone(),
+            self.defaults.temperature,
+            self.defaults.max_completion_tokens,
+        )
+    }
+
     /// POST with default headers. Overrides auth from resolver if wired.
     fn post(&self, url: impl reqwest::IntoUrl) -> reqwest::RequestBuilder {
         let mut headers = self.default_headers.clone();
@@ -781,6 +822,10 @@ impl SamplingClient {
             && let Some(fresh) = resolver.current_bearer()
         {
             match self.defaults.auth_scheme {
+                AuthScheme::None => {
+                    headers.remove(AUTHORIZATION);
+                    headers.remove(HeaderName::from_static("x-api-key"));
+                }
                 AuthScheme::XApiKey => {
                     headers.remove(AUTHORIZATION);
                     if let Ok(v) = HeaderValue::from_str(&fresh) {
@@ -838,6 +883,7 @@ impl SamplingClient {
     /// Reads `x-api-key` (Anthropic Messages API) or `Authorization` (OpenAI-completions).
     fn extract_sent_bearer(&self) -> Option<String> {
         let raw = match self.defaults.auth_scheme {
+            AuthScheme::None => None,
             AuthScheme::XApiKey => self
                 .default_headers
                 .get(HeaderName::from_static("x-api-key"))
@@ -891,12 +937,14 @@ impl SamplingClient {
                 .as_deref()
                 .is_some_and(|value| !value.is_empty())
         }) || match self.defaults.auth_scheme {
+            AuthScheme::None => false,
             AuthScheme::XApiKey => self
                 .default_headers
                 .contains_key(HeaderName::from_static("x-api-key")),
             AuthScheme::Bearer => self.default_headers.contains_key(AUTHORIZATION),
         };
         let auth_type = match (self.defaults.auth_scheme, has_auth) {
+            (AuthScheme::None, _) => "none",
             (AuthScheme::XApiKey, true) => "x-api-key",
             (AuthScheme::Bearer, true) => "bearer",
             (_, false) => "none",
@@ -1053,8 +1101,75 @@ impl SamplingClient {
         request.search_parameters = None;
         for message in &mut request.messages {
             message.model_id = None;
-            message.reasoning_content = None;
+            if self.defaults.wire_quirks.reasoning_response_field
+                == ReasoningResponseField::ReasoningContent
+            {
+                message.reasoning_content = None;
+            }
         }
+    }
+
+    fn chat_payload(
+        &self,
+        request: &mut ChatCompletionRequest,
+        streaming: bool,
+    ) -> Result<serde_json::Value> {
+        if !self.defaults.capabilities.tools {
+            request.tools = None;
+            request.tool_choice = None;
+        } else if !self.defaults.wire_quirks.send_tool_choice {
+            request.tool_choice = None;
+        }
+        if !self.defaults.capabilities.image_input
+            && request.messages.iter().any(|message| {
+                matches!(
+                    &message.content,
+                    xai_grok_sampling_types::MessageContent::Blocks(blocks)
+                        if blocks.iter().any(|block| matches!(block, xai_grok_sampling_types::ChatContentBlock::ImageUrl { .. }))
+                )
+            })
+        {
+            return Err(SamplingError::InvalidConfiguration(
+                "The selected model does not support image input",
+            ));
+        }
+
+        let mut value = if streaming {
+            serde_json::to_value(StreamingChatRequest {
+                inner: request,
+                stream: true,
+                stream_options: self.defaults.wire_quirks.send_stream_options.then_some(
+                    StreamOptions {
+                        include_usage: true,
+                    },
+                ),
+            })?
+        } else {
+            serde_json::to_value(request)?
+        };
+        let object = value
+            .as_object_mut()
+            .expect("ChatCompletionRequest serializes as an object");
+        if self.defaults.wire_quirks.chat_max_tokens_field
+            == ChatMaxTokensField::MaxCompletionTokens
+            && let Some(max_tokens) = object.remove("max_tokens")
+        {
+            object.insert("max_completion_tokens".to_owned(), max_tokens);
+        }
+        if self.defaults.wire_quirks.reasoning_response_field == ReasoningResponseField::Reasoning
+            && let Some(messages) = object
+                .get_mut("messages")
+                .and_then(serde_json::Value::as_array_mut)
+        {
+            for message in messages {
+                if let Some(message) = message.as_object_mut()
+                    && let Some(reasoning) = message.remove("reasoning_content")
+                {
+                    message.insert("reasoning".to_owned(), reasoning);
+                }
+            }
+        }
+        Ok(value)
     }
 
     async fn handle_response(&self, response: reqwest::Response) -> Result<ChatCompletionResponse> {
@@ -1106,6 +1221,7 @@ impl SamplingClient {
         let x_grok_conv_id = &payload.x_grok_conv_id.clone().unwrap_or_default();
         let x_grok_req_id = &payload.x_grok_req_id.clone().unwrap_or_default();
         let model_id = payload.model.clone().unwrap_or_default();
+        let wire_payload = self.chat_payload(&mut payload, false)?;
 
         tracing::debug!(
             base_url = %self.base_url,
@@ -1128,7 +1244,7 @@ impl SamplingClient {
                 self.post(self.endpoint("chat/completions")),
                 self.xai_wire_extensions,
             )
-            .json(&payload);
+            .json(&wire_payload);
 
         let response = http_request.send().await.map_err(|e| {
             // Log at debug level; errors are surfaced to the caller.
@@ -1163,17 +1279,7 @@ impl SamplingClient {
         let x_grok_conv_id = &payload.x_grok_conv_id.clone().unwrap_or_default();
         let x_grok_req_id = &payload.x_grok_req_id.clone().unwrap_or_default();
         let model_id = payload.model.clone().unwrap_or_default();
-
-        // Wrap the request with streaming fields and serialize once.
-        // Previously this path serialized twice: first to serde_json::Value
-        // (to inject `stream` and `stream_options`), then to HTTP body bytes.
-        let streaming_request = StreamingChatRequest {
-            inner: &payload,
-            stream: true,
-            stream_options: StreamOptions {
-                include_usage: true,
-            },
-        };
+        let streaming_request = self.chat_payload(&mut payload, true)?;
 
         let grok_headers = GrokRequestHeaders {
             conv_id: x_grok_conv_id,
@@ -1285,6 +1391,9 @@ impl SamplingClient {
         // stream (`None`). The first transport error is emitted to the consumer,
         // then subsequent polls return `None` -- preventing an infinite busy-loop
         // when the HTTP/2 connection drops and h2 keeps producing errors.
+        // The scan item is an `Option`: `Some(None)` skips a provider extension
+        // event (see `is_chat_chunk_extension_event`) without terminating the
+        // stream (`filter_map` below), while an outer `None` still ends it.
         let chunks = event_stream
             .scan(false, |had_transport_error, event_res| {
                 if *had_transport_error {
@@ -1305,9 +1414,15 @@ impl SamplingClient {
                         );
 
                         if let Some(stream_error) = try_parse_stream_error(data) {
-                            Some(Err(stream_error))
+                            Some(Some(Err(stream_error)))
+                        } else if is_chat_chunk_extension_event(data) {
+                            tracing::debug!(
+                                payload_bytes = data.len(),
+                                "Skipping provider extension event on chat/completions stream"
+                            );
+                            Some(None)
                         } else {
-                            Some(
+                            Some(Some(
                                 serde_json::from_str::<ChatCompletionChunk>(data).map_err(|e| {
                                     tracing::error!(
                                         error = %e,
@@ -1316,16 +1431,17 @@ impl SamplingClient {
                                     );
                                     SamplingError::Serialization(e)
                                 }),
-                            )
+                            ))
                         }
                     }
                     Err(e) => {
                         *had_transport_error = true;
-                        Some(Err(SamplingError::EventStreamError(e.to_string())))
+                        Some(Some(Err(SamplingError::EventStreamError(e.to_string()))))
                     }
                 };
                 std::future::ready(item)
             })
+            .filter_map(std::future::ready)
             .boxed();
 
         Ok((chunks, model_metadata))
@@ -2122,6 +2238,22 @@ impl SamplingClient {
 
     /// Apply default configuration to a ConversationRequest.
     fn apply_conversation_defaults(&self, request: &mut ConversationRequest) -> Result<()> {
+        if !self.defaults.capabilities.image_input
+            && request.items.iter().any(|item| match item {
+                xai_grok_sampling_types::ConversationItem::User(user) => user
+                    .content
+                    .iter()
+                    .any(|part| matches!(part, xai_grok_sampling_types::ContentPart::Image { .. })),
+                xai_grok_sampling_types::ConversationItem::ToolResult(result) => {
+                    !result.images.is_empty()
+                }
+                _ => false,
+            })
+        {
+            return Err(SamplingError::InvalidConfiguration(
+                "The selected model does not support image input",
+            ));
+        }
         if request.model.is_none() {
             request.model = Some(self.defaults.model.clone());
         }
@@ -2140,6 +2272,11 @@ impl SamplingClient {
 
         if request.reasoning_effort.is_none() {
             request.reasoning_effort = self.defaults.reasoning_effort;
+        }
+
+        if !self.defaults.capabilities.tools {
+            request.tools.clear();
+            request.hosted_tools.clear();
         }
 
         Ok(())
@@ -2408,7 +2545,10 @@ mod tests {
             temperature: None,
             top_p: None,
             api_backend: ApiBackend::ChatCompletions,
+            transport: InferenceTransport::Http,
             auth_scheme: AuthScheme::Bearer,
+            capabilities: ProviderCapabilities::default(),
+            wire_quirks: WireQuirks::default(),
             extra_headers: IndexMap::new(),
             context_window: 8192,
             force_http1: false,
@@ -2463,9 +2603,9 @@ mod tests {
         let wrapper = StreamingChatRequest {
             inner: &request,
             stream: true,
-            stream_options: StreamOptions {
+            stream_options: Some(StreamOptions {
                 include_usage: true,
-            },
+            }),
         };
 
         let json: serde_json::Value = serde_json::to_value(&wrapper).unwrap();

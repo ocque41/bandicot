@@ -1223,6 +1223,20 @@ impl SessionActor {
             PlanFileRead::Present(s) => Some(s.clone()),
             PlanFileRead::Absent | PlanFileRead::Unreadable => None,
         };
+        let workflow_awaiting_plan =
+            self.plan_mode
+                .lock()
+                .approved_loop()
+                .is_some_and(|workflow| {
+                    workflow.phase
+                        == crate::session::plan_mode::ApprovedLoopPhase::AwaitingPlanApproval
+                });
+        if is_exit_plan_mode && workflow_awaiting_plan && plan_content.is_none() {
+            let message = "The composed workflow requires a non-empty canonical plan.md before explicit approval. Continue planning and call exit_plan_mode again when the plan is ready.".to_string();
+            self.handle_tool_not_executed(&call.id, &tool_call_id, message)
+                .await?;
+            return Ok(Err(ToolLoop::Continue));
+        }
         if should_intercept_exit_plan_approval(
             is_exit_plan_mode,
             is_cursor_switch_to_agent,
@@ -1242,6 +1256,8 @@ impl SessionActor {
                 Ok(parsed) => match PlanApprovalOutcome::from_response(&parsed) {
                     PlanApprovalOutcome::Abandoned => {
                         tracing::info!("[exit_plan_mode] user abandoned plan — deactivating");
+                        self.plan_mode.lock().cancel_approved_loop();
+                        self.persist_plan_mode_state();
                         self.leave_plan_mode_to_default();
                         let message = format!(
                             "The user chose to abandon the plan entirely (via the Abandon option in the plan approval dialog). Plan mode has been disabled. Do not call {} again unless the user explicitly asks to re-enter plan mode.",
@@ -1289,6 +1305,20 @@ impl SessionActor {
                 },
                 Err(err) => {
                     if ext_method_no_client(&err) {
+                        let workflow_requires_approval = self
+                            .plan_mode
+                            .lock()
+                            .approved_loop()
+                            .is_some_and(|workflow| {
+                                workflow.phase
+                                    == crate::session::plan_mode::ApprovedLoopPhase::AwaitingPlanApproval
+                            });
+                        if workflow_requires_approval {
+                            let message = "This workflow requires explicit plan approval, but no client is available to approve it. Plan mode remains active.".to_string();
+                            self.handle_tool_not_executed(&call.id, &tool_call_id, message)
+                                .await?;
+                            return Ok(Err(ToolLoop::Cancelled));
+                        }
                         tracing::debug!(
                             % err, "exit_plan_mode: no client wired; executing tool"
                         );
@@ -1479,6 +1509,8 @@ impl SessionActor {
         match resume_action_for(PlanApprovalOutcome::from_response(&parsed), parsed.feedback) {
             ResumeAction::LeaveOnly => {
                 tracing::info!("[exit_plan_mode] resume: user abandoned plan");
+                self.plan_mode.lock().cancel_approved_loop();
+                self.persist_plan_mode_state();
                 self.leave_plan_mode_to_default();
             }
             ResumeAction::StayAndRevise(text) => {
@@ -1489,12 +1521,12 @@ impl SessionActor {
             ResumeAction::LeaveAndImplement => {
                 tracing::info!("[exit_plan_mode] resume: user approved plan");
                 self.leave_plan_mode_to_default();
-                self.start_resume_turn(
-                    PLAN_APPROVED_IMPLEMENT_MESSAGE.to_string(),
-                    PromptMode::Agent,
-                    completion_tx,
-                )
-                .await;
+                let text = self
+                    .activate_approved_loop_goal()
+                    .await
+                    .unwrap_or_else(|| PLAN_APPROVED_IMPLEMENT_MESSAGE.to_string());
+                self.start_resume_turn(text, PromptMode::Agent, completion_tx)
+                    .await;
             }
         }
     }
@@ -2082,6 +2114,15 @@ impl SessionActor {
             self.send_update(acp::SessionUpdate::Plan(acp_plan), None)
                 .await;
         }
+        let approved_workflow_reminder = if matches!(
+            &result.output,
+            xai_grok_tools::types::output::ToolOutput::ExitPlanMode(_)
+        ) {
+            self.leave_plan_mode_to_default();
+            self.activate_approved_loop_goal().await
+        } else {
+            None
+        };
         #[allow(unused_mut)]
         let mut prompt_text = if concatenated_json_count > 0 && !self.is_cursor_harness() {
             let remaining = concatenated_json_count - 1;
@@ -2101,6 +2142,10 @@ impl SessionActor {
         } else {
             result.prompt_text
         };
+        if let Some(reminder) = approved_workflow_reminder {
+            prompt_text.push_str("\n\n");
+            prompt_text.push_str(&reminder);
+        }
         let mut inline_images: Vec<ContentPart> = Vec::new();
         let extraction = if !self.is_cursor_harness()
             && !matches!(

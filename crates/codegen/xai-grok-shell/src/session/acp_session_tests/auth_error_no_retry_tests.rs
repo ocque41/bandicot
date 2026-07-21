@@ -835,6 +835,9 @@ async fn model_auth_facts_memo_serves_cached_status_and_keys_on_model() {
                 ModelAuthFacts {
                     byok: ModelByok::Byok,
                     auth_scheme: Default::default(),
+                    capabilities: Default::default(),
+                    wire_quirks: Default::default(),
+                    transport: Default::default(),
                 },
             )));
 
@@ -876,6 +879,9 @@ async fn reconstruct_full_config_no_bearer_resolver_for_byok_model_on_session_me
                 ModelAuthFacts {
                     byok: ModelByok::Byok,
                     auth_scheme: Default::default(),
+                    capabilities: Default::default(),
+                    wire_quirks: Default::default(),
+                    transport: Default::default(),
                 },
             )));
 
@@ -921,6 +927,9 @@ async fn set_session_model_invalidates_byok_memo_for_same_model_id() {
                 ModelAuthFacts {
                     byok: ModelByok::NotByok,
                     auth_scheme: Default::default(),
+                    capabilities: Default::default(),
+                    wire_quirks: Default::default(),
+                    transport: Default::default(),
                 },
             )));
 
@@ -934,7 +943,10 @@ async fn set_session_model_invalidates_byok_memo_for_same_model_id() {
                 temperature: None,
                 top_p: None,
                 api_backend: crate::sampling::ApiBackend::ChatCompletions,
+                transport: Default::default(),
                 auth_scheme: Default::default(),
+                capabilities: Default::default(),
+                wire_quirks: Default::default(),
                 extra_headers: Default::default(),
                 context_window: 256_000,
                 client_version: None,

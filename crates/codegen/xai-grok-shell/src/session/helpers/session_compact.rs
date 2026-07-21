@@ -62,6 +62,7 @@ fn classify_sampling_error(err: SamplingError) -> CompactFailure {
         | SamplingError::InvalidConfiguration(_)
         | SamplingError::Serialization(_)
         | SamplingError::IdleTimeout { .. } => true,
+        SamplingError::NativeTransport { retryable, .. } => !retryable,
         SamplingError::Api {
             status, message, ..
         } => {
@@ -1593,7 +1594,10 @@ mod reasoning_compaction_regression_tests {
             temperature: Some(0.7),
             top_p: None,
             api_backend: ApiBackend::ChatCompletions,
+            transport: Default::default(),
             auth_scheme: Default::default(),
+            capabilities: Default::default(),
+            wire_quirks: Default::default(),
             extra_headers: Default::default(),
             context_window: 256_000,
             client_version: None,

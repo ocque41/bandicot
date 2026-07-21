@@ -33,7 +33,7 @@ pub enum ImportScope {
 /// Which `[paths]` field a `PathEntry` populates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PathKind {
-    /// Maps to `[paths] extra_skill_dirs`.
+    /// Maps to `[skills].paths`.
     Skill,
     /// Maps to `[paths] extra_rule_dirs`.
     Rule,
@@ -59,7 +59,7 @@ pub enum ImportableItem {
         command: String,
         timeout: Option<u64>,
     },
-    /// A path entry to add to `[paths] extra_skill_dirs` or `extra_rule_dirs`.
+    /// A path entry to add to `[skills].paths` or `[paths].extra_rule_dirs`.
     PathEntry { kind: PathKind, path: String },
 }
 
@@ -567,7 +567,7 @@ pub(crate) fn reset_marker_cache_for_test() {
 /// `~user/` (other-user home) is **not** supported — this is a config field,
 /// not a shell input, so the surface is intentionally narrow.
 ///
-/// Shared by `extensions/skills.rs` (skills paths from `[paths] extra_skill_dirs`)
+/// Shared by `extensions/skills.rs` (skills paths from `[skills].paths`)
 /// and `inspect.rs` (rules paths from `[paths] extra_rule_dirs`) so both call
 /// sites apply identical normalisation.
 pub fn expand_home(s: &str) -> std::path::PathBuf {
@@ -832,7 +832,7 @@ fn apply_items_to_config(config_path: &Path, items: &[ImportableItem]) -> anyhow
     }
 
     if !skill_dirs.is_empty() {
-        count += merge_paths(table, "extra_skill_dirs", &skill_dirs)?;
+        count += merge_skill_paths(table, &skill_dirs)?;
     }
     if !rule_dirs.is_empty() {
         count += merge_paths(table, "extra_rule_dirs", &rule_dirs)?;
@@ -1044,6 +1044,38 @@ fn merge_paths(
     for p in new_paths {
         if !existing_set.contains(*p) {
             existing.push(TomlValue::String(p.to_string()));
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+/// Merge imported skill directories into the production `[skills].paths`
+/// field consumed by `SkillsConfig`.
+fn merge_skill_paths(
+    table: &mut TomlMap<String, TomlValue>,
+    new_paths: &[&str],
+) -> anyhow::Result<usize> {
+    let skills = table
+        .entry("skills")
+        .or_insert_with(|| TomlValue::Table(TomlMap::new()));
+    let skills_table = skills
+        .as_table_mut()
+        .ok_or_else(|| anyhow::anyhow!("[skills] is not a table"))?;
+    let arr = skills_table
+        .entry("paths")
+        .or_insert_with(|| TomlValue::Array(Vec::new()));
+    let existing = arr
+        .as_array_mut()
+        .ok_or_else(|| anyhow::anyhow!("skills.paths is not an array"))?;
+    let existing_set: std::collections::HashSet<String> = existing
+        .iter()
+        .filter_map(|v| v.as_str().map(str::to_owned))
+        .collect();
+    let mut count = 0;
+    for path in new_paths {
+        if !existing_set.contains(*path) {
+            existing.push(TomlValue::String((*path).to_owned()));
             count += 1;
         }
     }
@@ -2061,12 +2093,25 @@ extra_rule_dirs = ["/c/rules"]
         let content = std::fs::read_to_string(&path).unwrap();
         let parsed: TomlValue = toml::from_str(&content).unwrap();
         assert_eq!(
-            parsed["paths"]["extra_skill_dirs"][0].as_str().unwrap(),
+            parsed["skills"]["paths"][0].as_str().unwrap(),
             "/foo/skills"
         );
         assert_eq!(
             parsed["paths"]["extra_rule_dirs"][0].as_str().unwrap(),
             "/bar/rules"
+        );
+    }
+
+    #[test]
+    fn legacy_extra_skill_dirs_feed_production_skills_paths() {
+        let raw: TomlValue = toml::from_str(
+            "[paths]\nextra_skill_dirs = [\"/legacy/skills\"]\n[skills]\npaths = [\"/native/skills\"]\n",
+        )
+        .unwrap();
+        let config = crate::agent::config::Config::new_from_toml_cfg(&raw).unwrap();
+        assert_eq!(
+            config.skills.paths,
+            vec!["/native/skills".to_string(), "/legacy/skills".to_string()]
         );
     }
 

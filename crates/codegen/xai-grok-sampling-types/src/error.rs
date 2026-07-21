@@ -110,6 +110,12 @@ pub enum SamplingError {
     /// Server-side stream error (sent as JSON within the SSE stream)
     #[error("stream error ({error_type}): {message}")]
     StreamError { error_type: String, message: String },
+    #[error("native transport error ({code}): {message}")]
+    NativeTransport {
+        code: String,
+        message: String,
+        retryable: bool,
+    },
     /// Per-chunk idle timeout — no SSE chunk received from the model within the
     /// configured deadline. NOT retryable: the model (or network path) is stuck,
     /// and replaying the same request would likely stall again.
@@ -249,6 +255,7 @@ impl SamplingError {
             }
             SamplingError::EventStreamError(_) => true,
             SamplingError::StreamError { .. } => true,
+            SamplingError::NativeTransport { retryable, .. } => *retryable,
             SamplingError::IdleTimeout { .. } => false,
             SamplingError::EmptyResponse { .. } => true,
             SamplingError::MaxTokensTruncation => false,
@@ -284,11 +291,52 @@ impl SamplingError {
     /// so retrying the same payload can't help. See [`is_context_length_error`].
     pub fn is_context_length_error(&self) -> bool {
         match self {
-            SamplingError::Api { message, .. } | SamplingError::StreamError { message, .. } => {
-                is_context_length_error(message)
+            SamplingError::Api { message, .. }
+            | SamplingError::StreamError { message, .. }
+            | SamplingError::NativeTransport { message, .. } => is_context_length_error(message),
+            _ => false,
+        }
+    }
+
+    /// True when the provider reports billing/quota exhaustion rather than a
+    /// transient rate limit. Used by account failover (not transport retry).
+    pub fn is_quota_exhausted(&self) -> bool {
+        match self {
+            SamplingError::Api {
+                status, message, ..
+            } => is_quota_exhausted_status_and_message(status.as_u16(), message),
+            SamplingError::StreamError { message, .. }
+            | SamplingError::NativeTransport { message, .. } => {
+                is_quota_exhausted_message(message)
             }
             _ => false,
         }
+    }
+
+    /// True when the error should advance an account/provider fallback chain
+    /// after same-account transport retries are exhausted.
+    ///
+    /// Does not cover context-length, image processing, encrypted content, or
+    /// generic client errors.
+    pub fn is_account_failover_candidate(&self) -> bool {
+        if self.is_context_length_error()
+            || self.is_encrypted_content_error()
+            || self.is_image_processing_error()
+            || self.is_payload_too_large()
+        {
+            return false;
+        }
+        if self.is_rate_limited() || self.is_quota_exhausted() {
+            return true;
+        }
+        // BYOK 401: credential rejected; next account may work.
+        matches!(
+            self,
+            SamplingError::Api {
+                status: StatusCode::UNAUTHORIZED,
+                ..
+            }
+        )
     }
 }
 
@@ -382,6 +430,51 @@ pub fn is_context_length_error(message: &str) -> bool {
         || m.contains("maximum prompt length")
         || m.contains("maximum context length")
         || m.contains("context_length_exceeded")
+}
+
+/// Status + message check for hard quota / billing exhaustion.
+pub fn is_quota_exhausted_status_and_message(status: u16, message: &str) -> bool {
+    if status == 402 {
+        return true;
+    }
+    // Some gateways return 403/429 with billing language.
+    if matches!(status, 403 | 429 | 400) && is_quota_exhausted_message(message) {
+        return true;
+    }
+    is_quota_exhausted_message(message) && matches!(status, 402 | 403 | 429 | 400 | 500)
+}
+
+/// Message heuristics for quota/billing exhaustion across OpenAI, Anthropic,
+/// and OpenCode-style gateways.
+pub fn is_quota_exhausted_message(message: &str) -> bool {
+    let m = message.to_ascii_lowercase();
+    const NEEDLES: &[&str] = &[
+        "insufficient_quota",
+        "insufficient quota",
+        "exceeded your current quota",
+        "quota exceeded",
+        "quota_exceeded",
+        "billing_hard_limit",
+        "billing hard limit",
+        "credit balance is too low",
+        "credits exhausted",
+        "out of credits",
+        "usage limit",
+        "usage_limit",
+        "rate limit reached for",
+        "monthly limit",
+        "daily limit",
+        "plan limit",
+        "spending limit",
+        "budget exceeded",
+        "payment required",
+        "account has been depleted",
+        "you have hit your limit",
+        "you've hit your limit",
+        "limit reached",
+        "subscription limit",
+    ];
+    NEEDLES.iter().any(|n| m.contains(n))
 }
 
 /// Decide whether a [`reqwest::Error`] is worth retrying.
@@ -786,4 +879,69 @@ mod tests {
             "direct 400 must not be retryable by is_retryable()"
         );
     }
+    #[test]
+    fn quota_exhausted_insufficient_quota_detected() {
+        let err = SamplingError::Api {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            message: "insufficient_quota: You exceeded your current quota".into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+        };
+        assert!(err.is_quota_exhausted());
+        assert!(err.is_account_failover_candidate());
+    }
+
+    #[test]
+    fn quota_exhausted_402_detected() {
+        let err = SamplingError::Api {
+            status: StatusCode::PAYMENT_REQUIRED,
+            message: "Payment required".into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+        };
+        assert!(err.is_quota_exhausted());
+        assert!(err.is_account_failover_candidate());
+    }
+
+    #[test]
+    fn rate_limited_is_failover_candidate() {
+        let err = SamplingError::Api {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            message: "Rate limit exceeded".into(),
+            model_metadata: None,
+            retry_after_secs: Some(30),
+            should_retry: None,
+        };
+        assert!(err.is_rate_limited());
+        assert!(err.is_account_failover_candidate());
+    }
+
+    #[test]
+    fn context_length_is_not_failover_candidate() {
+        let err = SamplingError::Api {
+            status: StatusCode::BAD_REQUEST,
+            message: "This model's maximum context length is 128000 tokens".into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+        };
+        assert!(err.is_context_length_error());
+        assert!(!err.is_account_failover_candidate());
+    }
+
+    #[test]
+    fn generic_400_is_not_failover_candidate() {
+        let err = SamplingError::Api {
+            status: StatusCode::BAD_REQUEST,
+            message: "Invalid model parameter".into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: None,
+        };
+        assert!(!err.is_account_failover_candidate());
+        assert!(!err.is_quota_exhausted());
+    }
+
 }

@@ -2,7 +2,7 @@
 set -eu
 umask 077
 
-KEYCHAIN_SERVICE=${GROK_OPENAI_KEYCHAIN_SERVICE:-ocque41.grok-build.openai}
+KEYCHAIN_SERVICE=${BANDICOT_KEYCHAIN_SERVICE:-bandicot.openai}
 KEYCHAIN_ACCOUNT=${GROK_OPENAI_KEYCHAIN_ACCOUNT:-openai-platform}
 REPLACE=0
 
@@ -32,7 +32,7 @@ fi
 
 if [ ! -x /usr/bin/security ]; then
     printf '%s\n' 'error: macOS Keychain is unavailable at /usr/bin/security.' >&2
-    printf '%s\n' 'Set OPENAI_API_KEY in the process that launches grok-openai instead.' >&2
+    printf '%s\n' 'Set OPENAI_API_KEY in the process that launches Bandicot instead.' >&2
     exit 1
 fi
 
@@ -40,7 +40,7 @@ if [ "$REPLACE" -eq 0 ] && /usr/bin/security find-generic-password \
     -a "$KEYCHAIN_ACCOUNT" \
     -s "$KEYCHAIN_SERVICE" \
     -w >/dev/null 2>&1; then
-    printf '%s\n' 'An OpenAI API key is already stored in macOS Keychain for grok-openai.'
+    printf '%s\n' 'An OpenAI API key is already stored in macOS Keychain for Bandicot.'
     printf '%s\n' 'Run scripts/setup-openai-key.sh --replace to replace it securely.'
     exit 0
 fi
@@ -54,7 +54,7 @@ printf '%s\n' 'The key is passed directly to Keychain; this script does not echo
     -U \
     -a "$KEYCHAIN_ACCOUNT" \
     -s "$KEYCHAIN_SERVICE" \
-    -l 'grok-openai OpenAI Platform API key' \
+    -l 'Bandicot OpenAI Platform API key' \
     -w
 
 if ! /usr/bin/security find-generic-password \
@@ -65,4 +65,4 @@ if ! /usr/bin/security find-generic-password \
     exit 1
 fi
 
-printf '%s\n' 'OpenAI API key stored in macOS Keychain for grok-openai.'
+printf '%s\n' 'OpenAI API key stored in macOS Keychain for Bandicot.'

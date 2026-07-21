@@ -1,0 +1,28 @@
+# Cerebras profile - DEPRECATED
+# Cerebras has been removed from the active provider set.
+# This profile is retained for reference only.
+
+[cli]
+auto_update = false
+
+[models]
+default = "openai-latest"
+default_reasoning_effort = "medium"
+allowed_models = ["openai-*", "go-*", "ollama-*", "apple-*"]
+
+[features]
+telemetry = false
+feedback = false
+managed_config = false
+remote_fetch = false
+backend_tools = false
+video_gen = false
+voice_mode = false
+
+[telemetry]
+trace_upload = false
+mixpanel_enabled = false
+otel_enabled = false
+
+[diagnostics]
+error_reporting = false

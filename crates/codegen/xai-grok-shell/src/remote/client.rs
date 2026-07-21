@@ -840,6 +840,21 @@ pub fn parse_remote_model_value(
         api_key: get_string(obj, "apiKey").or_else(|| get_string(obj, "api_key")),
         env_key: get_env_keys(obj, "envKey").or_else(|| get_env_keys(obj, "env_key")),
         api_backend,
+        transport: Default::default(),
+        auth_scheme: get_string(obj, "authScheme")
+            .or_else(|| get_string(obj, "auth_scheme"))
+            .and_then(|value| serde_json::from_value(serde_json::Value::String(value)).ok()),
+        capabilities: obj
+            .get("capabilities")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok())
+            .unwrap_or_default(),
+        wire_quirks: obj
+            .get("wireQuirks")
+            .or_else(|| obj.get("wire_quirks"))
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok())
+            .unwrap_or_default(),
         context_window,
         auto_compact_threshold_percent: get_u64(obj, "autoCompactThresholdPercent")
             .or_else(|| get_u64(obj, "auto_compact_threshold_percent"))
@@ -872,7 +887,6 @@ pub fn parse_remote_model_value(
             .or_else(|| meta.and_then(|m| m.get("supportedInApi")))
             .and_then(|v| v.as_bool())
             .unwrap_or(true),
-        auth_scheme: None,
         reasoning_effort: get_string(obj, "reasoningEffort")
             .or_else(|| get_string(obj, "reasoning_effort"))
             .or_else(|| meta.and_then(|m| get_string(m, "reasoningEffort")))

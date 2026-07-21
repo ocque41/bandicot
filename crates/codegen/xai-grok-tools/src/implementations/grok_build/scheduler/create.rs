@@ -8,7 +8,8 @@ use super::types::{ScheduledTask, SchedulerCommand, SchedulerHandle};
 // Canonical /loop wording lives in the light API crate so other consumers can
 // link it without the tools implementation crate; re-exported to keep paths stable.
 pub use xai_grok_tools_api::slash_commands::{
-    SCHEDULER_CREATE_TOOL_NAME, loop_schedule_instruction, loop_usage_message,
+    ApprovedLoopWorkflow, SCHEDULER_CREATE_TOOL_NAME, loop_schedule_instruction,
+    loop_usage_message, parse_approved_loop_workflow, parse_explicit_loop,
 };
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
@@ -62,6 +63,46 @@ pub struct SchedulerCreateOutput {
     pub id: String,
     pub human_schedule: String,
     pub recurring: bool,
+}
+
+pub async fn create_scheduled_task(
+    handle: &SchedulerHandle,
+    input: SchedulerCreateInput,
+) -> Result<SchedulerCreateOutput, SchedulerCreateError> {
+    let interval_secs = parse_interval(&input.interval)?;
+    let task = ScheduledTask::with_fire_immediately(
+        interval_secs,
+        input.prompt,
+        input.recurring,
+        input.durable.unwrap_or(false),
+        input.fire_immediately,
+    );
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    handle
+        .0
+        .send(SchedulerCommand::Create {
+            task,
+            reply: reply_tx,
+        })
+        .map_err(|_| SchedulerCreateError::ActorStopped)?;
+    let created = reply_rx
+        .await
+        .map_err(|_| SchedulerCreateError::ReplyDropped)??;
+    Ok(SchedulerCreateOutput {
+        id: created.id,
+        human_schedule: interval_to_human(interval_secs),
+        recurring: input.recurring,
+    })
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SchedulerCreateError {
+    #[error(transparent)]
+    Scheduler(#[from] super::types::SchedulerError),
+    #[error("Scheduler actor stopped")]
+    ActorStopped,
+    #[error("Scheduler actor dropped reply")]
+    ReplyDropped,
 }
 
 impl xai_tool_runtime::ToolOutput for SchedulerCreateOutput {}
@@ -143,53 +184,17 @@ impl xai_tool_runtime::Tool for SchedulerCreateTool {
         use crate::types::tool_metadata::shared_resources;
         let resources = shared_resources(&ctx)?;
 
-        let interval_secs = parse_interval(&input.interval)
-            .map_err(|e| xai_tool_runtime::ToolError::invalid_arguments(e.to_string()))?;
-
-        let sender = {
+        let handle = {
             let res = resources.lock().await;
             res.get::<SchedulerHandle>()
                 .ok_or_else(|| {
                     xai_tool_runtime::ToolError::custom("missing_resource", "SchedulerHandle")
                 })?
-                .0
                 .clone()
         };
-
-        let durable = input.durable.unwrap_or(false);
-        let task = ScheduledTask::with_fire_immediately(
-            interval_secs,
-            input.prompt,
-            input.recurring,
-            durable,
-            input.fire_immediately,
-        );
-
-        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        sender
-            .send(SchedulerCommand::Create {
-                task: task.clone(),
-                reply: reply_tx,
-            })
-            .map_err(|_| {
-                xai_tool_runtime::ToolError::custom("process_manager", "Scheduler actor stopped")
-            })?;
-
-        let created = reply_rx
+        create_scheduled_task(&handle, input)
             .await
-            .map_err(|_| {
-                xai_tool_runtime::ToolError::custom(
-                    "process_manager",
-                    "Scheduler actor dropped reply",
-                )
-            })?
-            .map_err(|e| xai_tool_runtime::ToolError::invalid_arguments(e.to_string()))?;
-
-        Ok(SchedulerCreateOutput {
-            id: created.id,
-            human_schedule: interval_to_human(interval_secs),
-            recurring: input.recurring,
-        })
+            .map_err(|error| xai_tool_runtime::ToolError::invalid_arguments(error.to_string()))
     }
 }
 

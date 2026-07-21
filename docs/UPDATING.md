@@ -52,15 +52,15 @@ The script performs the following transaction:
 8. only after every gate passes, pushes the exact tested candidate SHA to
    `origin/main` with a normal, non-force push;
 9. only after that push succeeds, fast-forwards local `main` to the same tested
-   commit and installs the validated build through `install-openai.sh`;
+   commit and installs the validated build through `install-bandicot.sh`;
 10. only after the installation succeeds, removes the temporary candidate
    worktree and branch.
 
 If fetch fails before a candidate exists, the script exits non-zero without
-changing repository refs, the worktree, the installed `grok-openai`, or the
+changing repository refs, the worktree, the installed `bandicot`, or the
 remote fork. On a first run it may still create or repair the read-only
 `upstream` remote before that fetch. If merge, test, build, or another
-pre-publication gate fails, the real `main`, installed `grok-openai`, and remote
+pre-publication gate fails, the real `main`, installed `bandicot`, and remote
 fork remain unchanged; the failed candidate worktree and branch are
 intentionally retained, and their locations are reported so the failure can be
 inspected without recreating it. There is no force push, destructive reset, xAI
@@ -131,7 +131,7 @@ by exporting account credentials into the candidate gate.
 If installation fails after the tested candidate has been published, local
 `main` and `origin/main` already point to that candidate. The updater retains
 the candidate worktree and branch and reports the failure. Diagnose the
-installation error, then rerun `scripts/install-openai.sh` from the updated
+installation error, then rerun `scripts/install-bandicot.sh` from the updated
 `main`; do not assume the previous installed binary was replaced successfully.
 
 ## Before running it
@@ -192,7 +192,7 @@ git status --short --branch
 git log -1 --oneline --decorate
 git rev-parse main
 git rev-parse origin/main
-~/.local/bin/grok-openai --version
+~/.local/bin/bandicot --version
 ```
 
 The two revisions must match and the tree must be clean. The successful normal

@@ -1,0 +1,325 @@
+# Secret-free OpenCode Go profile. Set OPENCODE_GO_API_KEY in the environment.
+# OpenCode Go serves every subscription model through one OpenAI-compatible
+# Chat Completions endpoint.
+
+[cli]
+auto_update = false
+
+[models]
+default = "go-kimi-k3"
+web_search = "go-deepseek-v4-flash"
+session_summary = "go-deepseek-v4-flash"
+image_description = "go-kimi-k2.5"
+prompt_suggestion = "go-deepseek-v4-flash"
+allowed_models = ["go-*"]
+
+[features]
+telemetry = false
+feedback = false
+managed_config = false
+remote_fetch = false
+backend_tools = false
+video_gen = false
+voice_mode = false
+
+[telemetry]
+trace_upload = false
+mixpanel_enabled = false
+otel_enabled = false
+
+[diagnostics]
+error_reporting = false
+
+[model.go-kimi-k3]
+model = "kimi-k3"
+base_url = "https://opencode.ai/zen/go/v1"
+name = "OpenCode Go Kimi K3"
+env_key = "OPENCODE_GO_API_KEY"
+api_backend = "chat_completions"
+auth_scheme = "bearer"
+context_window = 1048576
+auto_compact_threshold_percent = 92
+max_completion_tokens = 131072
+agent_type = "codex"
+capabilities = { tools = true, image_input = true }
+wire_quirks = { chat_max_tokens_field = "max_tokens", reasoning_response_field = "reasoning_content", send_stream_options = true, send_tool_choice = true }
+
+[model."go-kimi-k2.7-code"]
+model = "kimi-k2.7-code"
+base_url = "https://opencode.ai/zen/go/v1"
+name = "OpenCode Go Kimi K2.7 Code"
+env_key = "OPENCODE_GO_API_KEY"
+api_backend = "chat_completions"
+auth_scheme = "bearer"
+context_window = 262144
+auto_compact_threshold_percent = 92
+max_completion_tokens = 262144
+agent_type = "codex"
+capabilities = { tools = true, image_input = true }
+wire_quirks = { chat_max_tokens_field = "max_tokens", reasoning_response_field = "reasoning_content", send_stream_options = true, send_tool_choice = true }
+
+[model."go-kimi-k2.6"]
+model = "kimi-k2.6"
+base_url = "https://opencode.ai/zen/go/v1"
+name = "OpenCode Go Kimi K2.6"
+env_key = "OPENCODE_GO_API_KEY"
+api_backend = "chat_completions"
+auth_scheme = "bearer"
+context_window = 262144
+auto_compact_threshold_percent = 92
+max_completion_tokens = 65536
+agent_type = "codex"
+capabilities = { tools = true, image_input = true }
+wire_quirks = { chat_max_tokens_field = "max_tokens", reasoning_response_field = "reasoning_content", send_stream_options = true, send_tool_choice = true }
+
+[model."go-kimi-k2.5"]
+model = "kimi-k2.5"
+base_url = "https://opencode.ai/zen/go/v1"
+name = "OpenCode Go Kimi K2.5"
+env_key = "OPENCODE_GO_API_KEY"
+api_backend = "chat_completions"
+auth_scheme = "bearer"
+context_window = 262144
+auto_compact_threshold_percent = 92
+max_completion_tokens = 65536
+agent_type = "codex"
+capabilities = { tools = true, image_input = true }
+wire_quirks = { chat_max_tokens_field = "max_tokens", reasoning_response_field = "reasoning_content", send_stream_options = true, send_tool_choice = true }
+
+[model."go-glm-5.2"]
+model = "glm-5.2"
+base_url = "https://opencode.ai/zen/go/v1"
+name = "OpenCode Go GLM-5.2"
+env_key = "OPENCODE_GO_API_KEY"
+api_backend = "chat_completions"
+auth_scheme = "bearer"
+context_window = 1000000
+auto_compact_threshold_percent = 92
+max_completion_tokens = 131072
+agent_type = "codex"
+capabilities = { tools = true, image_input = false }
+wire_quirks = { chat_max_tokens_field = "max_tokens", reasoning_response_field = "reasoning_content", send_stream_options = true, send_tool_choice = true }
+
+[model."go-glm-5.1"]
+model = "glm-5.1"
+base_url = "https://opencode.ai/zen/go/v1"
+name = "OpenCode Go GLM-5.1"
+env_key = "OPENCODE_GO_API_KEY"
+api_backend = "chat_completions"
+auth_scheme = "bearer"
+context_window = 202752
+auto_compact_threshold_percent = 92
+max_completion_tokens = 32768
+agent_type = "codex"
+capabilities = { tools = true, image_input = false }
+wire_quirks = { chat_max_tokens_field = "max_tokens", reasoning_response_field = "reasoning_content", send_stream_options = true, send_tool_choice = true }
+
+[model.go-glm-5]
+model = "glm-5"
+base_url = "https://opencode.ai/zen/go/v1"
+name = "OpenCode Go GLM-5"
+env_key = "OPENCODE_GO_API_KEY"
+api_backend = "chat_completions"
+auth_scheme = "bearer"
+context_window = 202752
+auto_compact_threshold_percent = 92
+max_completion_tokens = 32768
+agent_type = "codex"
+capabilities = { tools = true, image_input = false }
+wire_quirks = { chat_max_tokens_field = "max_tokens", reasoning_response_field = "reasoning_content", send_stream_options = true, send_tool_choice = true }
+
+[model.go-minimax-m3]
+model = "minimax-m3"
+base_url = "https://opencode.ai/zen/go/v1"
+name = "OpenCode Go MiniMax-M3"
+env_key = "OPENCODE_GO_API_KEY"
+api_backend = "chat_completions"
+auth_scheme = "bearer"
+context_window = 1000000
+auto_compact_threshold_percent = 92
+max_completion_tokens = 131072
+agent_type = "codex"
+capabilities = { tools = true, image_input = true }
+wire_quirks = { chat_max_tokens_field = "max_tokens", reasoning_response_field = "reasoning_content", send_stream_options = true, send_tool_choice = true }
+
+[model."go-minimax-m2.7"]
+model = "minimax-m2.7"
+base_url = "https://opencode.ai/zen/go/v1"
+name = "OpenCode Go MiniMax-M2.7"
+env_key = "OPENCODE_GO_API_KEY"
+api_backend = "chat_completions"
+auth_scheme = "bearer"
+context_window = 204800
+auto_compact_threshold_percent = 92
+max_completion_tokens = 131072
+agent_type = "codex"
+capabilities = { tools = true, image_input = false }
+wire_quirks = { chat_max_tokens_field = "max_tokens", reasoning_response_field = "reasoning_content", send_stream_options = true, send_tool_choice = true }
+
+[model."go-minimax-m2.5"]
+model = "minimax-m2.5"
+base_url = "https://opencode.ai/zen/go/v1"
+name = "OpenCode Go MiniMax-M2.5"
+env_key = "OPENCODE_GO_API_KEY"
+api_backend = "chat_completions"
+auth_scheme = "bearer"
+context_window = 204800
+auto_compact_threshold_percent = 92
+max_completion_tokens = 65536
+agent_type = "codex"
+capabilities = { tools = true, image_input = false }
+wire_quirks = { chat_max_tokens_field = "max_tokens", reasoning_response_field = "reasoning_content", send_stream_options = true, send_tool_choice = true }
+
+[model."go-mimo-v2.5-pro"]
+model = "mimo-v2.5-pro"
+base_url = "https://opencode.ai/zen/go/v1"
+name = "OpenCode Go MiMo V2.5 Pro"
+env_key = "OPENCODE_GO_API_KEY"
+api_backend = "chat_completions"
+auth_scheme = "bearer"
+context_window = 1048576
+auto_compact_threshold_percent = 92
+max_completion_tokens = 128000
+agent_type = "codex"
+capabilities = { tools = true, image_input = false }
+wire_quirks = { chat_max_tokens_field = "max_tokens", reasoning_response_field = "reasoning_content", send_stream_options = true, send_tool_choice = true }
+
+[model."go-mimo-v2.5"]
+model = "mimo-v2.5"
+base_url = "https://opencode.ai/zen/go/v1"
+name = "OpenCode Go MiMo V2.5"
+env_key = "OPENCODE_GO_API_KEY"
+api_backend = "chat_completions"
+auth_scheme = "bearer"
+context_window = 1000000
+auto_compact_threshold_percent = 92
+max_completion_tokens = 128000
+agent_type = "codex"
+capabilities = { tools = true, image_input = true }
+wire_quirks = { chat_max_tokens_field = "max_tokens", reasoning_response_field = "reasoning_content", send_stream_options = true, send_tool_choice = true }
+
+[model.go-mimo-v2-pro]
+model = "mimo-v2-pro"
+base_url = "https://opencode.ai/zen/go/v1"
+name = "OpenCode Go MiMo V2 Pro"
+env_key = "OPENCODE_GO_API_KEY"
+api_backend = "chat_completions"
+auth_scheme = "bearer"
+context_window = 1048576
+auto_compact_threshold_percent = 92
+max_completion_tokens = 128000
+agent_type = "codex"
+capabilities = { tools = true, image_input = false }
+wire_quirks = { chat_max_tokens_field = "max_tokens", reasoning_response_field = "reasoning_content", send_stream_options = true, send_tool_choice = true }
+
+[model.go-mimo-v2-omni]
+model = "mimo-v2-omni"
+base_url = "https://opencode.ai/zen/go/v1"
+name = "OpenCode Go MiMo V2 Omni"
+env_key = "OPENCODE_GO_API_KEY"
+api_backend = "chat_completions"
+auth_scheme = "bearer"
+context_window = 262144
+auto_compact_threshold_percent = 92
+max_completion_tokens = 128000
+agent_type = "codex"
+capabilities = { tools = true, image_input = true }
+wire_quirks = { chat_max_tokens_field = "max_tokens", reasoning_response_field = "reasoning_content", send_stream_options = true, send_tool_choice = true }
+
+[model.go-deepseek-v4-pro]
+model = "deepseek-v4-pro"
+base_url = "https://opencode.ai/zen/go/v1"
+name = "OpenCode Go DeepSeek V4 Pro"
+env_key = "OPENCODE_GO_API_KEY"
+api_backend = "chat_completions"
+auth_scheme = "bearer"
+context_window = 1000000
+auto_compact_threshold_percent = 92
+max_completion_tokens = 384000
+agent_type = "codex"
+capabilities = { tools = true, image_input = false }
+wire_quirks = { chat_max_tokens_field = "max_tokens", reasoning_response_field = "reasoning_content", send_stream_options = true, send_tool_choice = true }
+
+[model.go-deepseek-v4-flash]
+model = "deepseek-v4-flash"
+base_url = "https://opencode.ai/zen/go/v1"
+name = "OpenCode Go DeepSeek V4 Flash"
+env_key = "OPENCODE_GO_API_KEY"
+api_backend = "chat_completions"
+auth_scheme = "bearer"
+context_window = 1000000
+auto_compact_threshold_percent = 92
+max_completion_tokens = 384000
+agent_type = "codex"
+capabilities = { tools = true, image_input = false }
+wire_quirks = { chat_max_tokens_field = "max_tokens", reasoning_response_field = "reasoning_content", send_stream_options = true, send_tool_choice = true }
+
+[model."go-qwen3.7-max"]
+model = "qwen3.7-max"
+base_url = "https://opencode.ai/zen/go/v1"
+name = "OpenCode Go Qwen3.7 Max"
+env_key = "OPENCODE_GO_API_KEY"
+api_backend = "chat_completions"
+auth_scheme = "bearer"
+context_window = 1000000
+auto_compact_threshold_percent = 92
+max_completion_tokens = 65536
+agent_type = "codex"
+capabilities = { tools = true, image_input = false }
+wire_quirks = { chat_max_tokens_field = "max_tokens", reasoning_response_field = "reasoning_content", send_stream_options = true, send_tool_choice = true }
+
+[model."go-qwen3.7-plus"]
+model = "qwen3.7-plus"
+base_url = "https://opencode.ai/zen/go/v1"
+name = "OpenCode Go Qwen3.7 Plus"
+env_key = "OPENCODE_GO_API_KEY"
+api_backend = "chat_completions"
+auth_scheme = "bearer"
+context_window = 1000000
+auto_compact_threshold_percent = 92
+max_completion_tokens = 65536
+agent_type = "codex"
+capabilities = { tools = true, image_input = true }
+wire_quirks = { chat_max_tokens_field = "max_tokens", reasoning_response_field = "reasoning_content", send_stream_options = true, send_tool_choice = true }
+
+[model."go-qwen3.6-plus"]
+model = "qwen3.6-plus"
+base_url = "https://opencode.ai/zen/go/v1"
+name = "OpenCode Go Qwen3.6 Plus"
+env_key = "OPENCODE_GO_API_KEY"
+api_backend = "chat_completions"
+auth_scheme = "bearer"
+context_window = 1000000
+auto_compact_threshold_percent = 92
+max_completion_tokens = 65536
+agent_type = "codex"
+capabilities = { tools = true, image_input = true }
+wire_quirks = { chat_max_tokens_field = "max_tokens", reasoning_response_field = "reasoning_content", send_stream_options = true, send_tool_choice = true }
+
+[model."go-qwen3.5-plus"]
+model = "qwen3.5-plus"
+base_url = "https://opencode.ai/zen/go/v1"
+name = "OpenCode Go Qwen3.5 Plus"
+env_key = "OPENCODE_GO_API_KEY"
+api_backend = "chat_completions"
+auth_scheme = "bearer"
+context_window = 262144
+auto_compact_threshold_percent = 92
+max_completion_tokens = 65536
+agent_type = "codex"
+capabilities = { tools = true, image_input = true }
+wire_quirks = { chat_max_tokens_field = "max_tokens", reasoning_response_field = "reasoning_content", send_stream_options = true, send_tool_choice = true }
+
+[model."go-grok-4.5"]
+model = "grok-4.5"
+base_url = "https://opencode.ai/zen/go/v1"
+name = "OpenCode Go Grok 4.5"
+env_key = "OPENCODE_GO_API_KEY"
+api_backend = "chat_completions"
+auth_scheme = "bearer"
+context_window = 500000
+auto_compact_threshold_percent = 92
+max_completion_tokens = 500000
+agent_type = "codex"
+capabilities = { tools = true, image_input = true }
+wire_quirks = { chat_max_tokens_field = "max_tokens", reasoning_response_field = "reasoning_content", send_stream_options = true, send_tool_choice = true }

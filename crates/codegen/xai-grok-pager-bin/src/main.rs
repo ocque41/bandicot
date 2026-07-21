@@ -1006,7 +1006,7 @@ async fn run_agent_command(
     let is_leader = matches!(agent_args.mode, Some(AgentCmd::Leader(_)));
     if !is_stdio && !is_leader {
         eprintln!(
-            "Grok Build (pager) - v{}",
+            "Bandicot (pager) - v{}",
             xai_grok_version::display_version_with_commit(
                 env!("VERSION_WITH_COMMIT"),
                 xai_grok_update::channel_label(),
@@ -1609,10 +1609,10 @@ fn main() {
     );
     raise_fd_limit();
     if let Err(e) = xai_grok_config::validate_requirements() {
-        eprintln!("Couldn't start Grok: {e}");
+        eprintln!("Couldn't start Bandicot: {e}");
         eprintln!();
         eprintln!(
-            "Update Grok to a version the policy allows, or ask your administrator \
+            "Update Bandicot to a version the policy allows, or ask your administrator \
              to fix the managed requirements."
         );
         std::process::exit(2);
@@ -1628,7 +1628,7 @@ fn main() {
     if xai_grok_shell::util::config::load_crash_handler_enabled_sync() {
         let crash_dir = xai_grok_shell::util::grok_home::grok_home().join("crash");
         if let Some(report) = xai_crash_handler::check_previous_crash(&crash_dir) {
-            eprintln!("Grok crashed during your last session.");
+            eprintln!("Bandicot crashed during your last session.");
             eprintln!("  Signal:  {}", report.signal_name);
             eprintln!("  Version: {}", report.app_version);
             eprintln!("  Report:  {}", report.report_path.display());
@@ -1855,6 +1855,17 @@ async fn async_main() -> Result<()> {
             }
             Command::Memory(memory_args) => {
                 return xai_grok_pager::memory_cmd::run(memory_args);
+            }
+            Command::MigrateResources { dry_run } => {
+                let cwd = std::env::current_dir()?;
+                let report = xai_grok_shell::resource_migration::migrate_discovered_resources(
+                    &cwd, dry_run,
+                )?;
+                println!("{}", report.summary());
+                for invalid in report.invalid {
+                    eprintln!("skipped: {invalid}");
+                }
+                return Ok(());
             }
             Command::Update {
                 check,

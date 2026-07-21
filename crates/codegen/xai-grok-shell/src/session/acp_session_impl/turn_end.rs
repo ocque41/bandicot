@@ -302,6 +302,9 @@ impl SessionActor {
             self.emit_turn_completed(prompt_id, &mapped, usage, cancel_trigger)
                 .await;
         }
+        if owned_completion {
+            self.finish_approved_loop_run().await;
+        }
     }
 
     /// Emit the durable, replayable `TurnCompleted` terminal — the single

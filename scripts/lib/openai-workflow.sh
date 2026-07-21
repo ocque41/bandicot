@@ -73,6 +73,6 @@ openai_workflow_atomic_text() {
 
 openai_workflow_shell_quote() {
     # Emit one shell word. Newlines in install paths are deliberately rejected
-    # by install-openai.sh before this helper is called.
+    # by install-bandicot.sh before this helper is called.
     printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
 }

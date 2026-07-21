@@ -1188,6 +1188,7 @@ impl ToolRegistryBuilder {
                 notification_handle: scheduler_notification_handle,
                 cmd_rx,
                 cancel_token: cancel_token.clone(),
+                persistence: persistence.clone(),
             };
             tokio::spawn(actor.run());
         }

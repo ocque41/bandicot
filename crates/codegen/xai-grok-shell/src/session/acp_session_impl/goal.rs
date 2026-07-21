@@ -82,6 +82,214 @@ pub(crate) enum GapsUpdate<'a> {
 }
 
 impl SessionActor {
+    pub(super) async fn activate_approved_loop_goal(&self) -> Option<String> {
+        use crate::session::plan_mode::ApprovedLoopPhase;
+
+        let (objective, plan_file) = {
+            let tracker = self.plan_mode.lock();
+            let workflow = tracker.approved_loop()?;
+            if workflow.phase != ApprovedLoopPhase::AwaitingPlanApproval {
+                return None;
+            }
+            (
+                workflow.objective.clone(),
+                tracker.plan_file_path().to_path_buf(),
+            )
+        };
+        if !crate::session::plan_mode::plan_file_has_content(&plan_file).await {
+            tracing::warn!(path = %plan_file.display(), "approved workflow has no canonical plan");
+            return None;
+        }
+        {
+            let mut tracker = self.plan_mode.lock();
+            let workflow = tracker.approved_loop_mut()?;
+            if workflow.phase != ApprovedLoopPhase::AwaitingPlanApproval {
+                return None;
+            }
+            workflow.phase = ApprovedLoopPhase::Running;
+            workflow.run_in_flight = true;
+        }
+        self.persist_plan_mode_state();
+        Some(
+            self.setup_goal_with_plan(&objective, None, Some(plan_file))
+                .await,
+        )
+    }
+
+    pub(super) async fn resume_approved_loop_wake(
+        &self,
+        workflow_id: &str,
+        task_id: &str,
+    ) -> GoalResumeOutcome {
+        use crate::session::plan_mode::ApprovedLoopPhase;
+
+        let accepted = {
+            let mut tracker = self.plan_mode.lock();
+            let Some(workflow) = tracker.approved_loop_mut() else {
+                return GoalResumeOutcome::Message("Workflow no longer exists.".into());
+            };
+            if workflow.workflow_id != workflow_id
+                || workflow.phase != ApprovedLoopPhase::Running
+                || workflow.pending_task_id.as_deref() != Some(task_id)
+            {
+                return GoalResumeOutcome::Message("Ignored stale workflow wakeup.".into());
+            }
+            if workflow.run_in_flight {
+                false
+            } else {
+                workflow.pending_task_id = None;
+                workflow.run_in_flight = true;
+                true
+            }
+        };
+        if !accepted {
+            return GoalResumeOutcome::Message(
+                "Skipped workflow wakeup because a run is already active.".into(),
+            );
+        }
+        self.persist_plan_mode_state();
+        self.resume_goal().await
+    }
+
+    pub(super) async fn finish_approved_loop_run(&self) {
+        use crate::session::goal_tracker::GoalStatus;
+        use crate::session::plan_mode::ApprovedLoopPhase;
+
+        let goal_complete = self.goal_tracker.lock().status() == Some(GoalStatus::Complete);
+        if !goal_complete {
+            let continuation_pending = {
+                let state = self.state.lock().await;
+                state.pending_inputs.iter().any(|input| {
+                    matches!(
+                        crate::session::PromptOrigin::from_prompt_id(&input.prompt_id),
+                        crate::session::PromptOrigin::GoalSummary
+                            | crate::session::PromptOrigin::GoalClassifierNudge
+                    )
+                })
+            };
+            if continuation_pending {
+                return;
+            }
+        }
+        let (workflow_id, interval, cancel_task) = {
+            let mut tracker = self.plan_mode.lock();
+            let Some(workflow) = tracker.approved_loop_mut() else {
+                return;
+            };
+            if workflow.phase != ApprovedLoopPhase::Running
+                || (!workflow.run_in_flight && !goal_complete)
+            {
+                return;
+            }
+            workflow.run_in_flight = false;
+            if goal_complete {
+                workflow.phase = ApprovedLoopPhase::Complete;
+                (
+                    workflow.workflow_id.clone(),
+                    workflow.interval.clone(),
+                    workflow.pending_task_id.take(),
+                )
+            } else if workflow.pending_task_id.is_none() {
+                (
+                    workflow.workflow_id.clone(),
+                    workflow.interval.clone(),
+                    None,
+                )
+            } else {
+                self.persist_plan_mode_state();
+                return;
+            }
+        };
+        self.persist_plan_mode_state();
+        if let Some(task_id) = cancel_task {
+            let _ = self
+                .agent
+                .borrow()
+                .tool_bridge()
+                .delete_scheduled_task(&task_id)
+                .await;
+            return;
+        }
+        if goal_complete {
+            return;
+        }
+
+        let created = self
+            .agent
+            .borrow()
+            .tool_bridge()
+            .create_scheduled_task(
+                xai_grok_tools::implementations::grok_build::scheduler::create::SchedulerCreateInput {
+                    interval,
+                    prompt: format!("/__approved-loop-wake {workflow_id}"),
+                    recurring: false,
+                    durable: Some(true),
+                    fire_immediately: false,
+                },
+            )
+            .await;
+        match created {
+            Ok(created) => {
+                let mut tracker = self.plan_mode.lock();
+                if let Some(workflow) = tracker.approved_loop_mut()
+                    && workflow.workflow_id == workflow_id
+                    && workflow.phase == ApprovedLoopPhase::Running
+                    && workflow.pending_task_id.is_none()
+                {
+                    workflow.pending_task_id = Some(created.id);
+                }
+                drop(tracker);
+                self.persist_plan_mode_state();
+            }
+            Err(error) => tracing::warn!(%error, "failed to schedule approved workflow wakeup"),
+        }
+    }
+
+    pub(super) async fn restore_approved_loop(&self) {
+        use crate::session::goal_tracker::GoalStatus;
+        use crate::session::plan_mode::ApprovedLoopPhase;
+
+        let goal_complete = self.goal_tracker.lock().status() == Some(GoalStatus::Complete);
+        let scheduled_ids = self
+            .agent
+            .borrow()
+            .tool_bridge()
+            .list_scheduled_tasks()
+            .await
+            .ok()
+            .map(|tasks| {
+                tasks
+                    .into_iter()
+                    .map(|task| task.id)
+                    .collect::<std::collections::HashSet<_>>()
+            });
+        let should_reconcile =
+            {
+                let mut tracker = self.plan_mode.lock();
+                let Some(workflow) = tracker.approved_loop_mut() else {
+                    return;
+                };
+                if workflow.phase != ApprovedLoopPhase::Running || workflow.run_in_flight {
+                    false
+                } else {
+                    if workflow.pending_task_id.as_ref().is_some_and(|id| {
+                        scheduled_ids.as_ref().is_some_and(|ids| !ids.contains(id))
+                    }) {
+                        workflow.pending_task_id = None;
+                    }
+                    if goal_complete || workflow.pending_task_id.is_none() {
+                        workflow.run_in_flight = true;
+                        true
+                    } else {
+                        false
+                    }
+                }
+            };
+        if should_reconcile {
+            self.persist_plan_mode_state();
+            self.finish_approved_loop_run().await;
+        }
+    }
     /// Drain pending `UpdateGoalInput`s from the `update_goal` tool channel
     /// and apply them to `GoalTracker`. Emits `GoalUpdated` notifications.
     ///
@@ -1555,6 +1763,16 @@ impl SessionActor {
     /// prompt blocks, keeping the reminder and user objective in a single
     /// user message (matching the `/loop` re-entrant pattern).
     pub(super) async fn setup_goal(&self, objective: &str, token_budget: Option<i64>) -> String {
+        self.setup_goal_with_plan(objective, token_budget, None)
+            .await
+    }
+
+    pub(super) async fn setup_goal_with_plan(
+        &self,
+        objective: &str,
+        token_budget: Option<i64>,
+        approved_plan: Option<std::path::PathBuf>,
+    ) -> String {
         let goal_id = uuid::Uuid::new_v4().to_string();
         let created_at = chrono::Utc::now().to_rfc3339();
         // Record the current session token total as baseline
@@ -1571,6 +1789,9 @@ impl SessionActor {
             created_at,
             baseline_commit,
         );
+        if let Some(plan_file) = approved_plan.clone() {
+            self.goal_tracker.lock().set_plan_file(plan_file);
+        }
         // Fresh goal — drop any goal-turn-origin task ids carried over from a
         // previous goal so the new goal's drain starts clean.
         self.goal_turn_task_ids.lock().clear();
@@ -1594,12 +1815,14 @@ impl SessionActor {
 
         // Planner fires before the orchestrator reminder; fail-closed
         // (failure pauses the goal).
-        self.maybe_run_goal_planner(objective).await;
+        if approved_plan.is_none() {
+            self.maybe_run_goal_planner(objective).await;
+        }
 
         let names = self.resolve_goal_tool_names().await;
         // Hold the lock across the render so the plan path is borrowed
         // from the snapshot without cloning.
-        let planner_enabled = self.goal_planner_enabled;
+        let planner_enabled = self.goal_planner_enabled || approved_plan.is_some();
         let body = {
             let tracker = self.goal_tracker.lock();
             let o = tracker
@@ -1784,7 +2007,18 @@ impl SessionActor {
             _ => String::new(),
         };
 
-        let planner_enabled = self.goal_planner_enabled;
+        let planner_enabled = self.goal_planner_enabled
+            || self
+                .plan_mode
+                .lock()
+                .approved_loop()
+                .is_some_and(|workflow| {
+                    matches!(
+                        workflow.phase,
+                        crate::session::plan_mode::ApprovedLoopPhase::Running
+                            | crate::session::plan_mode::ApprovedLoopPhase::Complete
+                    )
+                });
         let reminder = {
             let mut tracker = self.goal_tracker.lock();
             tracker.account_elapsed();
@@ -1979,7 +2213,18 @@ impl SessionActor {
         let goal_tool = &names.goal;
         let todo_tool = &names.todo;
 
-        let planner_enabled = self.goal_planner_enabled;
+        let planner_enabled = self.goal_planner_enabled
+            || self
+                .plan_mode
+                .lock()
+                .approved_loop()
+                .is_some_and(|workflow| {
+                    matches!(
+                        workflow.phase,
+                        crate::session::plan_mode::ApprovedLoopPhase::Running
+                            | crate::session::plan_mode::ApprovedLoopPhase::Complete
+                    )
+                });
         let (
             objective,
             elapsed,

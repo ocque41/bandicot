@@ -184,7 +184,7 @@ fn discover_auto_sources(cwd: &str, skills: &[SkillInfo]) -> Vec<(String, usize)
 
     // Once the user has imported, stop scanning hardcoded
     // .claude/skills/ paths. Equivalent locations should be opted in via
-    // [paths] extra_skill_dirs in config.toml (written by /import-claude).
+    // [skills].paths in config.toml (written by /import-claude).
     let imported = crate::claude_import::is_claude_import_marked();
     let local_dir_names: &[&str] = if imported {
         &[".grok", ".agents"]
@@ -238,7 +238,7 @@ fn discover_auto_sources(cwd: &str, skills: &[SkillInfo]) -> Vec<(String, usize)
         }
     }
 
-    // [paths] extra_skill_dirs from config.toml. These supplement the built-in
+    // [skills].paths from config.toml. These supplement the built-in
     // scan locations. Used both standalone and as the migration target after
     // /import-claude when the runtime .claude/skills/ scan is disabled.
     for dir in extra_skill_dirs_from_config() {
@@ -258,21 +258,34 @@ fn discover_auto_sources(cwd: &str, skills: &[SkillInfo]) -> Vec<(String, usize)
     sources
 }
 
-/// Read `[paths] extra_skill_dirs` from the effective config. Returns empty
+/// Read `[skills].paths` from the effective config. Returns empty
 /// on any read/parse failure so misconfiguration never breaks listing.
 fn extra_skill_dirs_from_config() -> Vec<String> {
     let Ok(root) = crate::config::load_effective_config() else {
         return Vec::new();
     };
-    root.get("paths")
-        .and_then(|v| v.get("extra_skill_dirs"))
+    let mut paths: Vec<String> = root
+        .get("skills")
+        .and_then(|v| v.get("paths"))
         .and_then(|v| v.as_array())
         .map(|arr| {
             arr.iter()
                 .filter_map(|v| v.as_str().map(|s| s.to_string()))
                 .collect()
         })
-        .unwrap_or_default()
+        .unwrap_or_default();
+    if let Some(legacy) = root
+        .get("paths")
+        .and_then(|v| v.get("extra_skill_dirs"))
+        .and_then(|v| v.as_array())
+    {
+        for path in legacy.iter().filter_map(|value| value.as_str()) {
+            if !paths.iter().any(|existing| existing == path) {
+                paths.push(path.to_owned());
+            }
+        }
+    }
+    paths
 }
 
 #[tracing::instrument(skip_all, fields(method = %args.method))]

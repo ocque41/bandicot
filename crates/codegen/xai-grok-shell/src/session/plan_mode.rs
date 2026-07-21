@@ -41,6 +41,27 @@ pub enum PlanModeState {
     ///   -> Inactive (after turn completes, exit attachment injected)
     ExitPending,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovedLoopPhase {
+    AwaitingPlanApproval,
+    Running,
+    Complete,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ApprovedLoopState {
+    pub workflow_id: String,
+    pub interval: String,
+    pub objective: String,
+    pub phase: ApprovedLoopPhase,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_task_id: Option<String>,
+    #[serde(default)]
+    pub run_in_flight: bool,
+}
 /// Tracks the full plan mode lifecycle for a session.
 ///
 /// Designed to be testable in isolation — no references to SessionActor,
@@ -77,6 +98,7 @@ pub struct PlanModeTracker {
     /// Lives inside the session directory:
     /// `~/.grok/sessions/<cwd>/<session_id>/plan.md`
     plan_file_path: PathBuf,
+    approved_loop: Option<ApprovedLoopState>,
 }
 /// A buffered mid-turn activation reminder plus the state needed to roll the
 /// activation back if it is withdrawn before delivery.
@@ -103,6 +125,8 @@ pub struct PlanModeSnapshot {
     /// without treating every Active+plan.md session as pending.
     #[serde(default)]
     pub awaiting_plan_approval: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved_loop: Option<ApprovedLoopState>,
 }
 impl PlanModeTracker {
     /// Create a new tracker. `session_dir` is the session's storage
@@ -116,6 +140,7 @@ impl PlanModeTracker {
             awaiting_plan_approval: false,
             pending_activation: None,
             plan_file_path: session_dir.join("plan.md"),
+            approved_loop: None,
         }
     }
     /// Restore a tracker from a persisted snapshot.
@@ -136,6 +161,9 @@ impl PlanModeTracker {
             }
             _ => {}
         }
+        if let Some(workflow) = snapshot.approved_loop.as_mut() {
+            workflow.run_in_flight = false;
+        }
         Self {
             state: snapshot.state,
             was_previously_active: snapshot.was_previously_active,
@@ -144,6 +172,7 @@ impl PlanModeTracker {
             awaiting_plan_approval: snapshot.awaiting_plan_approval,
             pending_activation: None,
             plan_file_path: session_dir.join("plan.md"),
+            approved_loop: snapshot.approved_loop,
         }
     }
     /// Mark that the client is waiting on plan approval (`exit_plan_mode` parked).
@@ -162,6 +191,36 @@ impl PlanModeTracker {
             awaiting_plan_approval: self.awaiting_plan_approval,
             reminder_count: self.reminder_count,
             pending_exit_reminder: self.pending_exit_reminder,
+            approved_loop: self.approved_loop.clone(),
+        }
+    }
+
+    pub fn start_approved_loop(&mut self, interval: String, objective: String) {
+        self.approved_loop = Some(ApprovedLoopState {
+            workflow_id: uuid::Uuid::new_v4().to_string(),
+            interval,
+            objective,
+            phase: ApprovedLoopPhase::AwaitingPlanApproval,
+            pending_task_id: None,
+            run_in_flight: false,
+        });
+    }
+
+    pub fn approved_loop(&self) -> Option<&ApprovedLoopState> {
+        self.approved_loop.as_ref()
+    }
+
+    pub fn approved_loop_mut(&mut self) -> Option<&mut ApprovedLoopState> {
+        self.approved_loop.as_mut()
+    }
+
+    pub fn cancel_approved_loop(&mut self) {
+        if let Some(workflow) = self.approved_loop.as_mut()
+            && workflow.phase == ApprovedLoopPhase::AwaitingPlanApproval
+        {
+            workflow.phase = ApprovedLoopPhase::Cancelled;
+            workflow.run_in_flight = false;
+            workflow.pending_task_id = None;
         }
     }
     /// Returns the current plan mode state.
@@ -492,6 +551,35 @@ impl PromptMode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn approved_loop_state_round_trips_and_restores_without_in_flight_run() {
+        let dir = PathBuf::from("/tmp/approved-loop-state");
+        let mut tracker = PlanModeTracker::new(dir.clone());
+        tracker.start_approved_loop("10m".into(), "ship it".into());
+        let workflow = tracker.approved_loop_mut().unwrap();
+        workflow.phase = ApprovedLoopPhase::Running;
+        workflow.pending_task_id = Some("task-1".into());
+        workflow.run_in_flight = true;
+
+        let encoded = serde_json::to_string(&tracker.snapshot()).unwrap();
+        let snapshot: PlanModeSnapshot = serde_json::from_str(&encoded).unwrap();
+        let restored = PlanModeTracker::from_snapshot(dir, snapshot);
+        let workflow = restored.approved_loop().unwrap();
+        assert_eq!(workflow.phase, ApprovedLoopPhase::Running);
+        assert_eq!(workflow.pending_task_id.as_deref(), Some("task-1"));
+        assert!(!workflow.run_in_flight);
+    }
+
+    #[test]
+    fn old_plan_snapshot_without_workflow_restores_safely() {
+        let snapshot: PlanModeSnapshot = serde_json::from_str(
+            r#"{"state":"Inactive","was_previously_active":false,"reminder_count":0,"pending_exit_reminder":false}"#,
+        )
+        .unwrap();
+        let restored = PlanModeTracker::from_snapshot(PathBuf::from("/tmp/old-plan"), snapshot);
+        assert!(restored.approved_loop().is_none());
+    }
     fn test_tracker() -> PlanModeTracker {
         PlanModeTracker::new(PathBuf::from("/tmp/test-session"))
     }

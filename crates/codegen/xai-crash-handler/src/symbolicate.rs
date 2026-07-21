@@ -50,7 +50,7 @@ pub fn resolve_frames(blob: &CrashBlob) -> Vec<ResolvedFrame> {
 pub fn format_report(blob: &CrashBlob, frames: &[ResolvedFrame]) -> String {
     let mut out = String::with_capacity(4096);
 
-    out.push_str("=== Grok Crash Report ===\n\n");
+    out.push_str("=== Bandicot Crash Report ===\n\n");
 
     out.push_str(&format!("Signal:  {}\n", signal_name(blob.signal)));
     out.push_str(&format!(
@@ -135,6 +135,7 @@ mod tests {
             lineno: Some(42),
         }];
         let report = format_report(&blob, &frames);
+        assert!(report.starts_with("=== Bandicot Crash Report ==="));
         assert!(report.contains("SIGBUS"));
         assert!(report.contains("BUS_ADRERR"));
         assert!(report.contains("xai_grok_pager::main"));

@@ -534,8 +534,8 @@ pub fn build_grouped_picker_entries<'a>(
 // ── Welcome logo ─────────────────────────────────────────────────────────────
 
 /// [`crate::views::welcome::logo::compact_logo_line_count`].
-pub fn compact_logo_line_count() -> u16 {
-    crate::views::welcome::logo::compact_logo_line_count()
+pub fn compact_logo_line_count(width: u16) -> u16 {
+    crate::views::welcome::logo::compact_logo_line_count(width)
 }
 
 /// [`crate::views::welcome::logo::render_compact_logo`].

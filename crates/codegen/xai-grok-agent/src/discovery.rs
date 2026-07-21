@@ -1,7 +1,7 @@
 //! Agent definition file discovery.
 //!
-//! Searches `.grok/agents/` and `.claude/agents/` from cwd to repo root,
-//! then `~/.grok/agents/`, then `~/.claude/agents/`. Name-based dedup keeps
+//! Searches `.bandicot/agents/`, `.grok/agents/`, and `.claude/agents/` from cwd to repo root,
+//! then `~/.bandicot/agents/`, `~/.grok/agents/`, and `~/.claude/agents/`. Name-based dedup keeps
 //! highest priority.
 
 use std::collections::HashMap;
@@ -15,7 +15,7 @@ use crate::error::AgentBuildError;
 use crate::prompt::context::TemplateOverride;
 
 /// Project-level agent directories to scan (`.grok/agents/` + `.claude/agents/` compat).
-const PROJECT_AGENT_SUBDIRS: &[&str] = &[".grok/agents", ".claude/agents"];
+const PROJECT_AGENT_SUBDIRS: &[&str] = &[".bandicot/agents", ".grok/agents", ".claude/agents"];
 
 /// Existing project-level agent dirs (`.grok/agents` / `.claude/agents`), walked
 /// from `cwd` up to the git worktree root (inclusive). Returns
@@ -200,13 +200,19 @@ pub(crate) fn user_agent_dirs(
     // Legacy literal ~/.grok, included only when it differs from grok_home
     // (i.e. GROK_HOME points elsewhere) so agents left in the old location are
     // still discovered and stay consistent with scope_from_path classification.
+    let canonical_bandicot = home.map(|h| h.join(".bandicot"));
     let legacy_grok = home
         .map(|h| h.join(".grok"))
         .filter(|legacy| grok_home != Some(legacy.as_path()));
 
     let mut dirs = Vec::new();
+    if let Some(b) = &canonical_bandicot {
+        dirs.push((b.join("agents"), AgentScope::User));
+    }
     if let Some(g) = grok_home {
-        dirs.push((g.join("agents"), AgentScope::User));
+        if canonical_bandicot.as_deref() != Some(g) {
+            dirs.push((g.join("agents"), AgentScope::User));
+        }
     }
     if let Some(l) = &legacy_grok {
         dirs.push((l.join("agents"), AgentScope::User));
@@ -770,11 +776,23 @@ mod tests {
             .into_iter()
             .map(|(p, _)| p)
             .collect();
+        assert_eq!(paths[0], home.join(".bandicot").join("agents"));
         assert!(paths.contains(&grok.join("agents")));
         assert!(paths.contains(&home.join(".grok").join("agents")));
         assert!(paths.contains(&home.join(".claude").join("agents")));
         assert!(paths.contains(&grok.join("bundled").join("agents")));
         assert!(paths.contains(&home.join(".grok").join("bundled").join("agents")));
+    }
+
+    #[test]
+    fn user_agent_dirs_dedups_when_runtime_home_is_bandicot() {
+        let home = Path::new("/home/u");
+        let bandicot = home.join(".bandicot");
+        let count = user_agent_dirs(Some(home), Some(&bandicot))
+            .into_iter()
+            .filter(|(path, _)| *path == bandicot.join("agents"))
+            .count();
+        assert_eq!(count, 1);
     }
 
     #[test]

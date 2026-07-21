@@ -1000,6 +1000,12 @@ impl GoalTracker {
         }
     }
 
+    pub fn set_plan_file(&mut self, plan_file: PathBuf) {
+        if let Some(orchestration) = &mut self.orchestration {
+            orchestration.plan_file = Some(plan_file);
+        }
+    }
+
     pub fn set_current_subagent(&mut self, id: Option<String>, role: Option<String>) {
         if let Some(o) = &mut self.orchestration {
             o.current_subagent_id = id;

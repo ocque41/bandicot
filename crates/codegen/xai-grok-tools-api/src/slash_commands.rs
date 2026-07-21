@@ -7,6 +7,79 @@
 /// keys `/loop` availability on this name.
 pub const SCHEDULER_CREATE_TOOL_NAME: &str = "scheduler_create";
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExplicitLoop<'a> {
+    pub interval: &'a str,
+    pub prompt: &'a str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApprovedLoopWorkflow {
+    pub interval: String,
+    pub objective: String,
+}
+
+/// Parse the approved plan/goal/loop composition into one typed workflow.
+///
+/// Canonical: `/loop 10m --plan --goal objective`
+/// Compatibility: `/plan /goal /loop 10m objective`
+pub fn parse_approved_loop_workflow(input: &str) -> Option<ApprovedLoopWorkflow> {
+    let trimmed = input.trim();
+    let (interval, objective) = if let Some(rest) = trimmed.strip_prefix("/loop ") {
+        let (interval, rest) = split_token(rest)?;
+        let rest = strip_token(rest, "--plan")?;
+        let objective = strip_token(rest, "--goal")?;
+        (interval, objective)
+    } else {
+        let rest = trimmed.strip_prefix("/plan")?.trim_start();
+        let rest = rest.strip_prefix("/goal")?.trim_start();
+        let rest = rest.strip_prefix("/loop")?.trim_start();
+        split_token(rest)?
+    };
+    let explicit_input = format!("{interval} {objective}");
+    let explicit = parse_explicit_loop(&explicit_input)?;
+    Some(ApprovedLoopWorkflow {
+        interval: explicit.interval.to_string(),
+        objective: explicit.prompt.to_string(),
+    })
+}
+
+fn split_token(input: &str) -> Option<(&str, &str)> {
+    let input = input.trim_start();
+    let split = input.find(char::is_whitespace)?;
+    let rest = input[split..].trim_start();
+    (!rest.is_empty()).then_some((&input[..split], rest))
+}
+
+fn strip_token<'a>(input: &'a str, token: &str) -> Option<&'a str> {
+    let rest = input.strip_prefix(token)?;
+    rest.chars()
+        .next()
+        .is_some_and(char::is_whitespace)
+        .then(|| rest.trim_start())
+}
+
+/// Parse the deterministic `/loop <number><unit> <prompt>` form. Other forms
+/// intentionally return `None` so hosts can preserve model-assisted natural
+/// language and dynamic scheduling behavior.
+pub fn parse_explicit_loop(args: &str) -> Option<ExplicitLoop<'_>> {
+    let trimmed = args.trim();
+    let split = trimmed.find(char::is_whitespace)?;
+    let interval = &trimmed[..split];
+    let prompt = trimmed[split..].trim_start();
+    if prompt.is_empty() || interval.len() < 2 {
+        return None;
+    }
+    let (digits, suffix) = interval.split_at(interval.len() - 1);
+    if !matches!(suffix, "s" | "m" | "h" | "d")
+        || !digits.chars().all(|c| c.is_ascii_digit())
+        || !digits.parse::<u64>().is_ok_and(|value| value > 0)
+    {
+        return None;
+    }
+    Some(ExplicitLoop { interval, prompt })
+}
+
 /// Usage hint shown when `/loop` is invoked with no arguments.
 pub fn loop_usage_message() -> &'static str {
     "Usage: /loop [interval] <prompt>\n\
@@ -213,5 +286,49 @@ mod tests {
     fn usage_message_has_no_default_claim() {
         assert!(loop_usage_message().contains("Usage: /loop"));
         assert!(!loop_usage_message().contains("10m"));
+    }
+
+    #[test]
+    fn parses_only_explicit_compact_loops() {
+        assert_eq!(
+            parse_explicit_loop(" 5m check deploy "),
+            Some(ExplicitLoop {
+                interval: "5m",
+                prompt: "check deploy"
+            })
+        );
+        assert!(parse_explicit_loop("check deploy every hour").is_none());
+        assert!(parse_explicit_loop("5m").is_none());
+        assert!(parse_explicit_loop("0m no").is_none());
+    }
+
+    #[test]
+    fn parses_approved_loop_workflow_forms() {
+        let expected = ApprovedLoopWorkflow {
+            interval: "10m".into(),
+            objective: "ship the objective".into(),
+        };
+        assert_eq!(
+            parse_approved_loop_workflow("/loop 10m --plan --goal ship the objective"),
+            Some(expected.clone())
+        );
+        assert_eq!(
+            parse_approved_loop_workflow("/plan /goal /loop 10m ship the objective"),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn rejects_partial_workflow_compositions() {
+        for input in [
+            "/loop 10m ship it",
+            "/loop 10m --goal ship it",
+            "/loop 10m --plan ship it",
+            "/loop 10m --plan--goal ship it",
+            "/plan /loop 10m ship it",
+            "/plan /goal /loop ship it",
+        ] {
+            assert_eq!(parse_approved_loop_workflow(input), None, "{input}");
+        }
     }
 }

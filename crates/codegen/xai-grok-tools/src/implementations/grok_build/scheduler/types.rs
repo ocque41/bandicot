@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, ser::SerializeStruct};
 use tokio::sync::{mpsc, oneshot};
 
 #[derive(thiserror::Error, Debug)]
@@ -80,9 +80,22 @@ impl ScheduledTask {
 
 /// Persisted state for the scheduler, stored via Resources + ResourcesPersistence.
 /// Only durable tasks are serialized; non-durable tasks are filtered out before save.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct SchedulerState {
     pub tasks: Vec<ScheduledTask>,
+}
+
+impl Serialize for SchedulerState {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let durable_tasks: Vec<&ScheduledTask> =
+            self.tasks.iter().filter(|task| task.durable).collect();
+        let mut state = serializer.serialize_struct("SchedulerState", 1)?;
+        state.serialize_field("tasks", &durable_tasks)?;
+        state.end()
+    }
 }
 
 crate::register_resource!("grok_build", "Scheduler", SchedulerState);
@@ -192,5 +205,18 @@ mod tests {
     fn scheduler_state_default_is_empty() {
         let state = SchedulerState::default();
         assert!(state.tasks.is_empty());
+    }
+
+    #[test]
+    fn scheduler_state_serializes_only_durable_tasks() {
+        let state = SchedulerState {
+            tasks: vec![
+                ScheduledTask::new(300, "ephemeral".into(), true, false),
+                ScheduledTask::new(300, "durable".into(), true, true),
+            ],
+        };
+        let json = serde_json::to_value(&state).unwrap();
+        assert_eq!(json["tasks"].as_array().unwrap().len(), 1);
+        assert_eq!(json["tasks"][0]["prompt"], "durable");
     }
 }

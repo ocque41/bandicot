@@ -4,7 +4,7 @@ umask 077
 
 SCRIPT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
 REPO_ROOT=$(CDPATH='' cd -- "$SCRIPT_DIR/../.." && pwd -P)
-TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/grok-openai-script-tests.XXXXXX")
+TEST_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/bandicot-script-tests.XXXXXX")
 mkdir -p "$TEST_ROOT/home" "$TEST_ROOT/git-template" "$TEST_ROOT/tmp"
 
 # Every child, including Git itself, is isolated from the user's real HOME,
@@ -16,7 +16,19 @@ export GIT_CONFIG_NOSYSTEM=1
 export GIT_CONFIG_GLOBAL=/dev/null
 export GIT_TEMPLATE_DIR="$TEST_ROOT/git-template"
 
+# Provider credential discovery must never observe the developer's real macOS
+# Keychain: the Security framework ignores HOME. Point every Keychain service
+# and account at test-scoped names that only this suite uses.
+export BANDICOT_KEYCHAIN_SERVICE=bandicot.test-openai
+export BANDICOT_KEYCHAIN_ACCOUNT=bandicot-test-openai
+export BANDICOT_LEGACY_KEYCHAIN_SERVICE=bandicot.test-openai-legacy
+export BANDICOT_OPENCODE_GO_KEYCHAIN_SERVICE=bandicot.test-opencode-go
+export BANDICOT_OPENCODE_GO_KEYCHAIN_ACCOUNT=bandicot-test-opencode-go
+
 cleanup() {
+    /usr/bin/security delete-generic-password \
+        -a "$BANDICOT_KEYCHAIN_ACCOUNT" -s "$BANDICOT_KEYCHAIN_SERVICE" \
+        >/dev/null 2>&1 || true
     rm -rf "$TEST_ROOT"
 }
 trap cleanup 0
@@ -53,7 +65,7 @@ make_fake_binary() {
 
 case ${1:-} in
     -v|-V|--version)
-        printf '%s\n' 'grok-openai-test 1.0'
+        printf '%s\n' 'bandicot-test 1.0'
         exit 0
         ;;
 esac
@@ -70,10 +82,11 @@ if [ -n "${GROK_OPENAI_TEST_CAPTURE:-}" ]; then
         else
             printf '%s\n' 'OPENAI_API_KEY_SET=0'
         fi
-        if [ -n "${GROK_CODEX_PROXY_TOKEN:-}" ]; then
-            printf '%s\n' 'GROK_CODEX_PROXY_TOKEN_SET=1'
+        printf 'BANDICOT_OPENAI_BASE_URL=%s\n' "${BANDICOT_OPENAI_BASE_URL:-}"
+        if [ -n "${BANDICOT_OPENAI_TOKEN:-}" ]; then
+            printf '%s\n' 'BANDICOT_OPENAI_TOKEN_SET=1'
         else
-            printf '%s\n' 'GROK_CODEX_PROXY_TOKEN_SET=0'
+            printf '%s\n' 'BANDICOT_OPENAI_TOKEN_SET=0'
         fi
         if [ -n "${XAI_API_KEY:-}${GROK_CODE_XAI_API_KEY:-}${GROK_AUTH:-}${GROK_AUTH_PATH:-}${GROK_AUTH_PROVIDER_COMMAND:-}" ]; then
             printf '%s\n' 'XAI_AUTH_INPUT_SET=1'
@@ -108,27 +121,32 @@ EOF
 test_install_isolation() {
     _test_case=$TEST_ROOT/install
     _test_home=$_test_case/home
-    _test_binary=$_test_case/fake-grok
+    _test_binary=$_test_case/fake-bandicot
+    _test_apple_helper=$_test_case/fake-apple-helper
     _test_profile=$_test_case/openai.toml
     _test_capture=$_test_case/capture
-    mkdir -p "$_test_home/.grok"
+    mkdir -p "$_test_home/.grok" "$_test_home/.grok-openai/sessions"
     printf '%s\n' 'legacy-sentinel' >"$_test_home/.grok/config.toml"
+    printf '%s\n' 'bandicot-session' >"$_test_home/.grok-openai/sessions/legacy.json"
     make_fake_binary "$_test_binary"
+    make_fake_binary "$_test_apple_helper"
     write_profile "$_test_profile"
 
     HOME=$_test_home \
-    GROK_OPENAI_PREBUILT=$_test_binary \
-    GROK_OPENAI_PROFILE_SOURCE=$_test_profile \
-        "$REPO_ROOT/scripts/install-openai.sh" >/dev/null
+    BANDICOT_PREBUILT=$_test_binary \
+    BANDICOT_APPLE_HELPER_PREBUILT=$_test_apple_helper \
+    BANDICOT_PROFILE_SOURCE=$_test_profile \
+        "$REPO_ROOT/scripts/install-bandicot.sh" >/dev/null
 
-    assert_file "$_test_home/.local/libexec/grok-openai/grok"
-    assert_file "$_test_home/.local/libexec/grok-openai/bandicot"
-    assert_file "$_test_home/.local/libexec/grok-openai/openai.toml"
-    assert_file "$_test_home/.local/libexec/grok-openai/codex-plan.toml"
+    assert_file "$_test_home/.local/libexec/bandicot/bandicot"
+    assert_file "$_test_home/.local/libexec/bandicot/bandicot-apple-foundation-models"
     assert_file "$_test_home/.local/bin/bandicot"
-    assert_file "$_test_home/.local/bin/grok-openai"
-    assert_file "$_test_home/.grok-openai/config.toml"
-    assert_file "$_test_home/.grok-codex-plan/config.toml"
+    assert_absent "$_test_home/.local/bin/grok-openai"
+    assert_absent "$_test_home/.local/libexec/grok-openai"
+    assert_file "$_test_home/.bandicot/config.toml"
+    assert_file "$_test_home/.bandicot/sessions/legacy.json"
+    assert_eq "$(sed -n '1p' "$_test_home/.bandicot/sessions/legacy.json")" bandicot-session
+    assert_eq "$(sed -n '1p' "$_test_home/.grok-openai/sessions/legacy.json")" bandicot-session
     assert_eq "$(sed -n '1p' "$_test_home/.grok/config.toml")" legacy-sentinel
 
     _test_proxy=$_test_case/cliproxyapi
@@ -145,25 +163,25 @@ EOF
     assert_eq "$(sed -n '1p' "$_test_login_capture")" -codex-device-login
 
     if HOME=$_test_home \
-        GROK_OPENAI_HOME=$_test_home/.grok \
-        GROK_OPENAI_PREBUILT=$_test_binary \
-        GROK_OPENAI_PROFILE_SOURCE=$_test_profile \
-            "$REPO_ROOT/scripts/install-openai.sh" >"$_test_case/legacy-refusal.out" 2>&1; then
+        BANDICOT_HOME=$_test_home/.grok \
+        BANDICOT_PREBUILT=$_test_binary \
+        BANDICOT_PROFILE_SOURCE=$_test_profile \
+            "$REPO_ROOT/scripts/install-bandicot.sh" >"$_test_case/legacy-refusal.out" 2>&1; then
         fail 'installer unexpectedly accepted the legacy ~/.grok directory'
     fi
     grep -q 'refusing to use or modify the legacy ~/.grok directory' "$_test_case/legacy-refusal.out" || fail 'legacy ~/.grok refusal was not actionable'
     assert_eq "$(sed -n '1p' "$_test_home/.grok/config.toml")" legacy-sentinel
 
     if HOME=$_test_home \
-        GROK_OPENAI_HOME=$_test_home/.grok \
-            "$_test_home/.local/bin/grok-openai" --version >"$_test_case/runtime-legacy-refusal.out" 2>&1; then
+        BANDICOT_HOME=$_test_home/.grok \
+            "$_test_home/.local/bin/bandicot" --version >"$_test_case/runtime-legacy-refusal.out" 2>&1; then
         fail 'launcher unexpectedly accepted the legacy ~/.grok directory'
     fi
     grep -q 'refusing to use the legacy ~/.grok directory' "$_test_case/runtime-legacy-refusal.out" || fail 'launcher legacy ~/.grok refusal was not actionable'
 
     if HOME=$_test_home \
-        GROK_OPENAI_HOME=$_test_home/.grok-openai/../.grok \
-            "$_test_home/.local/bin/grok-openai" --version >"$_test_case/runtime-traversal-refusal.out" 2>&1; then
+        BANDICOT_HOME=$_test_home/.bandicot/../.grok \
+            "$_test_home/.local/bin/bandicot" --version >"$_test_case/runtime-traversal-refusal.out" 2>&1; then
         fail 'launcher unexpectedly accepted a path traversal into legacy ~/.grok'
     fi
     grep -q 'must not contain . or .. path components' "$_test_case/runtime-traversal-refusal.out" || fail 'launcher path traversal refusal was not actionable'
@@ -177,9 +195,11 @@ EOF
     GROK_AUTH_PATH=$_test_case/must-not-be-read.json \
     GROK_AUTH_PROVIDER_COMMAND=must-be-removed \
     GROK_OPENAI_TEST_CAPTURE=$_test_capture \
-        "$_test_home/.local/bin/grok-openai" probe
+        "$_test_home/.local/bin/bandicot" probe
 
-    grep -q "GROK_HOME=$_test_home/.grok-openai" "$_test_capture" || fail 'launcher did not isolate GROK_HOME'
+    grep -q "GROK_HOME=$_test_home/.bandicot" "$_test_capture" || fail 'launcher did not isolate GROK_HOME'
+    grep -q '^BANDICOT_OPENAI_BASE_URL=https://api.openai.com/v1$' "$_test_capture" || fail 'launcher did not select Platform URL'
+    grep -q '^BANDICOT_OPENAI_TOKEN_SET=1$' "$_test_capture" || fail 'launcher did not supply the provider token'
     grep -q '^GROK_DISABLE_AUTOUPDATER=1$' "$_test_capture" || fail 'launcher did not disable updater'
     grep -q '^GROK_OPENAI_DISABLE_VENDOR_UPDATE=1$' "$_test_capture" || fail 'launcher did not disable explicit vendor updates'
     grep -q '^GROK_IMAGE_GEN=0$' "$_test_capture" || fail 'launcher did not disable image generation'
@@ -198,7 +218,7 @@ EOF
         unset OPENAI_API_KEY
         HOME=$_test_home \
         GROK_OPENAI_TEST_CAPTURE=$_test_capture \
-            "$_test_home/.local/bin/grok-openai" models
+            "$_test_home/.local/bin/bandicot" models
     )
     grep -q '^OPENAI_API_KEY_SET=0$' "$_test_capture" || fail 'offline models command unexpectedly required a key'
 
@@ -208,7 +228,7 @@ EOF
         unset OPENAI_API_KEY
         HOME=$_test_home \
         GROK_OPENAI_TEST_CAPTURE=$_test_capture \
-            "$_test_home/.local/bin/grok-openai" leader list --json
+            "$_test_home/.local/bin/bandicot" leader list --json
     )
     grep -q '^OPENAI_API_KEY_SET=0$' "$_test_capture" || fail 'local leader command unexpectedly required a key'
 
@@ -220,12 +240,13 @@ EOF
     (
         unset OPENAI_API_KEY
         HOME=$_test_home \
-        GROK_CODEX_PROXY_TOKEN_FILE=$_test_proxy_token \
+        BANDICOT_PROXY_TOKEN_FILE=$_test_proxy_token \
         GROK_OPENAI_TEST_CAPTURE=$_test_capture \
-            "$_test_home/.local/bin/grok-openai" 'hello from bandicot' >/dev/null 2>&1
+            "$_test_home/.local/bin/bandicot" 'hello from bandicot' >/dev/null 2>&1
     )
-    grep -q "GROK_HOME=$_test_home/.grok-codex-plan" "$_test_capture" || fail 'launcher did not select the Codex-plan profile'
-    grep -q '^GROK_CODEX_PROXY_TOKEN_SET=1$' "$_test_capture" || fail 'launcher did not supply the local proxy token'
+    grep -q "GROK_HOME=$_test_home/.bandicot" "$_test_capture" || fail 'launcher changed the active Bandicot home'
+    grep -q '^BANDICOT_OPENAI_BASE_URL=http://127.0.0.1:8317/v1$' "$_test_capture" || fail 'launcher did not select the local proxy URL'
+    grep -q '^BANDICOT_OPENAI_TOKEN_SET=1$' "$_test_capture" || fail 'launcher did not supply the local proxy token'
     grep -q '^OPENAI_API_KEY_SET=0$' "$_test_capture" || fail 'Codex-plan mode synthesized an OpenAI Platform key'
     if grep -q 'local-loopback-test-token' "$_test_capture"; then
         fail 'test capture leaked the local proxy token value'
@@ -235,24 +256,92 @@ EOF
     # edit is preserved and the new canonical profile remains available.
     printf '%s\n' '# profile-v2' >>"$_test_profile"
     HOME=$_test_home \
-    GROK_OPENAI_PREBUILT=$_test_binary \
-    GROK_OPENAI_PROFILE_SOURCE=$_test_profile \
-        "$REPO_ROOT/scripts/install-openai.sh" >/dev/null
-    grep -q '^# profile-v2$' "$_test_home/.grok-openai/config.toml" || fail 'untouched generated profile did not update'
+    BANDICOT_PREBUILT=$_test_binary \
+    BANDICOT_PROFILE_SOURCE=$_test_profile \
+        "$REPO_ROOT/scripts/install-bandicot.sh" >/dev/null
+    grep -q '^# profile-v2$' "$_test_home/.bandicot/config.toml" || fail 'untouched generated profile did not update'
 
-    printf '%s\n' '# user-customization' >>"$_test_home/.grok-openai/config.toml"
+    printf '%s\n' '# user-customization' >>"$_test_home/.bandicot/config.toml"
     printf '%s\n' '# profile-v3' >>"$_test_profile"
     HOME=$_test_home \
-    GROK_OPENAI_PREBUILT=$_test_binary \
-    GROK_OPENAI_PROFILE_SOURCE=$_test_profile \
-        "$REPO_ROOT/scripts/install-openai.sh" >/dev/null
-    grep -q '^# user-customization$' "$_test_home/.grok-openai/config.toml" || fail 'customized runtime profile was overwritten'
-    if grep -q '^# profile-v3$' "$_test_home/.grok-openai/config.toml"; then
+    BANDICOT_PREBUILT=$_test_binary \
+    BANDICOT_PROFILE_SOURCE=$_test_profile \
+        "$REPO_ROOT/scripts/install-bandicot.sh" >/dev/null
+    grep -q '^# user-customization$' "$_test_home/.bandicot/config.toml" || fail 'customized runtime profile was overwritten'
+    if grep -q '^# profile-v3$' "$_test_home/.bandicot/config.toml"; then
         fail 'customized runtime profile unexpectedly followed canonical update'
     fi
-    grep -q '^# profile-v3$' "$_test_home/.local/libexec/grok-openai/openai.toml" || fail 'canonical profile did not update'
+    grep -q '^# profile-v3$' "$_test_home/.bandicot/.canonical-config.toml" || fail 'canonical profile did not update'
+
+    _test_compat_home=$_test_case/compat-home
+    mkdir -p "$_test_compat_home"
+    HOME=$_test_compat_home \
+    GROK_OPENAI_PREBUILT=$_test_binary \
+    GROK_OPENAI_PROFILE_SOURCE=$_test_profile \
+        "$REPO_ROOT/scripts/install-openai.sh" >"$_test_case/compat.out" 2>&1
+    assert_file "$_test_compat_home/.local/bin/bandicot"
+    assert_absent "$_test_compat_home/.local/bin/grok-openai"
+    grep -q 'deprecated' "$_test_case/compat.out" || fail 'compatibility installer did not report deprecation'
 
     OPENAI_API_KEY=not-a-real-key "$REPO_ROOT/scripts/setup-openai-key.sh" >/dev/null
+}
+
+test_uninstall_provenance() {
+    _test_case=$TEST_ROOT/uninstall
+    _test_home=$_test_case/home
+    _test_fakebin=$_test_case/bin
+    mkdir -p "$_test_home/.local/bin" "$_test_home/.local/libexec/bandicot" \
+        "$_test_home/.local/libexec/grok-openai" "$_test_home/.bandicot" \
+        "$_test_home/.grok" "$_test_fakebin"
+    cat >"$_test_home/.local/bin/bandicot" <<'EOF'
+#!/bin/sh
+# BANDICOT_INSTALLER_PROVENANCE=bandicot-local-v1
+EOF
+    cat >"$_test_home/.local/bin/grok-openai" <<'EOF'
+#!/bin/sh
+GROK_OPENAI_LIBEXEC_DIR=$HOME/.local/libexec/grok-openai
+exec "$GROK_OPENAI_LIBEXEC_DIR/bandicot" "$@"
+EOF
+    chmod 755 "$_test_home/.local/bin/bandicot" "$_test_home/.local/bin/grok-openai"
+    printf '%s\n' payload >"$_test_home/.local/libexec/bandicot/bandicot"
+    printf '%s\n' helper >"$_test_home/.local/libexec/bandicot/bandicot-apple-foundation-models"
+    printf '%s\n' legacy >"$_test_home/.local/libexec/grok-openai/bandicot"
+    printf '%s\n' active-data >"$_test_home/.bandicot/session.json"
+    printf '%s\n' official-data >"$_test_home/.grok/config.toml"
+    cat >"$_test_fakebin/npm" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+    chmod 755 "$_test_fakebin/npm"
+
+    HOME=$_test_home PATH="$_test_fakebin:$PATH" \
+        "$REPO_ROOT/scripts/uninstall-bandicot.sh" >"$_test_case/dry-run.out"
+    assert_file "$_test_home/.local/bin/bandicot"
+    assert_file "$_test_home/.local/bin/grok-openai"
+    grep -q 'Would remove:' "$_test_case/dry-run.out" || fail 'uninstaller did not default to dry-run'
+    grep -q 'Detected official @xai-official/grok' "$_test_case/dry-run.out" || fail 'official package was not reported'
+
+    HOME=$_test_home PATH="$_test_fakebin:$PATH" \
+        "$REPO_ROOT/scripts/uninstall-bandicot.sh" --legacy-only --remove-official-grok >"$_test_case/legacy-dry-run.out"
+    assert_file "$_test_home/.local/bin/bandicot"
+    grep -q 'Would remove npm package: @xai-official/grok' "$_test_case/legacy-dry-run.out" || fail 'official package removal was not previewed'
+
+    HOME=$_test_home PATH="$_test_fakebin:$PATH" \
+        "$REPO_ROOT/scripts/uninstall-bandicot.sh" --apply >"$_test_case/apply.out"
+    assert_absent "$_test_home/.local/bin/bandicot"
+    assert_absent "$_test_home/.local/bin/grok-openai"
+    assert_absent "$_test_home/.local/libexec/bandicot/bandicot"
+    assert_absent "$_test_home/.local/libexec/bandicot/bandicot-apple-foundation-models"
+    assert_absent "$_test_home/.local/libexec/grok-openai/bandicot"
+    assert_file "$_test_home/.bandicot/session.json"
+    assert_file "$_test_home/.grok/config.toml"
+
+    printf '%s\n' '#!/bin/sh' 'exec something-else' >"$_test_home/.local/bin/grok-openai"
+    chmod 755 "$_test_home/.local/bin/grok-openai"
+    HOME=$_test_home PATH="$_test_fakebin:$PATH" \
+        "$REPO_ROOT/scripts/uninstall-bandicot.sh" --apply >"$_test_case/unverified.out" 2>&1
+    assert_file "$_test_home/.local/bin/grok-openai"
+    grep -q 'Preserved unverified legacy alias' "$_test_case/unverified.out" || fail 'unverified alias refusal was not reported'
 }
 
 make_fixture() {
@@ -417,7 +506,7 @@ test_update_success_and_noop() {
     unset GROK_OPENAI_GATE_CMD_TEST
 
     assert_file "$WORK/upstream.txt"
-    assert_file "$HOME_DIR/.local/bin/grok-openai"
+    assert_file "$HOME_DIR/.local/bin/bandicot"
     assert_absent "$HOME_DIR/.grok"
     assert_eq "$(git -C "$WORK" rev-parse HEAD)" "$(git --git-dir="$ORIGIN" rev-parse refs/heads/main)"
     assert_eq "$(git -C "$WORK" remote get-url --push upstream)" DISABLED
@@ -445,7 +534,7 @@ test_update_accepts_unrelated_rewritten_upstream() {
         fail 'rewritten upstream succeeded without explicit acceptance'
     fi
     assert_eq "$_test_fork_before" "$(git -C "$WORK" rev-parse HEAD)"
-    assert_absent "$HOME_DIR/.local/bin/grok-openai"
+    assert_absent "$HOME_DIR/.local/bin/bandicot"
     grep -q -- '--accept-upstream-rewrite' "$FIXTURE/unrelated-refusal.out" || \
         fail 'rewritten upstream refusal did not explain explicit acceptance'
     if run_updater_accept_pair "$FIXTURE/unrelated-stale-pin.out" \
@@ -551,7 +640,7 @@ test_update_rejects_malformed_marker() {
         fail 'malformed upstream marker unexpectedly succeeded'
     fi
     assert_eq "$_test_origin_before" "$(git --git-dir="$ORIGIN" rev-parse refs/heads/main)"
-    assert_absent "$HOME_DIR/.local/bin/grok-openai"
+    assert_absent "$HOME_DIR/.local/bin/bandicot"
     grep -q 'must contain exactly one full lowercase commit SHA' "$FIXTURE/malformed-marker.out" || \
         fail 'malformed marker refusal was not actionable'
 }
@@ -574,7 +663,7 @@ test_update_rejects_nonancestor_marker() {
         fail 'nonancestor upstream marker unexpectedly succeeded'
     fi
     assert_eq "$_test_origin_before" "$(git --git-dir="$ORIGIN" rev-parse refs/heads/main)"
-    assert_absent "$HOME_DIR/.local/bin/grok-openai"
+    assert_absent "$HOME_DIR/.local/bin/bandicot"
     grep -q 'commit is not an ancestor of fork HEAD' "$FIXTURE/nonancestor-marker.out" || \
         fail 'nonancestor marker refusal was not actionable'
 }
@@ -587,7 +676,7 @@ test_update_rejects_dirty_main() {
         fail 'dirty update unexpectedly succeeded'
     fi
     assert_eq "$_test_origin_before" "$(git --git-dir="$ORIGIN" rev-parse refs/heads/main)"
-    assert_absent "$HOME_DIR/.local/bin/grok-openai"
+    assert_absent "$HOME_DIR/.local/bin/bandicot"
     grep -q 'must be completely clean' "$FIXTURE/dirty.out" || fail 'dirty failure was not actionable'
 }
 
@@ -610,7 +699,7 @@ test_update_preserves_state_on_conflict() {
     fi
     assert_eq "$_test_local_before" "$(git -C "$WORK" rev-parse HEAD)"
     assert_eq "$_test_origin_before" "$(git --git-dir="$ORIGIN" rev-parse refs/heads/main)"
-    assert_absent "$HOME_DIR/.local/bin/grok-openai"
+    assert_absent "$HOME_DIR/.local/bin/bandicot"
     grep -q 'Candidate retained for inspection' "$FIXTURE/conflict.out" || fail 'conflict recovery path was not reported'
 }
 
@@ -634,7 +723,7 @@ test_unrelated_update_preserves_state_on_conflict() {
     assert_eq "$_test_local_before" "$(git -C "$WORK" rev-parse HEAD)"
     assert_eq "$_test_origin_before" "$(git --git-dir="$ORIGIN" rev-parse refs/heads/main)"
     assert_eq "$_test_previous_upstream" "$(sed -n '1p' "$WORK/.grok-openai-upstream")"
-    assert_absent "$HOME_DIR/.local/bin/grok-openai"
+    assert_absent "$HOME_DIR/.local/bin/bandicot"
     grep -q 'synthesizing an append-only bridge' "$FIXTURE/unrelated-conflict.out" || \
         fail 'unrelated conflict did not enter the bridge path'
     grep -q 'Candidate retained for inspection' "$FIXTURE/unrelated-conflict.out" || \
@@ -665,7 +754,7 @@ test_update_detects_upstream_race() {
     unset GROK_OPENAI_GATE_CMD_TEST
     assert_eq "$_test_local_before" "$(git -C "$WORK" rev-parse HEAD)"
     assert_eq "$_test_origin_before" "$(git --git-dir="$ORIGIN" rev-parse refs/heads/main)"
-    assert_absent "$HOME_DIR/.local/bin/grok-openai"
+    assert_absent "$HOME_DIR/.local/bin/bandicot"
     grep -q 'upstream/main changed during validation' "$FIXTURE/upstream-race.out" || \
         fail 'upstream race refusal was not actionable'
     grep -q 'Candidate retained for inspection' "$FIXTURE/upstream-race.out" || \
@@ -699,7 +788,7 @@ EOF
         SUPABASE_MCP_BEARER_TOKEN=must-not-reach-candidate \
         CANDIDATE_SECRET_SENTINEL=must-not-reach-candidate
     unset GROK_OPENAI_GATE_CMD_TEST
-    assert_file "$HOME_DIR/.local/bin/grok-openai"
+    assert_file "$HOME_DIR/.local/bin/bandicot"
 }
 
 test_update_rejects_gate_mutated_commit() {
@@ -720,7 +809,7 @@ test_update_rejects_gate_mutated_commit() {
     unset GROK_OPENAI_GATE_CMD_TEST
     assert_eq "$_test_local_before" "$(git -C "$WORK" rev-parse HEAD)"
     assert_eq "$_test_origin_before" "$(git --git-dir="$ORIGIN" rev-parse refs/heads/main)"
-    assert_absent "$HOME_DIR/.local/bin/grok-openai"
+    assert_absent "$HOME_DIR/.local/bin/bandicot"
     grep -q 'candidate HEAD changed during validation' "$FIXTURE/mutated-candidate.out" || \
         fail 'gate-mutated candidate refusal was not actionable'
     grep -q 'Candidate retained for inspection' "$FIXTURE/mutated-candidate.out" || \
@@ -745,11 +834,12 @@ test_update_preserves_state_on_gate_failure() {
     unset GROK_OPENAI_GATE_CMD_TEST
     assert_eq "$_test_local_before" "$(git -C "$WORK" rev-parse HEAD)"
     assert_eq "$_test_origin_before" "$(git --git-dir="$ORIGIN" rev-parse refs/heads/main)"
-    assert_absent "$HOME_DIR/.local/bin/grok-openai"
+    assert_absent "$HOME_DIR/.local/bin/bandicot"
     grep -q 'candidate validation gate failed' "$FIXTURE/gate-failure.out" || fail 'gate failure was not actionable'
 }
 
 test_install_isolation
+test_uninstall_provenance
 test_bypasses_require_explicit_test_mode
 test_update_success_and_noop
 test_update_accepts_unrelated_rewritten_upstream

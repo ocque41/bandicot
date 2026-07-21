@@ -15,8 +15,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 
 use xai_grok_sampling_types::{
-    ConversationRequest, ConversationResponse, EmptyResponseContext, SamplingError,
-    error::Result as SamplingResult,
+    ConversationRequest, ConversationResponse, EmptyResponseContext, InferenceTransport,
+    SamplingError, error::Result as SamplingResult,
 };
 
 use crate::client::{ApiBackend, SamplingClient};
@@ -425,6 +425,19 @@ async fn run_one_attempt(
     cancel_token: &CancellationToken,
     doom_check: Option<xai_grok_sampling_types::DoomLoopRecoveryPolicy>,
 ) -> AttemptOutcome {
+    if client.transport() == InferenceTransport::AppleFoundationModels {
+        let (model, temperature, max_tokens) = client.apple_defaults();
+        let captured = Arc::new(Mutex::new(None));
+        let l2 = crate::apple::stream_conversation(
+            request,
+            model,
+            temperature,
+            max_tokens,
+            request_id.clone(),
+            Arc::clone(&captured),
+        );
+        return drive_l2(l2, request_id, event_tx, cancel_token, captured, None).await;
+    }
     match client.api_backend() {
         ApiBackend::ChatCompletions => {
             let (raw, metadata) = match client.conversation_stream(request).await {

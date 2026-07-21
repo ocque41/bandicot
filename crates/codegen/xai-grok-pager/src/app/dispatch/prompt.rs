@@ -539,6 +539,20 @@ pub(super) fn dispatch_send_prompt_inner(
                 agent.scrollback.push_block(RenderBlock::system(msg));
                 return vec![];
             }
+            CommandResult::HostScheduleLoop {
+                session_id,
+                interval,
+                prompt,
+            } => {
+                if consume_input {
+                    agent.prompt.set_text("");
+                }
+                return vec![Effect::CreateScheduledTask {
+                    session_id,
+                    interval,
+                    prompt,
+                }];
+            }
             CommandResult::Action(Action::ExitSession) => {
                 if consume_input {
                     agent.prompt.set_text("");

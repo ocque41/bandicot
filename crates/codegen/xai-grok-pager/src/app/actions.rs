@@ -1499,6 +1499,11 @@ pub enum Effect {
         session_id: acp::SessionId,
         task_id: String,
     },
+    CreateScheduledTask {
+        session_id: acp::SessionId,
+        interval: String,
+        prompt: String,
+    },
     /// Demote a foreground execute tool to background.
     DemoteToBackground {
         session_id: acp::SessionId,
@@ -2252,6 +2257,9 @@ pub enum TaskResult {
     /// Cancel notification was sent (fire-and-forget).
     /// The real turn end comes via PromptResponse.
     CancelComplete,
+    ScheduledTaskCreateComplete {
+        result: Result<(), String>,
+    },
     /// Response to `x.ai/subagent/cancel`; see [`SubagentKillOutcome`].
     KillSubagentComplete {
         session_id: acp::SessionId,

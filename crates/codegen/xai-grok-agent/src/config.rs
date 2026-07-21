@@ -1316,7 +1316,11 @@ impl AgentDefinition {
                 return scope;
             }
         }
-        if path_str.contains(".grok/agents/") || path_str.contains(".grok\\agents\\") {
+        if path_str.contains(".bandicot/agents/")
+            || path_str.contains(".bandicot\\agents\\")
+            || path_str.contains(".grok/agents/")
+            || path_str.contains(".grok\\agents\\")
+        {
             return AgentScope::Project;
         }
         if path_str.contains(".grok/bundled/agents/")

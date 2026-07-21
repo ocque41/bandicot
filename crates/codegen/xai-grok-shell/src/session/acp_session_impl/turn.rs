@@ -334,6 +334,79 @@ impl SessionActor {
                     _ => return self.execute_builtin_slash_command(action).await,
                 }
             }
+            Err(SlashCommandOutcome::ScheduleLoop { interval, prompt }) => {
+                let prompt = crate::session::loop_context::augment_loop_prompt(
+                    &self.session_info.cwd,
+                    &prompt,
+                )
+                .await;
+                let result = self
+                    .agent
+                    .borrow()
+                    .tool_bridge()
+                    .create_scheduled_task(
+                        xai_grok_tools::implementations::grok_build::scheduler::create::SchedulerCreateInput {
+                            interval,
+                            prompt,
+                            recurring: true,
+                            durable: Some(true),
+                            fire_immediately: true,
+                        },
+                    )
+                    .await;
+                match result {
+                    Ok(created) => {
+                        self.send_slash_command_output(&format!(
+                            "Scheduled task {} {}. It expires after 7 days.",
+                            created.id, created.human_schedule
+                        ))
+                        .await;
+                    }
+                    Err(error) => self.send_slash_command_output(&error.to_string()).await,
+                }
+                return ok_end_turn(0, None);
+            }
+            Err(SlashCommandOutcome::ApprovedLoopWorkflow(workflow)) => {
+                self.plan_mode
+                    .lock()
+                    .start_approved_loop(workflow.interval, workflow.objective.clone());
+                self.plan_mode.lock().enter_pending();
+                *self.current_prompt_mode.lock() = PromptMode::Plan;
+                *self.turn_prompt_mode.lock() = PromptMode::Plan;
+                self.persist_plan_mode_state();
+                self.enqueue_current_mode_update(acp::SessionModeId::new(
+                    xai_grok_tools::types::SessionMode::Plan.as_id(),
+                ));
+                vec![acp::ContentBlock::Text(acp::TextContent::new(format!(
+                    "Create one implementation plan for this objective in plan.md, then call \
+                     exit_plan_mode so I can explicitly approve it. Do not implement before \
+                     approval.\n\nObjective: {}",
+                    workflow.objective
+                )))]
+            }
+            Err(SlashCommandOutcome::ApprovedLoopWake(workflow_id)) => {
+                if !matches!(
+                    super::super::PromptOrigin::from_prompt_id(prompt_id),
+                    super::super::PromptOrigin::SchedulerFired
+                ) {
+                    self.send_slash_command_output("Ignored invalid workflow wakeup.")
+                        .await;
+                    return ok_end_turn(0, None);
+                }
+                let task_id = prompt_id
+                    .strip_prefix("scheduler-fired-")
+                    .unwrap_or_default();
+                match self.resume_approved_loop_wake(&workflow_id, task_id).await {
+                    GoalResumeOutcome::Inference { reminder, user_msg } => {
+                        self.send_slash_command_output(&user_msg).await;
+                        vec![acp::ContentBlock::Text(acp::TextContent::new(reminder))]
+                    }
+                    GoalResumeOutcome::Message(message) => {
+                        self.send_slash_command_output(&message).await;
+                        return ok_end_turn(0, None);
+                    }
+                }
+            }
             Err(SlashCommandOutcome::InvokeSkill {
                 blocks: original_blocks,
                 skills: parsed_skills,
