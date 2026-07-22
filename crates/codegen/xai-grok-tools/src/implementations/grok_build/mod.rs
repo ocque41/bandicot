@@ -32,6 +32,7 @@ pub mod update_goal;
 pub mod video_gen;
 pub mod web_fetch;
 pub mod web_search;
+pub mod workflow;
 pub use ask_user_question::AskUserQuestionTool;
 pub use bash::BashTool;
 pub use deploy_app::{AppBuilderDeployerConfig, DEPLOY_APP_TOOL_NAME};
@@ -49,9 +50,10 @@ pub use lsp::LspTool;
 pub use monitor::tool::MonitorTool;
 pub use read_file::ReadFileTool;
 pub use scheduler::create::{
-    ApprovedLoopWorkflow, SCHEDULER_CREATE_TOOL_NAME, SchedulerCreateTool,
-    loop_schedule_instruction, loop_usage_message, parse_approved_loop_workflow,
-    parse_explicit_loop,
+    SCHEDULER_CREATE_TOOL_NAME, SchedulerCreateTool, loop_schedule_instruction, loop_usage_message,
+};
+pub use xai_grok_tools_api::slash_commands::{
+    ApprovedLoopWorkflow, parse_approved_loop_workflow, parse_explicit_loop,
 };
 pub use scheduler::delete::{SCHEDULER_DELETE_TOOL_NAME, SchedulerDeleteTool};
 pub use scheduler::list::SchedulerListTool;
@@ -67,3 +69,4 @@ pub use video_gen::{
 };
 pub use web_fetch::{WebFetchClient, WebFetchConfig, WebFetchParams, WebFetchTool};
 pub use web_search::WebSearchTool;
+pub use workflow::{WORKFLOW_TOOL_NAME, WorkflowTool};

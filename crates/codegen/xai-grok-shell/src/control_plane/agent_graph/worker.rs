@@ -7,10 +7,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use thiserror::Error;
 use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 use xai_grok_tools::implementations::grok_build::task::backend::SubagentBackend as ExistingSubagentBackend;
 use xai_grok_tools::implementations::grok_build::task::types::{
-    ModelOverrideProvenance, SubagentCancelOutcome, SubagentRequest, SubagentResult,
+    ModelOverrideProvenance, SubagentCancelOutcome, SubagentOwner, SubagentRequest, SubagentResult,
     SubagentRuntimeOverrides, SubagentSnapshotStatus, SubagentValidateTypeOutcome,
 };
 use xai_tool_types::{
@@ -327,10 +328,18 @@ impl SubagentWorkerBackend {
                 )),
                 hosted_multi_agent: Some(false),
                 harness_agent_type: None,
+                completion_output_cap: None,
+                spawn_depth: None,
+                output_token_budget: None,
+                output_schema: None,
+                loop_task_id: None,
             },
             run_in_background: false,
             surface_completion: false,
+            await_to_completion: false,
             fork_context: false,
+            owner: SubagentOwner::Task,
+            cancel_token: CancellationToken::new(),
             result_tx,
         })
     }
@@ -432,6 +441,9 @@ impl SubagentWorkerBackend {
                 turns,
                 duration_ms: snapshot.duration_ms,
                 tokens_used: 0,
+                output_tokens_used: 0,
+                total_tokens_used: 0,
+                output_usage_incomplete: false,
                 worktree_path,
                 backgrounded: false,
             })),
@@ -446,6 +458,9 @@ impl SubagentWorkerBackend {
                 turns: 0,
                 duration_ms: snapshot.duration_ms,
                 tokens_used: 0,
+                output_tokens_used: 0,
+                total_tokens_used: 0,
+                output_usage_incomplete: false,
                 worktree_path: None,
                 backgrounded: false,
             })),
@@ -460,6 +475,9 @@ impl SubagentWorkerBackend {
                 turns: 0,
                 duration_ms: snapshot.duration_ms,
                 tokens_used: 0,
+                output_tokens_used: 0,
+                total_tokens_used: 0,
+                output_usage_incomplete: false,
                 worktree_path: None,
                 backgrounded: false,
             })),

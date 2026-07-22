@@ -543,6 +543,148 @@ impl ToolBridge {
         }
     }
 
+    /// Snapshot the session's scheduled tasks; empty when no scheduler is
+    /// registered or the actor has stopped.
+    pub async fn create_scheduled_task(
+        &self,
+        input: crate::implementations::grok_build::scheduler::create::SchedulerCreateInput,
+    ) -> Result<
+        crate::implementations::grok_build::scheduler::create::SchedulerCreateOutput,
+        xai_tool_runtime::ToolError,
+    > {
+        use crate::implementations::grok_build::scheduler::create::SchedulerCreateOutput;
+        use crate::implementations::grok_build::scheduler::interval::{
+            interval_to_human, parse_interval,
+        };
+        use crate::implementations::grok_build::scheduler::types::{
+            ScheduledTask, SchedulerCommand, SchedulerHandle, scheduler_tool_error,
+        };
+
+        let interval_secs = input
+            .interval
+            .as_deref()
+            .map(parse_interval)
+            .transpose()
+            .map_err(|e| xai_tool_runtime::ToolError::invalid_arguments(e.to_string()))?;
+        let sender = {
+            let res = self.registry.resources.lock().await;
+            res.get::<SchedulerHandle>()
+                .ok_or_else(|| {
+                    xai_tool_runtime::ToolError::custom("missing_resource", "SchedulerHandle")
+                })?
+                .0
+                .clone()
+        };
+        let send_and_wait = |cmd: SchedulerCommand,
+                             reply_rx: tokio::sync::oneshot::Receiver<
+            Result<
+                ScheduledTask,
+                crate::implementations::grok_build::scheduler::types::SchedulerError,
+            >,
+        >| async move {
+            sender.send(cmd).map_err(|_| {
+                xai_tool_runtime::ToolError::custom("process_manager", "Scheduler actor stopped")
+            })?;
+            reply_rx
+                .await
+                .map_err(|_| {
+                    xai_tool_runtime::ToolError::custom(
+                        "process_manager",
+                        "Scheduler actor dropped reply",
+                    )
+                })?
+                .map_err(scheduler_tool_error)
+        };
+
+        if let Some(task_id) = input.task_id {
+            if input.prompt.is_none() && interval_secs.is_none() {
+                return Err(xai_tool_runtime::ToolError::invalid_arguments(
+                    "nothing to update: provide interval and/or prompt alongside task_id",
+                ));
+            }
+            let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+            let updated = send_and_wait(
+                SchedulerCommand::Update {
+                    id: task_id,
+                    prompt: input.prompt,
+                    interval_secs,
+                    reply: reply_tx,
+                },
+                reply_rx,
+            )
+            .await?;
+            return Ok(SchedulerCreateOutput {
+                id: updated.id,
+                human_schedule: interval_to_human(updated.interval_secs),
+                updated: true,
+            });
+        }
+        if !input.recurring {
+            return Err(xai_tool_runtime::ToolError::invalid_arguments(
+                "one-shot tasks are not supported; use a background terminal command",
+            ));
+        }
+        let interval_secs = interval_secs.ok_or_else(|| {
+            xai_tool_runtime::ToolError::invalid_arguments(
+                "interval is required when creating a task",
+            )
+        })?;
+        let prompt = input.prompt.ok_or_else(|| {
+            xai_tool_runtime::ToolError::invalid_arguments(
+                "prompt is required when creating a task",
+            )
+        })?;
+        let durable = input.durable.unwrap_or(false);
+        let mut task = ScheduledTask::with_fire_immediately(
+            interval_secs,
+            prompt,
+            true,
+            durable,
+            input.fire_immediately,
+        );
+        task.foreground = input.foreground.unwrap_or(false);
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        let created = send_and_wait(
+            SchedulerCommand::Create {
+                task,
+                reply: reply_tx,
+            },
+            reply_rx,
+        )
+        .await?;
+        Ok(SchedulerCreateOutput {
+            id: created.id,
+            human_schedule: interval_to_human(interval_secs),
+            updated: false,
+        })
+    }
+
+    pub async fn list_scheduled_tasks(
+        &self,
+    ) -> Vec<crate::implementations::grok_build::scheduler::types::ScheduledTask> {
+        use crate::implementations::grok_build::scheduler::types::{
+            SchedulerCommand, SchedulerHandle,
+        };
+        let sender = {
+            let res = self.registry.resources.lock().await;
+            match res.get::<SchedulerHandle>() {
+                Some(handle) => handle.0.clone(),
+                None => return Vec::new(),
+            }
+        };
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        if sender
+            .send(SchedulerCommand::List { reply: reply_tx })
+            .is_err()
+        {
+            return Vec::new();
+        }
+        reply_rx
+            .await
+            .map(|snapshot| snapshot.tasks)
+            .unwrap_or_default()
+    }
+
     pub async fn delete_scheduled_task(
         &self,
         task_id: &str,
@@ -568,60 +710,15 @@ impl ToolBridge {
             .map_err(|_| {
                 xai_tool_runtime::ToolError::custom("process_manager", "Scheduler actor stopped")
             })?;
-        reply_rx.await.map_err(|_| {
-            xai_tool_runtime::ToolError::custom("process_manager", "Scheduler actor dropped reply")
-        })
-    }
-
-    pub async fn create_scheduled_task(
-        &self,
-        input: crate::implementations::grok_build::scheduler::create::SchedulerCreateInput,
-    ) -> Result<
-        crate::implementations::grok_build::scheduler::create::SchedulerCreateOutput,
-        xai_tool_runtime::ToolError,
-    > {
-        use crate::implementations::grok_build::scheduler::{
-            create::create_scheduled_task, types::SchedulerHandle,
-        };
-        let handle = {
-            let res = self.registry.resources.lock().await;
-            res.get::<SchedulerHandle>()
-                .ok_or_else(|| {
-                    xai_tool_runtime::ToolError::custom("missing_resource", "SchedulerHandle")
-                })?
-                .clone()
-        };
-        create_scheduled_task(&handle, input)
+        reply_rx
             .await
-            .map_err(|error| xai_tool_runtime::ToolError::invalid_arguments(error.to_string()))
-    }
-
-    pub async fn list_scheduled_tasks(
-        &self,
-    ) -> Result<
-        Vec<crate::implementations::grok_build::scheduler::types::ScheduledTask>,
-        xai_tool_runtime::ToolError,
-    > {
-        use crate::implementations::grok_build::scheduler::types::{
-            SchedulerCommand, SchedulerHandle,
-        };
-        let sender = {
-            let resources = self.registry.resources.lock().await;
-            resources
-                .get::<SchedulerHandle>()
-                .ok_or_else(|| {
-                    xai_tool_runtime::ToolError::custom("missing_resource", "SchedulerHandle")
-                })?
-                .0
-                .clone()
-        };
-        let (reply, response) = tokio::sync::oneshot::channel();
-        sender.send(SchedulerCommand::List { reply }).map_err(|_| {
-            xai_tool_runtime::ToolError::custom("process_manager", "Scheduler actor stopped")
-        })?;
-        response.await.map_err(|_| {
-            xai_tool_runtime::ToolError::custom("process_manager", "Scheduler actor dropped reply")
-        })
+            .map_err(|_| {
+                xai_tool_runtime::ToolError::custom(
+                    "process_manager",
+                    "Scheduler actor dropped reply",
+                )
+            })?
+            .map_err(crate::implementations::grok_build::scheduler::types::scheduler_tool_error)
     }
 
     /// Move a foreground command to background by tool_call_id.
@@ -645,8 +742,12 @@ impl ToolBridge {
 
     /// Drain newly-completed bash background tasks not yet reported.
     /// Marks returned tasks in [`ReportedTaskCompletions`] to prevent
-    /// duplicate reminders from [`TaskCompletionReminder`].
-    pub async fn drain_between_turn_bash_completions(&self) -> Vec<TaskSnapshot> {
+    /// duplicate reminders from [`TaskCompletionReminder`]. Reserved IDs stay
+    /// unreported for a later genuine user turn.
+    pub async fn drain_between_turn_bash_completions(
+        &self,
+        reserved_ids: &[String],
+    ) -> Vec<TaskSnapshot> {
         let tasks = match self.list_tasks().await {
             Some(t) => t,
             None => return Vec::new(),
@@ -676,6 +777,7 @@ impl ToolBridge {
         completed
             .into_iter()
             .filter(|t| task_owned_by_session(t, my_owner.as_deref()))
+            .filter(|t| !reserved_ids.contains(&t.task_id))
             .filter(|t| state.mark_reported(&t.task_id))
             .collect()
     }
@@ -868,7 +970,7 @@ mod tests {
             terminal: Some(backend),
         };
 
-        let drained = bridge.drain_between_turn_bash_completions().await;
+        let drained = bridge.drain_between_turn_bash_completions(&[]).await;
         let ids: Vec<&str> = drained.iter().map(|t| t.task_id.as_str()).collect();
 
         assert!(ids.contains(&"mine-task"), "own task must drain: {ids:?}");
@@ -879,6 +981,38 @@ mod tests {
         assert!(
             !ids.contains(&"parent-task"),
             "another session's task must NOT leak into this session: {ids:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn between_turn_bash_completions_skip_reserved_ids_without_reporting_them() {
+        let toolset = FinalizedToolset::empty_for_test();
+        {
+            let mut res = toolset.resources.lock().await;
+            res.register_state::<ReportedTaskCompletions>();
+        }
+        let backend: Arc<dyn TerminalBackend> = Arc::new(MockTerminal {
+            tasks: vec![completed_task("reserved", None)],
+        });
+        let bridge = ToolBridge {
+            registry: Arc::new(toolset),
+            terminal: Some(backend),
+        };
+
+        assert!(
+            bridge
+                .drain_between_turn_bash_completions(&["reserved".to_string()])
+                .await
+                .is_empty()
+        );
+        assert_eq!(
+            bridge
+                .drain_between_turn_bash_completions(&[])
+                .await
+                .into_iter()
+                .map(|task| task.task_id)
+                .collect::<Vec<_>>(),
+            vec!["reserved".to_string()]
         );
     }
 }

@@ -331,6 +331,13 @@ async fn list_skills_with_options(
         &mut seen_canonical_paths,
         &mut skill_files,
     );
+    let native_dir = global_dir.join("native");
+    collect_discovered_paths(
+        find_skill_paths(&native_dir),
+        SkillScope::Bundled,
+        &mut seen_canonical_paths,
+        &mut skill_files,
+    );
 
     parse_skill_files(skill_files)
 }
@@ -2124,6 +2131,30 @@ mod tests {
             names.contains(&"commit"),
             "Expected bundled 'commit' skill, got: {names:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn native_fallback_skills_are_discovered() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let repo_root = tmp.path().join("repo");
+        fs::create_dir_all(&repo_root).unwrap();
+        init_git_repo(&repo_root);
+        write_skill_md(
+            &home.join("native").join("skills").join("create-workflow"),
+            "create-workflow",
+        );
+
+        let skills = list_skills_with_options(
+            Some(repo_root.to_str().unwrap()),
+            None,
+            &home,
+            CompatConfig::default(),
+        )
+        .await;
+        assert!(skills.iter().any(|skill| {
+            skill.name == "create-workflow" && skill.scope == SkillScope::Bundled
+        }));
     }
 
     #[tokio::test]

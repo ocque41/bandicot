@@ -793,16 +793,11 @@ impl ReasoningEffort {
             Self::Medium => crate::rs::ReasoningEffort::Medium,
             Self::High => crate::rs::ReasoningEffort::High,
             Self::Xhigh => crate::rs::ReasoningEffort::Xhigh,
-            // async-openai 0.33 does not expose `max`. This is only a typed
-            // staging value: Responses API serialization must override the
-            // resulting effort to the literal `"max"` before sending it.
-            Self::Max => crate::rs::ReasoningEffort::Xhigh,
+            Self::Max => crate::rs::ReasoningEffort::Max,
         }
     }
 
-    /// Convert the effort echoed by the Responses API. Because async-openai
-    /// 0.33 has no `Max` variant, an echoed `Xhigh` remains `Xhigh`; callers
-    /// cannot reconstruct a staged `Max` value through this SDK type.
+    /// Convert the effort echoed by the Responses API.
     pub fn from_responses_api(effort: crate::rs::ReasoningEffort) -> Self {
         match effort {
             crate::rs::ReasoningEffort::None => Self::None,
@@ -811,6 +806,7 @@ impl ReasoningEffort {
             crate::rs::ReasoningEffort::Medium => Self::Medium,
             crate::rs::ReasoningEffort::High => Self::High,
             crate::rs::ReasoningEffort::Xhigh => Self::Xhigh,
+            crate::rs::ReasoningEffort::Max => Self::Max,
         }
     }
 

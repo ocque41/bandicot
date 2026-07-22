@@ -17,6 +17,34 @@ fn byok_from_models(
         .or_else(|| models.values().find_map(|m| m.own_credential()))
 }
 impl MvpAgent {
+    pub fn reload_skills_all_sessions(&self) -> usize {
+        let session_ids: Vec<agent_client_protocol::SessionId> = self
+            .sessions
+            .borrow()
+            .keys()
+            .cloned()
+            .collect();
+        for sid in &session_ids {
+            if let Some(handle) = self.sessions.borrow().get(sid).cloned() {
+                let _ = handle.cmd_tx.send(SessionCommand::ReloadSkills);
+            }
+        }
+        session_ids.len()
+    }
+    pub fn advertise_commands_all_sessions(&self) -> usize {
+        let session_ids: Vec<agent_client_protocol::SessionId> = self
+            .sessions
+            .borrow()
+            .keys()
+            .cloned()
+            .collect();
+        for session_id in &session_ids {
+            if let Some(handle) = self.sessions.borrow().get(session_id).cloned() {
+                let _ = handle.cmd_tx.send(SessionCommand::AdvertiseCommands);
+            }
+        }
+        session_ids.len()
+    }
     pub(super) fn resolve_image_description_model(&self) -> String {
         self.cfg
             .borrow()
@@ -557,12 +585,7 @@ impl MvpAgent {
     /// `acp_session.rs` fill in the real per-model gating as soon as a
     /// session starts.
     ///
-    /// Exception: `/goal` is gated on the `resolve_goal()` feature flag
-    /// (a config/managed-settings switch known at initialize time) plus
-    /// the `update_goal` tool, which is part of the default coding-agent
-    /// toolset. So when the flag is on we advertise `/goal` pre-session;
     /// otherwise it wouldn't appear in the slash menu until after the
-    /// first user turn created a session.
     pub(crate) fn command_availability(
         &self,
     ) -> crate::session::slash_commands::CommandAvailability {
@@ -808,6 +831,7 @@ impl MvpAgent {
         let is_xai = auth.is_xai_auth();
         let user_id = auth.user_id.clone();
         let team_id = auth.team_id.clone();
+        let remote_was_absent = self.cfg.borrow().remote_settings.is_none();
         let Some(settings) = self.fetch_remote_settings(auth.clone()).await else {
             tracing::warn!("post-auth settings refresh failed (HTTP or parse error)");
             return;
@@ -869,6 +893,9 @@ impl MvpAgent {
         crate::auth::credential_provider::sync_external_otel_identity();
         self.emit_announcements(AnnouncementsPushMode::IfChanged);
         self.reconfigure_heap_profile_monitor();
+        if remote_was_absent {
+            self.spawn_auto_worktree_gc();
+        }
     }
     /// Refresh remote settings settings and re-resolve eagerly-resolved config fields.
     ///
@@ -883,7 +910,6 @@ impl MvpAgent {
         auth: &crate::auth::GrokAuth,
     ) {
         self.refresh_remote_settings(auth).await;
-        let cwd = std::env::current_dir().ok();
         {
             let mut cfg = self.cfg.borrow_mut();
             crate::util::config::sync_campaign_fields(&mut cfg);
@@ -894,7 +920,7 @@ impl MvpAgent {
                     );
                     toml::Value::Table(toml::map::Map::new())
                 });
-            cfg.re_resolve_runtime_fields(&raw_config, cwd.as_deref());
+            cfg.re_resolve_runtime_fields(&raw_config);
         }
         self.sync_collection_config_gate();
         self.emit_settings_update_notification();
@@ -1450,6 +1476,7 @@ impl MvpAgent {
     /// Params resolution (TOML > env > remote settings > default):
     /// - `proxy_endpoint`: `[toolset.web_fetch] proxy_endpoint` > `GROK_WEB_FETCH_PROXY` > remote settings > None
     /// - `allowed_domains`: `[toolset.web_fetch] allowed_domains` > remote settings > built-in defaults
+    /// - `allow_local`: `[toolset.web_fetch] allow_local` > `GROK_WEB_FETCH_ALLOW_LOCAL` > false
     pub(super) fn prepare_web_fetch_config(
         &self,
     ) -> xai_grok_tools::implementations::grok_build::web_fetch::WebFetchConfig {
@@ -1518,9 +1545,9 @@ impl MvpAgent {
             raw,
             cfg.remote_settings.as_ref(),
         );
-        let session_registry_local = config_root
-            .as_ref()
-            .and_then(crate::util::config::session_registry_from_toml_opt);
+        let session_registry_local = crate::util::config::session_registry_local_override(
+            config_root.as_ref(),
+        );
         tracing::info!(
             worktree_type = ? worktree_type, source = wt_source,
             "WORKTREE_CONFIG_SHELL: resolved worktree type at agent startup"
@@ -1556,10 +1583,6 @@ impl MvpAgent {
             resident_roster_titles: RefCell::new(HashMap::new()),
             initialize_request: OnceLock::new(),
             gateway,
-            subagent_model_overrides: cfg.subagent_model_overrides.clone(),
-            subagent_toggle: cfg.subagent_toggle.clone(),
-            subagent_roles: cfg.subagent_roles.clone(),
-            subagent_personas: cfg.subagent_personas.clone(),
             launch_cwd: std::env::current_dir()
                 .unwrap_or_else(|_| std::path::PathBuf::from(".")),
             launch_dir_trust: std::cell::OnceCell::new(),
@@ -1568,11 +1591,6 @@ impl MvpAgent {
                 cfg.plugins.cli_plugin_dirs.clone(),
             ),
             plugin_registry_initialized: std::cell::Cell::new(false),
-            persona_io_summaries: cfg
-                .subagent_personas
-                .iter()
-                .map(|(name, p)| p.render_io_summary(name))
-                .collect(),
             models_manager,
             chat_modes: {
                 let chat_modes = crate::agent::chat_modes::ChatModesManager::new(
@@ -2242,8 +2260,7 @@ impl MvpAgent {
         )
     }
     /// Like `trace_upload_config`, but also returns the reason why uploads
-    /// are enabled/disabled. Used by `get_trace_context` to record
-    /// `upload_reason` on the `agent.prompt` span.
+    /// are enabled or disabled for structured session events.
     async fn trace_upload_config_with_reason(
         &self,
     ) -> (
@@ -2683,7 +2700,6 @@ impl MvpAgent {
         let (upload_method, upload_reason) = self
             .trace_upload_config_with_reason()
             .await;
-        tracing::Span::current().record("upload_reason", upload_reason.as_str());
         {
             let mut decision = self.cfg.borrow().trace_upload_decision_debug();
             if let Some(obj) = decision.as_object_mut() {
@@ -2708,12 +2724,8 @@ impl MvpAgent {
             );
         }
         let upload_method = match upload_method {
-            Some(method) => {
-                tracing::Span::current().record("uploads_enabled", true);
-                method
-            }
+            Some(method) => method,
             None => {
-                tracing::Span::current().record("uploads_enabled", false);
                 xai_grok_telemetry::session_ctx::log_session_event(crate::agent::session_metrics::TraceUploadSkipped {
                     session_id: session_info.id.0.to_string(),
                     turn_number,
@@ -2729,7 +2741,6 @@ impl MvpAgent {
                     match cfg.endpoints.resolve_trace_bucket_url() {
                         Some(resolved) => Some(resolved.value),
                         None => {
-                            tracing::Span::current().record("uploads_enabled", false);
                             xai_grok_telemetry::session_ctx::log_session_event(crate::agent::session_metrics::TraceUploadSkipped {
                                 session_id: session_info.id.0.to_string(),
                                 turn_number,
@@ -2757,12 +2768,6 @@ impl MvpAgent {
         let session_handle = match self.sessions.borrow().get(&session_info.id) {
             Some(h) => h.clone(),
             None => {
-                tracing::Span::current().record("uploads_enabled", false);
-                tracing::Span::current()
-                    .record(
-                        "upload_reason",
-                        crate::upload::turn::TraceUploadReason::SessionNotFound.as_str(),
-                    );
                 return None;
             }
         };
@@ -2984,6 +2989,7 @@ impl MvpAgent {
             persisted_signals,
             persisted_plan_mode,
             persisted_goal_mode,
+            persisted_workflow_runs,
             persisted_announcement_state,
             session_meta,
             managed_mcp_expires_at,
@@ -3131,6 +3137,7 @@ impl MvpAgent {
             let resolved = cfg.resolve_feedback();
             let flags = crate::session::feedback_manager::FeedbackFlags {
                 enabled: resolved.value,
+                user: cfg.feedback.user.clone(),
             };
             (resolved, flags)
         };
@@ -3254,6 +3261,7 @@ impl MvpAgent {
             .cfg
             .borrow()
             .resolve_compaction_verbatim_input();
+        let compaction_tool_choice = self.cfg.borrow().resolve_compaction_tool_choice();
         let two_pass_enabled = self.cfg.borrow().is_two_pass_compaction_enabled();
         let auto_update = self.cfg.borrow().cli.auto_update;
         let client_type = *self.client_type.borrow();
@@ -3444,6 +3452,7 @@ impl MvpAgent {
         let web_fetch_config = self.prepare_web_fetch_config();
         let write_file_enabled = self.cfg.borrow().resolve_write_file().value;
         let goal_enabled = self.cfg.borrow().resolve_goal().value;
+        let background_workflows_enabled = self.cfg.borrow().resolve_workflows().value;
         let subagents_enabled = self.cfg.borrow().subagents_enabled;
         let ask_user_question_enabled = crate::upload::turn::parse_ask_user_question_from_meta(
                 session_meta,
@@ -3456,7 +3465,7 @@ impl MvpAgent {
         let laziness_debug_log_for_spawn = self.cfg.borrow().laziness_debug_log.clone();
         let respect_gitignore = self.cfg.borrow().respect_gitignore;
         let path_not_found_hints = self.cfg.borrow().path_not_found_hints;
-        let subagent_toggle = self.subagent_toggle.clone();
+        let subagent_toggle = self.cfg.borrow().subagent_toggle.clone();
         let handle_display_cwd = prompt_display_cwd.clone();
         let auth_manager = Some(self.auth_manager.clone());
         let bash_params_json = {
@@ -3599,6 +3608,7 @@ impl MvpAgent {
                 .as_ref()
                 .and_then(|m| m.get("x.ai/gitHeadChanged"))
                 .and_then(|v| v.as_bool());
+            let session_cwd = std::path::Path::new(&session_info.cwd);
             let fs_watch_caps = crate::session::fs_watch::FsWatchCapabilities::resolve(crate::session::fs_watch::CapabilityInputs {
                 client_notify: fs_notify_config.is_some(),
                 hunk_tracking: hunk_plan.enabled(),
@@ -3633,6 +3643,7 @@ impl MvpAgent {
                     system_prompt_label,
                     compaction_mode,
                     compaction_verbatim_input,
+                    compaction_tool_choice,
                     two_pass_enabled,
                     buffering_settings,
                     origin_client.clone(),
@@ -3655,6 +3666,7 @@ impl MvpAgent {
                     persisted_signals,
                     persisted_plan_mode,
                     persisted_goal_mode,
+                    persisted_workflow_runs,
                     persisted_announcement_state,
                     self.memory_config.clone(),
                     loc_tracking_enabled,
@@ -3675,12 +3687,13 @@ impl MvpAgent {
                     app_builder_deployer_config,
                     write_file_enabled,
                     goal_enabled,
+                    background_workflows_enabled,
                     subagents_enabled,
                     ask_user_question_enabled,
                     client_hooks,
                     prompt_display_cwd,
                     subagent_toggle,
-                    self.persona_io_summaries.clone(),
+                    Vec::new(),
                     xai_grok_agent::prompt::context::PromptAudience::Primary,
                     None,
                     None,
@@ -3690,7 +3703,6 @@ impl MvpAgent {
                     path_not_found_hints,
                     tool_params_json,
                     {
-                        let session_cwd = std::path::Path::new(&session_info.cwd);
                         let disk_cfg = crate::config::resolve_effective_plugins_config(
                                 session_cwd,
                             )

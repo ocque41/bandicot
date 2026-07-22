@@ -395,7 +395,7 @@ pub async fn handle_scheduler(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRe
                 .map(|created| CreateScheduledTaskResponse {
                     task_id: created.id,
                     human_schedule: created.human_schedule,
-                    recurring: created.recurring,
+                    recurring: true,
                 });
             respond(result)
         }
