@@ -1938,7 +1938,7 @@ impl SamplingClient {
             deployment_id: request.x_grok_deployment_id.as_deref(),
             user_id: request.x_grok_user_id.as_deref(),
         };
-        let extra_raw_tools = std::mem::take(&mut request.extra_raw_tools);
+        let extra_tool_entries = std::mem::take(&mut request.extra_tool_entries);
         let mut request_body = serde_json::to_value(&request.inner).map_err(|e| {
             tracing::error!("Failed to serialize responses request: {}", e);
             SamplingError::Serialization(e)
@@ -1949,7 +1949,7 @@ impl SamplingClient {
             &mut request_body,
             request.reasoning_effort,
             true,
-            extra_raw_tools,
+            extra_tool_entries,
         );
         let span = tracing::Span::current();
         let mut retried_without_priority_service_tier = false;
@@ -2526,7 +2526,12 @@ impl SamplingClient {
         if !self.xai_wire_extensions {
             request
                 .hosted_tools
-                .retain(|tool| !matches!(tool, xai_grok_sampling_types::HostedTool::XSearch));
+                .retain(|tool| {
+                    !matches!(
+                        tool,
+                        xai_grok_sampling_types::HostedTool::XSearch { .. }
+                    )
+                });
         }
     }
 
@@ -2598,7 +2603,7 @@ impl SamplingClient {
         // Collect xAI-specific tools that can't be expressed via rs::Tool
         // (e.g., x_search). These are injected as raw JSON after serialization.
         let extra_tools = if self.xai_wire_extensions {
-            xai_grok_sampling_types::extra_raw_tools(&request.hosted_tools)
+            xai_grok_sampling_types::extra_tool_entries(&request.hosted_tools)
         } else {
             Vec::new()
         };
@@ -2609,7 +2614,7 @@ impl SamplingClient {
         wrapper.x_grok_session_id = x_grok_session_id;
         wrapper.x_grok_turn_idx = x_grok_turn_idx;
         wrapper.x_grok_agent_id = x_grok_agent_id;
-        wrapper.extra_raw_tools = extra_tools;
+        wrapper.extra_tool_entries = extra_tools;
 
         if let Some(trace) = trace {
             wrapper.trace = Some(trace);
@@ -2992,7 +2997,9 @@ mod tests {
             description: Some("provider-neutral function".to_owned()),
             parameters: serde_json::json!({"type": "object"}),
         });
-        request.hosted_tools = vec![xai_grok_sampling_types::HostedTool::XSearch];
+        request.hosted_tools = vec![xai_grok_sampling_types::HostedTool::XSearch {
+            options: None,
+        }];
         client.strip_non_xai_hosted_tools(&mut request);
 
         let wrapper: CreateResponseWrapper = (&request).into();

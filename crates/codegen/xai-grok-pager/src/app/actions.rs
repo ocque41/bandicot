@@ -604,6 +604,14 @@ pub enum Action {
     OpenConnect,
     /// Open the pager-local account/model route browser.
     OpenModels,
+    /// Open settings focused on a registry key (e.g. privacy banner Customize).
+    OpenSettingsFocus {
+        key: &'static str,
+    },
+    /// Welcome privacy banner Accept (opt-in; ack after ACP success).
+    PrivacyBannerAccept,
+    /// Welcome privacy banner Customize (ack + open settings on coding_data_sharing).
+    PrivacyBannerCustomize,
     /// Open the command palette (`/help`). The keybinding path (Ctrl+P) opens it
     /// directly in `handle_agent_action`; this lets a slash command reach the
     /// same modal through dispatch.
@@ -657,7 +665,7 @@ pub enum Action {
     TaskComplete(TaskResult),
     /// Share the current session via URL.
     ShareSession,
-    /// Show session info (ID, cwd, model, context usage) instantly.
+    /// Show session info (auth, ID, cwd, model, context usage) instantly.
     ShowSessionInfo,
     /// Show release notes in a modal.
     ShowReleaseNotes {
@@ -771,6 +779,11 @@ pub enum Action {
         model_id: acp::ModelId,
         effort: Option<ReasoningEffort>,
     },
+    DoctorFixConfirmed {
+        target: DoctorFixTarget,
+        plan: Box<crate::diagnostics::FixPlan>,
+    },
+    DoctorFixCancelled(DoctorFixTarget),
     /// User selected a project directory from the project picker.
     ProjectSelected {
         path: std::path::PathBuf,
@@ -1146,8 +1159,8 @@ impl PlanModeKind {
 /// variant needs no agent/schema change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CancelTrigger {
-    /// Wire value `"esc"` (set only by the Esc cancel-retry while
-    /// TurnCancelling; a bare Esc no longer starts a cancel).
+    /// Wire value `"esc"` (bare Esc mid-turn cancel in minimal / non-vim
+    /// mode, plus the Esc cancel-retry while TurnCancelling).
     Esc,
     /// `Ctrl+C` pressed (the default cancel keybinding).
     CtrlC,
@@ -1354,6 +1367,13 @@ pub enum ProbedAttachment {
     ProbeDropped,
     /// The attachment probe task failed or timed out.
     ProbeFailed,
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DoctorFixTarget {
+    pub agent_id: AgentId,
+    pub session_id: Option<acp::SessionId>,
+    pub session_binding_epoch: u32,
+    pub cwd: std::path::PathBuf,
 }
 #[derive(Debug)]
 pub enum Effect {
@@ -1563,6 +1583,8 @@ pub enum Effect {
     PersistAnnouncementsHidden {
         hidden_ids: std::collections::BTreeSet<String>,
     },
+    /// Persist `[privacy].privacy_banner_acked` (RFC 3339 dismiss time).
+    PersistPrivacyBannerAcked { acked_at: String },
     /// Persist memory modal fullscreen preference to `[hints]` in config.toml.
     PersistMemoryFullscreen { fullscreen: bool },
     /// Persist the project-picker opt-out to `[hints] project_picker_disabled`.
@@ -1865,6 +1887,7 @@ pub enum Effect {
         session_id: acp::SessionId,
     },
     /// Fetch and display session info via x.ai/session/info.
+    /// Auth lines are derived in the effect from SessionFlags + env (not Effect fields).
     ShowSessionInfo {
         agent_id: AgentId,
         session_id: acp::SessionId,
@@ -2103,6 +2126,16 @@ pub enum Effect {
     PreparePromptImagePreview {
         preparation: crate::prompt_images::PromptImagePreviewPreparation,
     },
+    PlanDoctorFix {
+        target: DoctorFixTarget,
+        report: Box<crate::diagnostics::DiagnosticReport>,
+        terminal: crate::terminal::TerminalContext,
+        request: crate::slash::command::DoctorRequest,
+    },
+    ApplyDoctorFix {
+        target: DoctorFixTarget,
+        plan: Box<crate::diagnostics::FixPlan>,
+    },
 }
 /// Outcome of an `x.ai/subagent/cancel` request, telling dispatch whether the
 /// pager must finalize the subagent row itself.
@@ -2123,6 +2156,12 @@ pub enum SubagentKillOutcome {
 pub enum McpAuthTriggerOutcome {
     Authenticated,
     SetupRequired(crate::views::mcps_modal::McpSetupConfig),
+}
+#[derive(Clone, Debug)]
+pub enum DoctorPlanningOutcome {
+    Listing(String),
+    Plan(Box<crate::diagnostics::FixPlan>),
+    RunLocally(String),
 }
 /// Result from a completed async [`Effect`].
 ///
@@ -2814,6 +2853,15 @@ pub enum TaskResult {
     },
     /// Shared prompt-image preview state was resolved off-thread.
     PromptImagePreviewPrepared,
+    DoctorFixPlanned {
+        target: DoctorFixTarget,
+        result: Result<DoctorPlanningOutcome, String>,
+    },
+    DoctorFixApplied {
+        target: DoctorFixTarget,
+        shell: crate::diagnostics::ShellKind,
+        result: Result<crate::diagnostics::FixOutcome, String>,
+    },
 }
 #[cfg(test)]
 mod tests {

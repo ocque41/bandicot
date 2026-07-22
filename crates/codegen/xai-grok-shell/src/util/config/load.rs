@@ -106,6 +106,7 @@ pub fn load_config_from_toml(root: &TomlValue) -> Config {
             .and_then(|t| t.get("ask_user_question"))
             .and_then(|v| v.clone().try_into().ok())
             .unwrap_or_default(),
+        privacy: section(table, "privacy"),
     }
 }
 /// Resolve permission config with project override semantics.
@@ -131,7 +132,7 @@ pub async fn resolve_permission_config(
                     tracing::info!("Loaded [permission] from project");
                     return Some((perm_config, config_path));
                 }
-                Err(e) => tracing::warn!(error = % e, "Failed to parse [permission]"),
+                Err(e) => tracing::warn!(error = %e, "Failed to parse [permission]"),
             }
         }
     }
