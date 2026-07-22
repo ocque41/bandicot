@@ -13,11 +13,12 @@ use xai_grok_agent::prompt::skills::SkillsConfig;
 use xai_grok_sampler::{
     AuthScheme, InferenceTransport, ProviderCapabilities, SamplerConfig, WireQuirks,
 };
+pub use xai_grok_sampling_types::ServiceTierPreference;
 use xai_grok_sampling_types::{
     CompactionAtTokens, CompactionsRemaining, HostedMultiAgentCapability, HostedMultiAgentConfig,
     REASONING_EFFORT_META_KEY, REASONING_EFFORTS_META_KEY, ReasoningEffort, ReasoningEffortOption,
-    ResolvedServiceTier, ServiceTierCapabilities, ServiceTierPreference, ServiceTierSource,
-    reasoning_effort_meta_value, reasoning_efforts_meta_value, resolve_service_tier,
+    ResolvedServiceTier, ServiceTierCapabilities, ServiceTierSource, reasoning_effort_meta_value,
+    reasoning_efforts_meta_value, resolve_service_tier,
 };
 use xai_grok_tools::types::compat::{
     COMPAT_CELLS, CompatConfig, CompatConfigToml, CompatRemoteKey, CompatSurface, CompatVendor,

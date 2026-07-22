@@ -94,6 +94,7 @@ pub fn load_config_from_toml(root: &TomlValue) -> Config {
         models: section(table, "models"),
         ui: section(table, "ui"),
         harness: section(table, "harness"),
+        orchestration: section(table, "orchestration"),
         skills: section(table, "skills"),
         compat: section(table, "compat"),
         management_api_key,

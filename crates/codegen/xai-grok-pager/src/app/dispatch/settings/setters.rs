@@ -5,6 +5,25 @@ use crate::app::actions::Effect;
 use crate::app::app_view::{ActiveView, AppView};
 use agent_client_protocol as acp;
 
+pub(in crate::app::dispatch) fn set_orchestration_setting(
+    app: &mut AppView,
+    key: crate::settings::SettingKey,
+    value: crate::settings::SettingValue,
+) -> Vec<Effect> {
+    let snapshot = super::ui::build_pager_snapshot(app);
+    let previous = crate::settings::current_value_for(key, &app.current_ui, &snapshot)
+        .unwrap_or_else(|| value.clone());
+    if previous == value {
+        return Vec::new();
+    }
+    tracing::info!(target: "settings", key, value = ?value, "orchestration setting changed");
+    vec![Effect::PersistSetting {
+        key,
+        value,
+        rollback_value: previous,
+    }]
+}
+
 /// Set multiline input mode — swap Enter and Shift+Enter behavior.
 ///
 /// PAGER-OWNED: ephemeral, no `Effect::PersistSetting`. On the agent

@@ -366,6 +366,7 @@ async fn test_response_header_context_window_downgrade_rejected() {
                     context_window: Some(256_000),
                     max_completion_tokens: None,
                     models_etag: None,
+                    rate_limits: None,
                 })
                 .await;
             let cfg_after = actor.chat_state_handle.get_sampling_config().await.unwrap();
@@ -379,6 +380,7 @@ async fn test_response_header_context_window_downgrade_rejected() {
                     context_window: Some(1_000_000),
                     max_completion_tokens: None,
                     models_etag: None,
+                    rate_limits: None,
                 })
                 .await;
             let cfg_upgraded = actor.chat_state_handle.get_sampling_config().await.unwrap();
@@ -1144,6 +1146,7 @@ fn api_error_with_context_window(context_window: u64) -> xai_grok_sampler::Sampl
             context_window: Some(context_window),
             max_completion_tokens: None,
             models_etag: None,
+            rate_limits: None,
         }),
         empty_response_context: None,
         doom_loop_triggers: None,

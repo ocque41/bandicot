@@ -318,11 +318,12 @@ mod ultra_tests {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AgentGraphControlPlane {
     cwd: PathBuf,
     store_path: PathBuf,
     session_id: Option<String>,
+    models_manager: Option<crate::agent::models::ModelsManager>,
 }
 
 impl AgentGraphControlPlane {
@@ -332,7 +333,16 @@ impl AgentGraphControlPlane {
             cwd: cwd.to_path_buf(),
             store_path: agent_dir.join("agentgraph.db"),
             session_id: session_id.map(ToString::to_string),
+            models_manager: None,
         }
+    }
+
+    pub fn with_models_manager(
+        mut self,
+        models_manager: crate::agent::models::ModelsManager,
+    ) -> Self {
+        self.models_manager = Some(models_manager);
+        self
     }
 
     pub fn status(&self, label: &str) -> String {
@@ -639,6 +649,7 @@ impl AgentGraphControlPlane {
         };
         let cwd = self.cwd.clone();
         let store_path = self.store_path.clone();
+        let models_manager = self.models_manager.clone();
         let task_run_id = run_id.clone();
         let task_name = format!("agentgraph-run-{run_id}");
         let handle = match tokio::runtime::Handle::try_current() {
@@ -673,7 +684,11 @@ impl AgentGraphControlPlane {
                         return;
                     }
                 };
-                let worker_backend = SubagentWorkerBackend::new(backend, parent_session_id, cwd);
+                let mut worker_backend =
+                    SubagentWorkerBackend::new(backend, parent_session_id, cwd);
+                if let Some(models_manager) = models_manager {
+                    worker_backend = worker_backend.with_models_manager(models_manager);
+                }
                 if let Err(err) = scheduler
                     .run_to_completion_with_subagents(&worker_backend, &mut store, &task_run_id)
                     .await
@@ -767,9 +782,13 @@ pub async fn graph_command_output_with_backend(
     cwd: &Path,
     session_id: Option<&str>,
     backend: Option<Arc<dyn ExistingSubagentBackend>>,
+    models_manager: Option<crate::agent::models::ModelsManager>,
 ) -> String {
     let trimmed = args.trim();
-    let control = AgentGraphControlPlane::new(cwd, session_id);
+    let mut control = AgentGraphControlPlane::new(cwd, session_id);
+    if let Some(models_manager) = models_manager {
+        control = control.with_models_manager(models_manager);
+    }
     if let Some(path) = trimmed.strip_prefix("run ") {
         let spec = match load_graph_spec(cwd, path.trim()) {
             Ok(spec) => spec,
@@ -861,9 +880,13 @@ pub async fn swarm_command_output_with_backend(
     session_id: Option<&str>,
     backend: Option<Arc<dyn ExistingSubagentBackend>>,
     live_enabled: bool,
+    models_manager: Option<crate::agent::models::ModelsManager>,
 ) -> String {
     let trimmed = args.trim();
-    let control = AgentGraphControlPlane::new(cwd, session_id);
+    let mut control = AgentGraphControlPlane::new(cwd, session_id);
+    if let Some(models_manager) = models_manager {
+        control = control.with_models_manager(models_manager);
+    }
     if trimmed == "run" {
         if !live_enabled {
             return "Live Swarm is disabled. Set `[orchestration].live_swarm_enabled = true`, keep a hard budget, and approve the current normalized graph before retrying.".to_string();

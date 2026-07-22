@@ -635,6 +635,12 @@ impl SessionActor {
         allow_context_compaction: bool,
     ) -> Result<SamplerFailureRecovery, acp::Error> {
         use xai_grok_sampler::SamplingErrorKind;
+        if let Some(metadata) = error.model_metadata.clone() {
+            // Preserve Retry-After and provider capacity headers from failed
+            // requests. Graph workers consume this observation at their child
+            // session boundary before the scheduler admits another wave.
+            self.handle_model_metadata_update(metadata).await;
+        }
         if allow_context_compaction && self.should_compact_on_error(&error).await {
             let cw = error
                 .model_metadata

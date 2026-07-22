@@ -456,6 +456,9 @@ pub(super) fn dispatch_send_prompt_inner(
                 screen_mode: app.screen_mode,
                 // PAGER-owned snapshot for slash commands.
                 pager_state: crate::settings::PagerLocalSnapshot {
+                    orchestration: xai_grok_shell::agent::config::load_orchestration_config_for_cwd(
+                        Some(&agent.session.cwd),
+                    ),
                     multiline_mode: agent.multiline_mode,
                     yolo_mode: agent.session.is_yolo(),
                     auto_mode: agent.session.is_auto(),

@@ -1311,6 +1311,30 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
         "prompt_suggestions" => {
             let _ = dispatch(Action::SetPromptSuggestions(false), app);
         }
+        "orchestration.service_tier" => {
+            let _ = dispatch(Action::SetOrchestrationServiceTier("fast"), app);
+        }
+        "orchestration.ultra_enabled" => {
+            let _ = dispatch(Action::SetOrchestrationUltraEnabled(true), app);
+        }
+        "orchestration.ultra_max_children" => {
+            let _ = dispatch(Action::SetOrchestrationUltraMaxChildren(1), app);
+        }
+        "orchestration.graph_enabled" => {
+            let _ = dispatch(Action::SetOrchestrationGraphEnabled(false), app);
+        }
+        "orchestration.swarm_enabled" => {
+            let _ = dispatch(Action::SetOrchestrationSwarmEnabled(false), app);
+        }
+        "orchestration.live_swarm_enabled" => {
+            let _ = dispatch(Action::SetOrchestrationLiveSwarmEnabled(true), app);
+        }
+        "orchestration.swarm_max_active_workers" => {
+            let _ = dispatch(Action::SetOrchestrationSwarmMaxActiveWorkers(1), app);
+        }
+        "orchestration.graph_artifact_retention_days" => {
+            let _ = dispatch(Action::SetOrchestrationGraphArtifactRetentionDays(30), app);
+        }
         "respect_manual_folds" => {
             let _ = dispatch(
                 Action::SetRespectManualFolds(

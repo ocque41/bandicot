@@ -25,6 +25,9 @@ impl acp::Agent for MvpAgent {
         tracing::debug!(target : "sampling_log", "Received initialize request");
         xai_grok_telemetry::unified_log::info("agent initialized", None, None);
         self.start_subagent_coordinator();
+        if let Ok(repo_root) = std::env::current_dir() {
+            crate::control_plane::agent_graph::ensure_runtime_manager(repo_root);
+        }
         tokio::task::spawn_blocking(|| {
             crate::session::worktree_pool::cleanup_stale_pool_worktrees(None);
         });
@@ -3173,6 +3176,21 @@ impl acp::Agent for MvpAgent {
         let mut backend_no_bridge_err: Option<acp::Error> = None;
         let method = args.method.clone();
         let result = match method.as_ref() {
+            method if method.starts_with(crate::extensions::agent_graph::PREFIX) => {
+                let backend = std::sync::Arc::new(
+                    xai_grok_tools::implementations::grok_build::task::backend::ChannelBackend::new(
+                        self.subagent_event_tx.clone(),
+                    ),
+                ) as std::sync::Arc<
+                    dyn xai_grok_tools::implementations::grok_build::task::backend::SubagentBackend,
+                >;
+                crate::extensions::agent_graph::handle(
+                    &args,
+                    backend,
+                    self.models_manager.clone(),
+                )
+                .await
+            }
             "x.ai/accounts/snapshot" | "x.ai/accounts/add" | "x.ai/accounts/edit"
             | "x.ai/accounts/remove" | "x.ai/accounts/enable" | "x.ai/accounts/disable"
             | "x.ai/accounts/validate" | "x.ai/accounts/refresh_models"

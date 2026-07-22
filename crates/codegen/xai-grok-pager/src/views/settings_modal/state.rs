@@ -691,6 +691,10 @@ pub(super) fn action_for_bool(key: SettingKey, new: bool) -> Option<Action> {
         "show_tips" => Some(Action::SetShowTips(new)),
         "auto_update" => Some(Action::SetAutoUpdate(new)),
         "display_refresh_auto_cadence" => Some(Action::SetDisplayRefreshAutoCadence(new)),
+        "orchestration.ultra_enabled" => Some(Action::SetOrchestrationUltraEnabled(new)),
+        "orchestration.graph_enabled" => Some(Action::SetOrchestrationGraphEnabled(new)),
+        "orchestration.swarm_enabled" => Some(Action::SetOrchestrationSwarmEnabled(new)),
+        "orchestration.live_swarm_enabled" => Some(Action::SetOrchestrationLiveSwarmEnabled(new)),
         _ => None,
     }
 }
@@ -710,6 +714,7 @@ pub(super) fn action_for_enum(key: SettingKey, choice: &'static str) -> Option<A
         "render_mermaid" => None,
         "keep_text_selection" => None,
         "scroll_mode" => None,
+        "orchestration.service_tier" => None,
         _ => None,
     }
 }
@@ -767,6 +772,7 @@ pub(super) fn action_for_enum_commit(key: SettingKey, choice: &'static str) -> O
         "default_selected_permission" => {
             Some(Action::SetDefaultSelectedPermission(choice.to_string()))
         }
+        "orchestration.service_tier" => Some(Action::SetOrchestrationServiceTier(choice)),
         _ => None,
     }
 }
@@ -813,6 +819,13 @@ pub(super) fn action_for_int(key: SettingKey, value: i64) -> Option<Action> {
         "max_thoughts_width" => Some(Action::SetMaxThoughtsWidth(value)),
         "scroll_speed" => Some(Action::SetScrollSpeed(value)),
         "scroll_lines" => Some(Action::SetScrollLines(value)),
+        "orchestration.ultra_max_children" => Some(Action::SetOrchestrationUltraMaxChildren(value)),
+        "orchestration.swarm_max_active_workers" => {
+            Some(Action::SetOrchestrationSwarmMaxActiveWorkers(value))
+        }
+        "orchestration.graph_artifact_retention_days" => {
+            Some(Action::SetOrchestrationGraphArtifactRetentionDays(value))
+        }
         _ => None,
     }
 }

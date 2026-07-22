@@ -294,6 +294,8 @@ impl NodeSpec {
                 | NodeKind::ReduceAgent
                 | NodeKind::Verifier
                 | NodeKind::Router
+                | NodeKind::Loop
+                | NodeKind::Compensation
         )
     }
 }
@@ -709,6 +711,18 @@ pub struct RetryPolicy {
     pub max_attempts: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backoff_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_backoff_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule_to_close_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_total_retry_delay_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_equivalent_failures: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_no_progress_retries: Option<u32>,
+    #[serde(default = "default_retry_jitter_percent")]
+    pub jitter_percent: u8,
 }
 
 impl Default for RetryPolicy {
@@ -716,8 +730,18 @@ impl Default for RetryPolicy {
         Self {
             max_attempts: 1,
             backoff_seconds: None,
+            max_backoff_seconds: None,
+            schedule_to_close_seconds: None,
+            max_total_retry_delay_seconds: None,
+            max_equivalent_failures: None,
+            max_no_progress_retries: None,
+            jitter_percent: default_retry_jitter_percent(),
         }
     }
+}
+
+fn default_retry_jitter_percent() -> u8 {
+    20
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]

@@ -215,6 +215,24 @@ const PLAN_MODE_CHOICES: &[EnumChoice] = &[
     },
 ];
 
+const ORCHESTRATION_SERVICE_TIER_CHOICES: &[EnumChoice] = &[
+    EnumChoice {
+        canonical: "inherit",
+        display: "Inherit",
+        description: "Use the selected model and provider default.",
+    },
+    EnumChoice {
+        canonical: "standard",
+        display: "Standard",
+        description: "Explicitly request standard service.",
+    },
+    EnumChoice {
+        canonical: "fast",
+        display: "Fast",
+        description: "Request priority service when the provider supports it.",
+    },
+];
+
 // ---------------------------------------------------------------------------
 // Mermaid-rendering catalog.
 //
@@ -523,6 +541,110 @@ pub fn default_settings() -> Vec<SettingMeta> {
     let ui_default = UiConfig::default();
 
     vec![
+        SettingMeta {
+            key: "orchestration.service_tier",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shell,
+            label: "Default service tier",
+            description: "Default for new sessions. Active-session /fast overrides remain separate.",
+            keywords: &["fast", "service", "tier", "priority", "orchestration"],
+            kind: SettingKind::Enum {
+                default: "inherit",
+                choices: ORCHESTRATION_SERVICE_TIER_CHOICES,
+                supports_preview: false,
+            },
+            restart_required: true,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: "orchestration.ultra_enabled",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shell,
+            label: "Ultra by default",
+            description: "Enable proactive delegation for new root sessions. /ultra remains session-only.",
+            keywords: &["ultra", "agents", "delegation", "orchestration"],
+            kind: SettingKind::Bool { default: false },
+            restart_required: true,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: "orchestration.ultra_max_children",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shell,
+            label: "Ultra maximum children",
+            description: "Maximum child agents for new Ultra sessions.",
+            keywords: &["ultra", "children", "limit", "concurrency"],
+            kind: SettingKind::Int {
+                default: 6,
+                min: 1,
+                max: 6,
+            },
+            restart_required: true,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: "orchestration.graph_enabled",
+            category: SettingCategory::Advanced,
+            owner: SettingOwner::Shell,
+            label: "AgentGraph",
+            description: "Enable the AgentGraph command and ACP surfaces.",
+            keywords: &["graph", "agentgraph", "orchestration"],
+            kind: SettingKind::Bool { default: true },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: "orchestration.swarm_enabled",
+            category: SettingCategory::Advanced,
+            owner: SettingOwner::Shell,
+            label: "Swarm",
+            description: "Enable Swarm planning, preview, and offline benchmark controls.",
+            keywords: &["swarm", "graph", "orchestration"],
+            kind: SettingKind::Bool { default: true },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: "orchestration.live_swarm_enabled",
+            category: SettingCategory::Advanced,
+            owner: SettingOwner::Shell,
+            label: "Live provider Swarm",
+            description: "Allow approved provider-backed Swarm runs. High-cost approval is still required.",
+            keywords: &["swarm", "live", "provider", "cost", "approval"],
+            kind: SettingKind::Bool { default: false },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: "orchestration.swarm_max_active_workers",
+            category: SettingCategory::Advanced,
+            owner: SettingOwner::Shell,
+            label: "Swarm worker limit",
+            description: "Host ceiling for active provider-backed Swarm workers.",
+            keywords: &["swarm", "workers", "limit", "concurrency"],
+            kind: SettingKind::Int {
+                default: 100,
+                min: 1,
+                max: 100,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: "orchestration.graph_artifact_retention_days",
+            category: SettingCategory::Advanced,
+            owner: SettingOwner::Shell,
+            label: "Graph artifact retention",
+            description: "Days to retain completed graph artifacts. Zero keeps them until explicit cleanup.",
+            keywords: &["graph", "artifacts", "retention", "cleanup", "days"],
+            kind: SettingKind::Int {
+                default: 0,
+                min: 0,
+                max: 3650,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
         SettingMeta {
             key: "compact_mode",
             category: SettingCategory::Appearance,

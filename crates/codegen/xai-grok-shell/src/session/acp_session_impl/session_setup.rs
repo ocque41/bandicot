@@ -466,6 +466,13 @@ impl SessionActor {
             Some(cfg) => cfg,
             None => return,
         };
+        if let Some(rate_limits) = metadata.rate_limits.clone() {
+            crate::control_plane::agent_graph::rate_limit::record_session_observation(
+                self.session_info.id.0.as_ref(),
+                &current_config.base_url,
+                rate_limits,
+            );
+        }
         let mut config_changed = false;
         let mut new_context_window = current_config.context_window;
         let mut new_max_completion_tokens = current_config.max_completion_tokens;

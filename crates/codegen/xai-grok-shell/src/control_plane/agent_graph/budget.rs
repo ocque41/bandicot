@@ -21,6 +21,13 @@ pub struct BudgetSnapshot {
     pub stop_reason: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct BudgetPersistentState {
+    pub charged: UsageAccounting,
+    pub reservations: Vec<(BudgetReservationId, UsageAccounting)>,
+    pub stopped: Option<String>,
+}
+
 #[derive(Debug, Error, Clone, PartialEq)]
 pub enum BudgetError {
     #[error("budget is already stopped: {0}")]
@@ -58,6 +65,27 @@ impl BudgetLedger {
             charged: UsageAccounting::default(),
             reservations: BTreeMap::new(),
             stopped: None,
+        }
+    }
+
+    pub fn from_persistent_state(limits: GraphBudgets, state: BudgetPersistentState) -> Self {
+        Self {
+            limits,
+            charged: state.charged,
+            reservations: state.reservations.into_iter().collect(),
+            stopped: state.stopped,
+        }
+    }
+
+    pub fn persistent_state(&self) -> BudgetPersistentState {
+        BudgetPersistentState {
+            charged: self.charged.clone(),
+            reservations: self
+                .reservations
+                .iter()
+                .map(|(id, usage)| (id.clone(), usage.clone()))
+                .collect(),
+            stopped: self.stopped.clone(),
         }
     }
 

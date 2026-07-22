@@ -774,6 +774,70 @@ pub(crate) async fn persist_setting(
         format!("persist_setting({key}) expected {expected}, got {got:?}")
     }
     match key {
+        "orchestration.service_tier" => {
+            let SettingValue::Enum(value) = value else {
+                return Err(kind_mismatch(key, "Enum", &value));
+            };
+            xai_grok_shell::util::config::set_orchestration_service_tier(value.to_string())
+                .await
+                .map_err(|error| error.to_string())
+        }
+        "orchestration.ultra_enabled" => {
+            let SettingValue::Bool(value) = value else {
+                return Err(kind_mismatch(key, "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_orchestration_ultra_enabled(value)
+                .await
+                .map_err(|error| error.to_string())
+        }
+        "orchestration.ultra_max_children" => {
+            let SettingValue::Int(value) = value else {
+                return Err(kind_mismatch(key, "Int", &value));
+            };
+            xai_grok_shell::util::config::set_orchestration_ultra_max_children(value)
+                .await
+                .map_err(|error| error.to_string())
+        }
+        "orchestration.graph_enabled" => {
+            let SettingValue::Bool(value) = value else {
+                return Err(kind_mismatch(key, "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_orchestration_graph_enabled(value)
+                .await
+                .map_err(|error| error.to_string())
+        }
+        "orchestration.swarm_enabled" => {
+            let SettingValue::Bool(value) = value else {
+                return Err(kind_mismatch(key, "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_orchestration_swarm_enabled(value)
+                .await
+                .map_err(|error| error.to_string())
+        }
+        "orchestration.live_swarm_enabled" => {
+            let SettingValue::Bool(value) = value else {
+                return Err(kind_mismatch(key, "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_orchestration_live_swarm_enabled(value)
+                .await
+                .map_err(|error| error.to_string())
+        }
+        "orchestration.swarm_max_active_workers" => {
+            let SettingValue::Int(value) = value else {
+                return Err(kind_mismatch(key, "Int", &value));
+            };
+            xai_grok_shell::util::config::set_orchestration_swarm_max_active_workers(value)
+                .await
+                .map_err(|error| error.to_string())
+        }
+        "orchestration.graph_artifact_retention_days" => {
+            let SettingValue::Int(value) = value else {
+                return Err(kind_mismatch(key, "Int", &value));
+            };
+            xai_grok_shell::util::config::set_orchestration_graph_artifact_retention_days(value)
+                .await
+                .map_err(|error| error.to_string())
+        }
         "compact_mode" => {
             let SettingValue::Bool(b) = value else {
                 return Err(kind_mismatch("compact_mode", "Bool", &value));

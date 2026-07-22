@@ -638,6 +638,7 @@ mod tests {
             context_window: Some(8192),
             max_completion_tokens: Some(4096),
             models_etag: None,
+            rate_limits: None,
         };
         let events = collect(stream_chat_completions(
             raw,

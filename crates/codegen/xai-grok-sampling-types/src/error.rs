@@ -75,6 +75,37 @@ pub struct ResponseModelMetadata {
     pub max_completion_tokens: Option<u32>,
     /// `x-models-etag` — triggers model catalog refresh when changed.
     pub models_etag: Option<String>,
+    /// Provider capacity information. This is provider-neutral typed data;
+    /// callers must not inspect raw header strings to make scheduling choices.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limits: Option<RateLimitMetadata>,
+}
+
+/// A single request or token rate-limit window reported by a provider.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RateLimitWindow {
+    pub limit: Option<u64>,
+    pub remaining: Option<u64>,
+    /// Milliseconds until the provider says this window resets.
+    pub reset_after_ms: Option<u64>,
+}
+
+/// Typed projection of common OpenAI-compatible rate-limit headers.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RateLimitMetadata {
+    pub requests: RateLimitWindow,
+    pub tokens: RateLimitWindow,
+    pub project_tokens: RateLimitWindow,
+    pub retry_after_ms: Option<u64>,
+}
+
+impl RateLimitMetadata {
+    pub fn is_empty(&self) -> bool {
+        self.requests == RateLimitWindow::default()
+            && self.tokens == RateLimitWindow::default()
+            && self.project_tokens == RateLimitWindow::default()
+            && self.retry_after_ms.is_none()
+    }
 }
 
 /// Display prefix of [`SamplingError::Serialization`]. Shared with the

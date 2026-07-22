@@ -3359,6 +3359,7 @@ mod inline_auto_compact_flow_tests {
                 context_window: Some(context_window),
                 max_completion_tokens: None,
                 models_etag: None,
+                rate_limits: None,
             }),
             empty_response_context: None,
             doom_loop_triggers: None,

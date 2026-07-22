@@ -285,3 +285,52 @@ pub async fn set_show_tips(value: bool) -> Result<()> {
 pub async fn set_auto_update(value: bool) -> Result<()> {
     update_config(|cfg| cfg.cli.auto_update = Some(value)).await
 }
+
+/// Persist the user-level `[orchestration].fast_service_tier` default.
+/// Session `/fast` commands remain session-only overrides.
+pub async fn set_orchestration_service_tier(value: String) -> Result<()> {
+    let value = match value.as_str() {
+        "inherit" => xai_grok_sampling_types::ServiceTierPreference::Inherit,
+        "standard" => xai_grok_sampling_types::ServiceTierPreference::Standard,
+        "fast" => xai_grok_sampling_types::ServiceTierPreference::Fast,
+        _ => anyhow::bail!("invalid orchestration service tier `{value}`"),
+    };
+    update_config(|cfg| cfg.orchestration.fast_service_tier = Some(value)).await
+}
+
+pub async fn set_orchestration_ultra_enabled(value: bool) -> Result<()> {
+    update_config(|cfg| cfg.orchestration.ultra_enabled = Some(value)).await
+}
+
+pub async fn set_orchestration_ultra_max_children(value: i64) -> Result<()> {
+    let value = value.clamp(
+        1,
+        crate::control_plane::agent_graph::ULTRA_MAX_CHILDREN as i64,
+    ) as u32;
+    update_config(|cfg| cfg.orchestration.ultra_max_children = Some(value)).await
+}
+
+pub async fn set_orchestration_graph_enabled(value: bool) -> Result<()> {
+    update_config(|cfg| cfg.orchestration.graph_enabled = Some(value)).await
+}
+
+pub async fn set_orchestration_swarm_enabled(value: bool) -> Result<()> {
+    update_config(|cfg| cfg.orchestration.swarm_enabled = Some(value)).await
+}
+
+pub async fn set_orchestration_live_swarm_enabled(value: bool) -> Result<()> {
+    update_config(|cfg| cfg.orchestration.live_swarm_enabled = Some(value)).await
+}
+
+pub async fn set_orchestration_swarm_max_active_workers(value: i64) -> Result<()> {
+    let value = value.clamp(1, 100) as u32;
+    update_config(|cfg| cfg.orchestration.swarm_max_active_model_workers = Some(value)).await
+}
+
+pub async fn set_orchestration_graph_artifact_retention_days(value: i64) -> Result<()> {
+    let value = value.clamp(0, 3650) as u32;
+    update_config(|cfg| {
+        cfg.orchestration.graph_artifact_retention_days = (value != 0).then_some(value)
+    })
+    .await
+}

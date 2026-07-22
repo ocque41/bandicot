@@ -491,6 +491,76 @@ fn extract_retry_after(headers: &reqwest::header::HeaderMap) -> Option<u64> {
         .map(|s| s.min(120))
 }
 
+fn parse_rate_limit_reset_ms(value: &str) -> Option<u64> {
+    let value = value.trim();
+    if let Ok(seconds) = value.parse::<f64>() {
+        return (seconds.is_finite() && seconds >= 0.0).then(|| (seconds * 1000.0).ceil() as u64);
+    }
+    let mut total_ms = 0u64;
+    let mut number_start = 0usize;
+    let bytes = value.as_bytes();
+    let mut parsed_any = false;
+    while number_start < bytes.len() {
+        let mut end = number_start;
+        while end < bytes.len() && (bytes[end].is_ascii_digit() || bytes[end] == b'.') {
+            end += 1;
+        }
+        if end == number_start {
+            return None;
+        }
+        let number = value[number_start..end].parse::<f64>().ok()?;
+        let (factor, suffix_len) = if value[end..].starts_with("ms") {
+            (1.0, 2)
+        } else if value[end..].starts_with('s') {
+            (1_000.0, 1)
+        } else if value[end..].starts_with('m') {
+            (60_000.0, 1)
+        } else if value[end..].starts_with('h') {
+            (3_600_000.0, 1)
+        } else {
+            return None;
+        };
+        total_ms = total_ms.saturating_add((number * factor).ceil() as u64);
+        parsed_any = true;
+        number_start = end + suffix_len;
+    }
+    parsed_any.then_some(total_ms)
+}
+
+fn header_u64(headers: &reqwest::header::HeaderMap, name: &str) -> Option<u64> {
+    headers.get(name)?.to_str().ok()?.trim().parse().ok()
+}
+
+fn header_reset_ms(headers: &reqwest::header::HeaderMap, name: &str) -> Option<u64> {
+    parse_rate_limit_reset_ms(headers.get(name)?.to_str().ok()?)
+}
+
+fn extract_rate_limit_metadata(
+    headers: &reqwest::header::HeaderMap,
+) -> Option<xai_grok_sampling_types::RateLimitMetadata> {
+    use xai_grok_sampling_types::{RateLimitMetadata, RateLimitWindow};
+
+    let metadata = RateLimitMetadata {
+        requests: RateLimitWindow {
+            limit: header_u64(headers, "x-ratelimit-limit-requests"),
+            remaining: header_u64(headers, "x-ratelimit-remaining-requests"),
+            reset_after_ms: header_reset_ms(headers, "x-ratelimit-reset-requests"),
+        },
+        tokens: RateLimitWindow {
+            limit: header_u64(headers, "x-ratelimit-limit-tokens"),
+            remaining: header_u64(headers, "x-ratelimit-remaining-tokens"),
+            reset_after_ms: header_reset_ms(headers, "x-ratelimit-reset-tokens"),
+        },
+        project_tokens: RateLimitWindow {
+            limit: header_u64(headers, "x-ratelimit-limit-project-tokens"),
+            remaining: header_u64(headers, "x-ratelimit-remaining-project-tokens"),
+            reset_after_ms: header_reset_ms(headers, "x-ratelimit-reset-project-tokens"),
+        },
+        retry_after_ms: extract_retry_after(headers).map(|seconds| seconds.saturating_mul(1000)),
+    };
+    (!metadata.is_empty()).then_some(metadata)
+}
+
 fn extract_should_retry(headers: &reqwest::header::HeaderMap) -> Option<bool> {
     headers
         .get("x-should-retry")
@@ -533,11 +603,18 @@ fn extract_model_metadata(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
-    if context_window.is_some() || max_completion_tokens.is_some() || models_etag.is_some() {
+    let rate_limits = extract_rate_limit_metadata(headers);
+
+    if context_window.is_some()
+        || max_completion_tokens.is_some()
+        || models_etag.is_some()
+        || rate_limits.is_some()
+    {
         Some(ResponseModelMetadata {
             context_window,
             max_completion_tokens,
             models_etag,
+            rate_limits,
         })
     } else {
         None
@@ -3141,6 +3218,51 @@ mod tests {
     fn extract_retry_after_none_when_missing() {
         let headers = reqwest::header::HeaderMap::new();
         assert_eq!(extract_retry_after(&headers), None);
+    }
+
+    #[test]
+    fn extracts_all_openai_compatible_rate_limit_headers() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        for (name, value) in [
+            ("x-ratelimit-limit-requests", "120"),
+            ("x-ratelimit-remaining-requests", "117"),
+            ("x-ratelimit-reset-requests", "1.5s"),
+            ("x-ratelimit-limit-tokens", "200000"),
+            ("x-ratelimit-remaining-tokens", "190000"),
+            ("x-ratelimit-reset-tokens", "1m2s"),
+            ("x-ratelimit-limit-project-tokens", "500000"),
+            ("x-ratelimit-remaining-project-tokens", "450000"),
+            ("x-ratelimit-reset-project-tokens", "250ms"),
+            ("retry-after", "7"),
+        ] {
+            headers.insert(
+                reqwest::header::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                reqwest::header::HeaderValue::from_str(value).unwrap(),
+            );
+        }
+
+        let limits = extract_rate_limit_metadata(&headers).expect("typed limits");
+        assert_eq!(limits.requests.limit, Some(120));
+        assert_eq!(limits.requests.remaining, Some(117));
+        assert_eq!(limits.requests.reset_after_ms, Some(1_500));
+        assert_eq!(limits.tokens.limit, Some(200_000));
+        assert_eq!(limits.tokens.remaining, Some(190_000));
+        assert_eq!(limits.tokens.reset_after_ms, Some(62_000));
+        assert_eq!(limits.project_tokens.limit, Some(500_000));
+        assert_eq!(limits.project_tokens.remaining, Some(450_000));
+        assert_eq!(limits.project_tokens.reset_after_ms, Some(250));
+        assert_eq!(limits.retry_after_ms, Some(7_000));
+    }
+
+    #[test]
+    fn rate_limit_headers_are_provider_neutral_model_metadata() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("x-ratelimit-limit-requests", "10".parse().unwrap());
+        let metadata = extract_model_metadata(&headers, false).expect("rate metadata");
+        assert_eq!(
+            metadata.rate_limits.expect("limits").requests.limit,
+            Some(10)
+        );
     }
 
     #[test]

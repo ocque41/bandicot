@@ -559,6 +559,14 @@ pub enum Action {
     /// Commit the `auto_update` preference. Persisted to `[cli].auto_update`.
     /// Restart-required — auto-update check fires once at startup.
     SetAutoUpdate(bool),
+    SetOrchestrationServiceTier(&'static str),
+    SetOrchestrationUltraEnabled(bool),
+    SetOrchestrationUltraMaxChildren(i64),
+    SetOrchestrationGraphEnabled(bool),
+    SetOrchestrationSwarmEnabled(bool),
+    SetOrchestrationLiveSwarmEnabled(bool),
+    SetOrchestrationSwarmMaxActiveWorkers(i64),
+    SetOrchestrationGraphArtifactRetentionDays(i64),
     /// Commit `[ui.display_refresh].auto_cadence_enabled`. Restart-required —
     /// cadence is pinned once at startup.
     SetDisplayRefreshAutoCadence(bool),

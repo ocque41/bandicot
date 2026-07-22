@@ -142,6 +142,7 @@ impl SessionActor {
                     cwd,
                     Some(self.session_info.id.0.as_ref()),
                     backend,
+                    Some(self.models_manager.clone()),
                 )
                 .await;
                 self.send_slash_command_output(&text).await;
@@ -179,6 +180,7 @@ impl SessionActor {
                     Some(self.session_info.id.0.as_ref()),
                     backend,
                     orchestration_config.live_swarm_enabled.unwrap_or(false),
+                    Some(self.models_manager.clone()),
                 )
                 .await;
                 self.send_slash_command_output(&text).await;

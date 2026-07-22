@@ -634,6 +634,7 @@ fn completion_from_output(request: &WorkerRequest, output: NodeOutput) -> Worker
             node_attempts: 1,
             ..UsageAccounting::default()
         },
+        provider_capacity: None,
     }
 }
 
@@ -669,6 +670,7 @@ fn failed_completion(
             failures: u64::from(status != NodeStatus::Succeeded),
             ..UsageAccounting::default()
         },
+        provider_capacity: None,
     }
 }
 

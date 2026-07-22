@@ -386,6 +386,19 @@ impl ModelsManager {
         available_models(&selectable, self.is_session_auth())
     }
 
+    /// Credential-free snapshot used by AgentGraph model selection.
+    ///
+    /// Returning only shared model metadata prevents graph validation and
+    /// telemetry from ever receiving API keys or environment-key values.
+    pub(crate) fn agent_graph_catalog(&self) -> Vec<config::ModelInfo> {
+        self.inner
+            .models
+            .read()
+            .values()
+            .map(|entry| entry.info.clone())
+            .collect()
+    }
+
     pub(crate) fn task_model_error(&self, requested: &str) -> Option<String> {
         let is_session_auth = self.is_session_auth();
         let models = self.inner.models.read();

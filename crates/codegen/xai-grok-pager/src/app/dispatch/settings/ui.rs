@@ -67,6 +67,9 @@ pub(crate) fn refresh_open_settings_modals(app: &mut AppView) {
             state.rebuild_rows();
             state.ui_snapshot = ui_snapshot.clone();
             state.pager_snapshot = crate::settings::PagerLocalSnapshot {
+                orchestration: xai_grok_shell::agent::config::load_orchestration_config_for_cwd(
+                    Some(&agent.session.cwd),
+                ),
                 multiline_mode: agent.multiline_mode,
                 yolo_mode: agent.session.is_yolo(),
                 auto_mode: agent.session.is_auto(),
@@ -180,6 +183,9 @@ pub(in crate::app::dispatch) fn dispatch_open_settings(app: &mut AppView) -> Vec
     tracing::info!(target: "settings", "opened modal");
 
     let pager_snapshot = crate::settings::PagerLocalSnapshot {
+        orchestration: xai_grok_shell::agent::config::load_orchestration_config_for_cwd(Some(
+            &agent.session.cwd,
+        )),
         multiline_mode: agent.multiline_mode,
         yolo_mode: agent.session.is_yolo(),
         auto_mode: agent.session.is_auto(),
@@ -656,7 +662,15 @@ fn agent_available_models(app: &AppView) -> Vec<(String, acp::ModelId)> {
 
 /// Build a `PagerLocalSnapshot` from the current `AppView`.
 pub(crate) fn build_pager_snapshot(app: &AppView) -> crate::settings::PagerLocalSnapshot {
+    let orchestration = if let ActiveView::Agent(id) = app.active_view
+        && let Some(agent) = app.agents.get(&id)
+    {
+        xai_grok_shell::agent::config::load_orchestration_config_for_cwd(Some(&agent.session.cwd))
+    } else {
+        xai_grok_shell::agent::config::load_orchestration_config_for_cwd(None)
+    };
     crate::settings::PagerLocalSnapshot {
+        orchestration,
         multiline_mode: agent_multiline_mode(app),
         yolo_mode: agent_yolo_mode(app),
         auto_mode: agent_auto_mode(app),
@@ -685,6 +699,30 @@ pub(in crate::app::dispatch) fn action_for_reset(
 ) -> Option<Action> {
     use crate::settings::SettingValue;
     match (key, value) {
+        ("orchestration.service_tier", SettingValue::Enum(value)) => {
+            Some(Action::SetOrchestrationServiceTier(value))
+        }
+        ("orchestration.ultra_enabled", SettingValue::Bool(value)) => {
+            Some(Action::SetOrchestrationUltraEnabled(*value))
+        }
+        ("orchestration.ultra_max_children", SettingValue::Int(value)) => {
+            Some(Action::SetOrchestrationUltraMaxChildren(*value))
+        }
+        ("orchestration.graph_enabled", SettingValue::Bool(value)) => {
+            Some(Action::SetOrchestrationGraphEnabled(*value))
+        }
+        ("orchestration.swarm_enabled", SettingValue::Bool(value)) => {
+            Some(Action::SetOrchestrationSwarmEnabled(*value))
+        }
+        ("orchestration.live_swarm_enabled", SettingValue::Bool(value)) => {
+            Some(Action::SetOrchestrationLiveSwarmEnabled(*value))
+        }
+        ("orchestration.swarm_max_active_workers", SettingValue::Int(value)) => {
+            Some(Action::SetOrchestrationSwarmMaxActiveWorkers(*value))
+        }
+        ("orchestration.graph_artifact_retention_days", SettingValue::Int(value)) => {
+            Some(Action::SetOrchestrationGraphArtifactRetentionDays(*value))
+        }
         ("compact_mode", SettingValue::Bool(b)) => Some(Action::SetCompactMode(*b)),
         ("show_timestamps", SettingValue::Bool(b)) => Some(Action::SetTimestamps(*b)),
         ("show_timeline", SettingValue::Bool(b)) => Some(Action::SetTimeline(*b)),
@@ -874,6 +912,18 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
     use crate::settings::SettingValue;
     let mut companion_effects: Vec<Effect> = Vec::new();
     match (key, rollback_value) {
+        ("orchestration.service_tier", SettingValue::Enum(_))
+        | ("orchestration.ultra_enabled", SettingValue::Bool(_))
+        | ("orchestration.ultra_max_children", SettingValue::Int(_))
+        | ("orchestration.graph_enabled", SettingValue::Bool(_))
+        | ("orchestration.swarm_enabled", SettingValue::Bool(_))
+        | ("orchestration.live_swarm_enabled", SettingValue::Bool(_))
+        | ("orchestration.swarm_max_active_workers", SettingValue::Int(_))
+        | ("orchestration.graph_artifact_retention_days", SettingValue::Int(_)) => {
+            // These values are read directly from durable config snapshots.
+            // A failed write leaves that source unchanged, so no in-memory
+            // mutation needs reversing.
+        }
         ("compact_mode", SettingValue::Bool(b)) => set_compact_mode_inner(app, *b),
         ("show_timestamps", SettingValue::Bool(b)) => set_timestamps_inner(app, *b),
         ("show_timeline", SettingValue::Bool(b)) => set_timeline_inner(app, *b),

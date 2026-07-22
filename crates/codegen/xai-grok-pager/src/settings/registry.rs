@@ -3,7 +3,7 @@
 //! See the module-level docs in `mod.rs` for the architectural rationale.
 
 use agent_client_protocol as acp;
-use xai_grok_shell::agent::config::UiConfig;
+use xai_grok_shell::agent::config::{ServiceTierPreference, UiConfig};
 use xai_grok_tools::implementations::grok_build::ask_user_question;
 
 // ---------------------------------------------------------------------------
@@ -232,6 +232,7 @@ pub enum SettingValue {
 /// `refresh_open_settings_modals` after every mutation.
 #[derive(Debug, Clone)]
 pub struct PagerLocalSnapshot {
+    pub orchestration: xai_grok_shell::agent::config::OrchestrationConfig,
     /// Whether multiline input mode is active.
     pub multiline_mode: bool,
     /// Whether YOLO mode (always-approve) is active on the active agent.
@@ -284,6 +285,7 @@ pub struct PagerLocalSnapshot {
 impl Default for PagerLocalSnapshot {
     fn default() -> Self {
         Self {
+            orchestration: Default::default(),
             multiline_mode: false,
             yolo_mode: false,
             auto_mode: false,
@@ -480,6 +482,44 @@ pub fn current_value_for(
     pager: &PagerLocalSnapshot,
 ) -> Option<SettingValue> {
     match key {
+        "orchestration.service_tier" => Some(SettingValue::Enum(
+            match pager
+                .orchestration
+                .fast_service_tier
+                .unwrap_or(ServiceTierPreference::Inherit)
+            {
+                ServiceTierPreference::Inherit => "inherit",
+                ServiceTierPreference::Standard => "standard",
+                ServiceTierPreference::Fast => "fast",
+            },
+        )),
+        "orchestration.ultra_enabled" => Some(SettingValue::Bool(
+            pager.orchestration.ultra_enabled.unwrap_or(false),
+        )),
+        "orchestration.ultra_max_children" => Some(SettingValue::Int(i64::from(
+            pager.orchestration.ultra_max_children.unwrap_or(6),
+        ))),
+        "orchestration.graph_enabled" => Some(SettingValue::Bool(
+            pager.orchestration.graph_enabled.unwrap_or(true),
+        )),
+        "orchestration.swarm_enabled" => Some(SettingValue::Bool(
+            pager.orchestration.swarm_enabled.unwrap_or(true),
+        )),
+        "orchestration.live_swarm_enabled" => Some(SettingValue::Bool(
+            pager.orchestration.live_swarm_enabled.unwrap_or(false),
+        )),
+        "orchestration.swarm_max_active_workers" => Some(SettingValue::Int(i64::from(
+            pager
+                .orchestration
+                .swarm_max_active_model_workers
+                .unwrap_or(100),
+        ))),
+        "orchestration.graph_artifact_retention_days" => Some(SettingValue::Int(i64::from(
+            pager
+                .orchestration
+                .graph_artifact_retention_days
+                .unwrap_or(0),
+        ))),
         // SHARED — UiConfig source of truth, pager keeps a cache.
         "compact_mode" => Some(SettingValue::Bool(ui.compact_mode)),
         "show_timestamps" => Some(SettingValue::Bool(ui.show_timestamps.unwrap_or(true))),
@@ -708,6 +748,31 @@ mod tests {
                 continue;
             }
             match (meta.key, &meta.kind) {
+                ("orchestration.service_tier", SettingKind::Enum { default, .. }) => {
+                    assert_eq!(*default, "inherit");
+                }
+                ("orchestration.ultra_enabled", SettingKind::Bool { default }) => {
+                    assert!(!*default);
+                }
+                ("orchestration.ultra_max_children", SettingKind::Int { default, .. }) => {
+                    assert_eq!(*default, 6);
+                }
+                ("orchestration.graph_enabled", SettingKind::Bool { default })
+                | ("orchestration.swarm_enabled", SettingKind::Bool { default }) => {
+                    assert!(*default);
+                }
+                ("orchestration.live_swarm_enabled", SettingKind::Bool { default }) => {
+                    assert!(!*default);
+                }
+                ("orchestration.swarm_max_active_workers", SettingKind::Int { default, .. }) => {
+                    assert_eq!(*default, 100);
+                }
+                (
+                    "orchestration.graph_artifact_retention_days",
+                    SettingKind::Int { default, .. },
+                ) => {
+                    assert_eq!(*default, 0);
+                }
                 ("compact_mode", SettingKind::Bool { default }) => {
                     assert_eq!(
                         *default, ui.compact_mode,

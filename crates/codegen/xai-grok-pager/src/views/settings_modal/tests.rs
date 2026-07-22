@@ -652,6 +652,10 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             // SHELL-owned prompt_suggestions (Editor; tab autocomplete
             // ghost text, live cache).
             "prompt_suggestions",
+            // Orchestration startup defaults (Agent category).
+            "orchestration.service_tier",
+            "orchestration.ultra_enabled",
+            "orchestration.ultra_max_children",
             // voice_capture_mode + voice_stt_language hidden when gate is off.
             // SHELL-owned permission_mode (Agent category).
             "permission_mode",
@@ -674,6 +678,12 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             // `web_search_model`, and `session_summary_model` are
             // not exposed in the modal.
             "fork_secondary_model",
+            // AgentGraph and Swarm controls (Models category).
+            "orchestration.graph_enabled",
+            "orchestration.swarm_enabled",
+            "orchestration.live_swarm_enabled",
+            "orchestration.swarm_max_active_workers",
+            "orchestration.graph_artifact_retention_days",
             // `auto_compact_threshold_percent` (Session category) is
             // not exposed in the modal.
             // Advanced category.

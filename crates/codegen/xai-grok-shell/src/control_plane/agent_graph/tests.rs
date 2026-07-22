@@ -278,6 +278,275 @@ fn store_rejects_output_from_superseded_attempt() {
 }
 
 #[test]
+fn persisted_retry_survives_reopen_and_activates_once_at_chosen_deadline() {
+    let dir = tempdir().expect("tempdir");
+    let db_path = dir.path().join("agentgraph.db");
+    let mut graph = build_exact_100_worker_graph("persisted-retry");
+    graph.spec.nodes.truncate(1);
+    graph.spec.execution.max_total_nodes = 1;
+    let run_id = {
+        let mut store = AgentGraphStore::open(&db_path).expect("store");
+        let run_id = store
+            .create_run(&graph, Some("session"), dir.path())
+            .expect("run");
+        let lease = store
+            .lease_node(&run_id, "worker-000", "owner", 1_000)
+            .expect("lease")
+            .expect("granted");
+        let schedule = RetrySchedule {
+            run_id: run_id.clone(),
+            node_id: "worker-000".to_string(),
+            prior_attempt: lease.attempt,
+            next_attempt: lease.attempt + 1,
+            classification: FailureClassification::RateLimited,
+            chosen_delay_ms: 750,
+            next_attempt_at_ms: 10_750,
+            retry_after_ms: Some(500),
+            jitter_ms: 23,
+            equivalent_failure_count: 1,
+            no_progress_count: 1,
+        };
+        store.schedule_retry(&schedule).expect("schedule");
+        assert_eq!(
+            store.node_status(&run_id, "worker-000").expect("status"),
+            NodeStatus::Retrying
+        );
+        run_id
+    };
+
+    let mut reopened = AgentGraphStore::open(&db_path).expect("reopen");
+    let loaded = reopened
+        .retry_schedule(&run_id, "worker-000")
+        .expect("query")
+        .expect("persisted");
+    assert_eq!(loaded.next_attempt_at_ms, 10_750);
+    assert!(
+        reopened
+            .activate_due_retries_for_run(&run_id, 10_749)
+            .expect("not due")
+            .is_empty()
+    );
+    assert_eq!(
+        reopened
+            .activate_due_retries_for_run(&run_id, 10_750)
+            .expect("due")
+            .len(),
+        1
+    );
+    assert_eq!(
+        reopened.node_status(&run_id, "worker-000").expect("ready"),
+        NodeStatus::Ready
+    );
+    assert!(
+        reopened
+            .activate_due_retries_for_run(&run_id, 20_000)
+            .expect("exactly once")
+            .is_empty()
+    );
+}
+
+#[test]
+fn coordinator_lease_allows_takeover_only_after_expiry() {
+    let dir = tempdir().expect("tempdir");
+    let db_path = dir.path().join("agentgraph.db");
+    let mut first = AgentGraphStore::open(&db_path).expect("first");
+    let mut second = AgentGraphStore::open(&db_path).expect("second");
+    assert!(
+        first
+            .try_acquire_coordinator("home", "owner-a", 1_000, 500)
+            .expect("acquire")
+    );
+    assert!(
+        !second
+            .try_acquire_coordinator("home", "owner-b", 1_499, 500)
+            .expect("blocked")
+    );
+    assert!(
+        second
+            .try_acquire_coordinator("home", "owner-b", 1_500, 500)
+            .expect("takeover")
+    );
+    assert_eq!(
+        second
+            .coordinator_lease("home")
+            .expect("query")
+            .expect("lease")
+            .owner,
+        "owner-b"
+    );
+}
+
+#[test]
+fn runtime_recovery_marks_lost_local_worker_stale_and_persists_one_retry() {
+    let dir = tempdir().expect("tempdir");
+    let db_path = dir.path().join("agentgraph.db");
+    let mut graph = build_exact_100_worker_graph("runtime-recovery");
+    graph.spec.nodes.truncate(1);
+    graph.spec.execution.max_total_nodes = 1;
+    graph.spec.nodes[0].retry_policy.max_attempts = 3;
+    graph.spec.nodes[0].retry_policy.backoff_seconds = Some(1);
+    let run_id = {
+        let mut store = AgentGraphStore::open(&db_path).expect("store");
+        let run_id = store
+            .create_run(&graph, Some("session"), dir.path())
+            .expect("run");
+        store
+            .mark_run_status(&run_id, RunStatus::Running)
+            .expect("running");
+        store
+            .lease_node(&run_id, "worker-000", "process-local-worker", 60_000)
+            .expect("lease")
+            .expect("granted");
+        run_id
+    };
+
+    let clock = Arc::new(ManualClock::new(100_000));
+    let manager = AgentGraphRuntimeManager::with_clock(&db_path, clock.clone());
+    let first = manager.recover_once().expect("recover");
+    assert_eq!(first.stale_attempts, 1);
+    assert_eq!(first.retries_scheduled, 1);
+    let store = AgentGraphStore::open(&db_path).expect("reopen");
+    assert_eq!(
+        store.node_status(&run_id, "worker-000").expect("status"),
+        NodeStatus::Retrying
+    );
+    assert!(
+        store
+            .retry_schedule(&run_id, "worker-000")
+            .expect("query")
+            .is_some()
+    );
+    drop(store);
+
+    let second = manager.recover_once().expect("idempotent recovery");
+    assert_eq!(second.stale_attempts, 0);
+    assert_eq!(second.retries_scheduled, 0);
+    let store = AgentGraphStore::open(&db_path).expect("reopen again");
+    assert_eq!(
+        store
+            .events_for_run(&run_id)
+            .expect("events")
+            .iter()
+            .filter(|event| matches!(event, GraphEvent::RetryScheduled { .. }))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn runtime_recovery_enforces_persisted_wall_deadline_during_downtime() {
+    let dir = tempdir().expect("tempdir");
+    let db_path = dir.path().join("agentgraph.db");
+    let mut graph = build_exact_100_worker_graph("wall-recovery");
+    graph.spec.nodes.truncate(1);
+    graph.spec.execution.max_total_nodes = 1;
+    graph.spec.budgets.max_wall_time_seconds = Some(1);
+    let mut store = AgentGraphStore::open(&db_path).expect("store");
+    let run_id = store
+        .create_run(&graph, Some("session"), dir.path())
+        .expect("run");
+    store
+        .mark_run_status(&run_id, RunStatus::Running)
+        .expect("running");
+    let created = store.run_created_at_ms(&run_id).expect("created");
+    drop(store);
+
+    let manager =
+        AgentGraphRuntimeManager::with_clock(&db_path, Arc::new(ManualClock::new(created + 1_001)));
+    let report = manager.recover_once().expect("recover");
+    assert_eq!(report.wall_time_stops, 1);
+    assert_eq!(
+        AgentGraphStore::open(&db_path)
+            .expect("reopen")
+            .run_status(&run_id)
+            .expect("status"),
+        RunStatus::BudgetStopped
+    );
+}
+
+#[test]
+fn durable_budget_and_lease_transaction_prevents_concurrent_oversubscription() {
+    let dir = tempdir().expect("tempdir");
+    let db_path = dir.path().join("agentgraph.db");
+    let mut graph = build_exact_100_worker_graph("durable-budget-race");
+    graph.spec.nodes.truncate(20);
+    graph.spec.execution.max_total_nodes = 20;
+    graph.spec.budgets.max_model_calls = Some(5);
+    let run_id = {
+        let mut store = AgentGraphStore::open(&db_path).expect("store");
+        store
+            .create_run(&graph, Some("session"), dir.path())
+            .expect("run")
+    };
+    let barrier = Arc::new(std::sync::Barrier::new(20));
+    let mut threads = Vec::new();
+    for index in 0..20 {
+        let db_path = db_path.clone();
+        let run_id = run_id.clone();
+        let barrier = barrier.clone();
+        threads.push(std::thread::spawn(move || {
+            let mut store = AgentGraphStore::open(&db_path).expect("thread store");
+            barrier.wait();
+            store
+                .reserve_and_lease_node(
+                    &run_id,
+                    &format!("worker-{index:03}"),
+                    &format!("owner-{index}"),
+                    60_000,
+                    UsageAccounting {
+                        model_calls: 1,
+                        node_attempts: 1,
+                        ..UsageAccounting::default()
+                    },
+                )
+                .expect("atomic outcome")
+        }));
+    }
+    let leased = threads
+        .into_iter()
+        .map(|thread| thread.join().expect("thread"))
+        .filter(|outcome| matches!(outcome, LeaseReservationOutcome::Leased(_)))
+        .count();
+    assert_eq!(leased, 5);
+    let state = AgentGraphStore::open(&db_path)
+        .expect("reopen")
+        .budget_state(&run_id)
+        .expect("budget");
+    assert_eq!(state.reservations.len(), 5);
+    assert!(state.stopped.is_some());
+}
+
+#[test]
+fn expired_lease_conservatively_charges_and_releases_durable_reservation() {
+    let dir = tempdir().expect("tempdir");
+    let db_path = dir.path().join("agentgraph.db");
+    let mut graph = build_exact_100_worker_graph("durable-budget-expiry");
+    graph.spec.nodes.truncate(1);
+    graph.spec.execution.max_total_nodes = 1;
+    let mut store = AgentGraphStore::open(&db_path).expect("store");
+    let run_id = store
+        .create_run(&graph, Some("session"), dir.path())
+        .expect("run");
+    let estimate = UsageAccounting {
+        input_tokens: 100,
+        output_tokens: 20,
+        model_calls: 1,
+        node_attempts: 1,
+        ..UsageAccounting::default()
+    };
+    let outcome = store
+        .reserve_and_lease_node(&run_id, "worker-000", "owner", 1, estimate.clone())
+        .expect("lease");
+    assert!(matches!(outcome, LeaseReservationOutcome::Leased(_)));
+    std::thread::sleep(Duration::from_millis(2));
+    assert_eq!(store.expire_leases(store::now_ms()).expect("expire"), 1);
+    let state = store.budget_state(&run_id).expect("budget");
+    assert!(state.reservations.is_empty());
+    assert_eq!(state.charged.input_tokens, estimate.input_tokens);
+    assert_eq!(state.charged.output_tokens, estimate.output_tokens);
+}
+
+#[test]
 fn verification_rejects_unsafe_output_paths_and_out_of_scope_changes() {
     let output = NodeOutput {
         files_changed: vec!["README.md".to_string(), "../outside".to_string()],
@@ -408,6 +677,129 @@ async fn real_subagent_scheduler_runs_bounded_concurrently() {
         Some(SubagentServiceTierPreference::Standard)
     );
     assert_eq!(backend.max_seen_hosted_multi_agent(), Some(false));
+}
+
+#[tokio::test]
+async fn bounded_loop_runs_until_persisted_dry_round_limit() {
+    let dir = tempdir().expect("tempdir");
+    let mut graph = runnable_real_backend_graph("loop-until-dry", 1, 1);
+    graph.spec.nodes[0].kind = NodeKind::Loop;
+    graph.spec.nodes[0].loop_policy = Some(LoopSpec {
+        max_iterations: Some(5),
+        max_generated_nodes: Some(10),
+        max_input_tokens: Some(1_000),
+        max_output_tokens: Some(1_000),
+        max_model_calls: Some(5),
+        max_wall_time_seconds: Some(30),
+        progress_metric: Some("unique-findings".to_string()),
+        no_progress_limit: Some(2),
+        deduplication_key: Some("$.claim".to_string()),
+        terminal_predicate: Some(Predicate::Equals {
+            path: "$.summary".to_string(),
+            value: serde_json::json!("converged"),
+        }),
+    });
+    let mut store = AgentGraphStore::open(dir.path().join("agentgraph.db")).expect("store");
+    let run_id = store
+        .create_run(&graph, Some("session"), dir.path())
+        .expect("run");
+    let backend = Arc::new(ScriptedSubagentBackend::new(
+        ScriptedBackendMode::StructuredSuccess,
+    ));
+    let worker_backend = SubagentWorkerBackend::new(backend.clone(), "session", dir.path());
+    let mut scheduler = AgentGraphScheduler::new(
+        graph,
+        SchedulerConfig {
+            max_active_model_calls: 1,
+            plan_mode: false,
+        },
+    )
+    .expect("scheduler");
+    let report = scheduler
+        .run_to_completion_with_subagents(&worker_backend, &mut store, &run_id)
+        .await
+        .expect("loop run");
+    assert_eq!(report.run_status, RunStatus::Completed);
+    assert_eq!(backend.spawn_count.load(Ordering::SeqCst), 2);
+    let state = store
+        .loop_state(&run_id, "worker-000")
+        .expect("state query")
+        .expect("state");
+    assert_eq!(state.iteration, 2);
+    assert_eq!(state.status, LoopStatus::Dry);
+}
+
+#[tokio::test]
+async fn compensation_runs_completed_side_effects_in_reverse_order() {
+    let dir = tempdir().expect("tempdir");
+    let mut graph = runnable_real_backend_graph("compensation-e2e", 5, 1);
+    graph.spec.edges = vec![
+        EdgeSpec {
+            id: None,
+            from: "worker-000".to_string(),
+            to: "worker-001".to_string(),
+            kind: EdgeKind::Control,
+            bindings: Vec::new(),
+            join: None,
+            condition: None,
+        },
+        EdgeSpec {
+            id: None,
+            from: "worker-001".to_string(),
+            to: "worker-002".to_string(),
+            kind: EdgeKind::Control,
+            bindings: Vec::new(),
+            join: None,
+            condition: None,
+        },
+    ];
+    for (source, compensation, path) in [
+        (0usize, "worker-003", "first.txt"),
+        (1usize, "worker-004", "second.txt"),
+    ] {
+        graph.spec.nodes[source].capability_mode = Some(CapabilityMode::WorktreeWrite);
+        graph.spec.nodes[source].write_set = vec![path.to_string()];
+        graph.spec.nodes[source].compensation = Some(compensation.to_string());
+    }
+    graph.spec.nodes[2].failure_policy = FailurePolicy::Compensate;
+    for index in [3usize, 4usize] {
+        graph.spec.nodes[index].kind = NodeKind::Compensation;
+        graph.spec.nodes[index].capability_mode = Some(CapabilityMode::WorktreeWrite);
+    }
+    let mut store = AgentGraphStore::open(dir.path().join("agentgraph.db")).expect("store");
+    let run_id = store
+        .create_run(&graph, Some("session"), dir.path())
+        .expect("run");
+    let backend = Arc::new(ScriptedSubagentBackend::new(ScriptedBackendMode::FailNode(
+        "worker-002",
+    )));
+    let worker_backend = SubagentWorkerBackend::new(backend.clone(), "session", dir.path());
+    let mut scheduler = AgentGraphScheduler::new(
+        graph,
+        SchedulerConfig {
+            max_active_model_calls: 1,
+            plan_mode: false,
+        },
+    )
+    .expect("scheduler");
+    let report = scheduler
+        .run_to_completion_with_subagents(&worker_backend, &mut store, &run_id)
+        .await
+        .expect("compensated run");
+    let spawned = backend.spawned_node_ids.lock().expect("spawned").clone();
+    let persisted_plan = store.compensation_plan(&run_id).expect("plan query");
+    assert_eq!(
+        report.run_status,
+        RunStatus::Compensated,
+        "spawned={spawned:?} plan={persisted_plan:?} snapshot={:?}",
+        store.replay_run(&run_id).expect("snapshot")
+    );
+    assert_eq!(
+        &spawned[spawned.len() - 2..],
+        &["worker-004".to_string(), "worker-003".to_string()]
+    );
+    let plan = persisted_plan.expect("plan");
+    assert!(plan.is_complete());
 }
 
 #[tokio::test]
@@ -574,6 +966,47 @@ async fn real_backend_resolves_builtin_model_selector() {
     );
 }
 
+#[tokio::test]
+async fn provider_rate_headers_cross_child_session_boundary_into_worker_completion() {
+    let dir = tempdir().expect("tempdir");
+    let graph = build_exact_100_worker_graph("provider-capacity-observed");
+    let node = graph.spec.nodes[0].clone();
+    let worker_id = graph_worker_id("run-rate", &node.id, 1);
+    super::rate_limit::record_session_observation(
+        &worker_id,
+        "https://api.example.test/v1",
+        xai_grok_sampling_types::RateLimitMetadata {
+            requests: xai_grok_sampling_types::RateLimitWindow {
+                limit: Some(100),
+                remaining: Some(42),
+                reset_after_ms: Some(750),
+            },
+            retry_after_ms: Some(900),
+            ..Default::default()
+        },
+    );
+    let backend = Arc::new(ScriptedSubagentBackend::new(
+        ScriptedBackendMode::StructuredSuccess,
+    ));
+    let completion = SubagentWorkerBackend::new(backend, "session-1", dir.path())
+        .run_node(
+            "run-rate",
+            &node,
+            &graph.spec.defaults,
+            &graph.spec.schemas,
+            1,
+            worker_id,
+        )
+        .await
+        .expect("worker completion");
+    let observation = completion
+        .provider_capacity
+        .expect("typed provider observation");
+    assert_eq!(observation.route.provider_id, "api.example.test");
+    assert_eq!(observation.rate_limits.requests.remaining, Some(42));
+    assert_eq!(observation.rate_limits.retry_after_ms, Some(900));
+}
+
 fn node_output(run_id: &str, node_id: &str, attempt: u32, status: NodeStatus) -> NodeOutput {
     NodeOutput {
         schema_version: AGENTGRAPH_SCHEMA_VERSION,
@@ -614,6 +1047,7 @@ enum ScriptedBackendMode {
     StructuredSuccess,
     PlainTextSuccess,
     BackgroundThenQueryComplete,
+    FailNode(&'static str),
 }
 
 #[derive(Debug)]
@@ -627,6 +1061,7 @@ struct ScriptedSubagentBackend {
     max_seen_service_tier: std::sync::Mutex<Option<SubagentServiceTierPreference>>,
     max_seen_hosted_multi_agent: std::sync::Mutex<Option<bool>>,
     background_outputs: std::sync::Mutex<std::collections::BTreeMap<String, String>>,
+    spawned_node_ids: std::sync::Mutex<Vec<String>>,
 }
 
 impl ScriptedSubagentBackend {
@@ -641,6 +1076,7 @@ impl ScriptedSubagentBackend {
             max_seen_service_tier: std::sync::Mutex::new(None),
             max_seen_hosted_multi_agent: std::sync::Mutex::new(None),
             background_outputs: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            spawned_node_ids: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -661,6 +1097,13 @@ impl ScriptedSubagentBackend {
 impl ExistingSubagentBackend for ScriptedSubagentBackend {
     async fn spawn(&self, request: SubagentRequest) -> Result<SubagentResult, ToolError> {
         self.spawn_count.fetch_add(1, Ordering::SeqCst);
+        let node_id = prompt_line_value(&request.prompt, "Node id: ")
+            .unwrap_or("unknown-node")
+            .to_string();
+        self.spawned_node_ids
+            .lock()
+            .expect("spawned lock")
+            .push(node_id.clone());
         if let Some(mode) = request.runtime_overrides.capability_mode {
             *self.max_seen_capability_mode.lock().expect("lock") = Some(mode.as_str().to_string());
         }
@@ -720,6 +1163,34 @@ impl ExistingSubagentBackend for ScriptedSubagentBackend {
                 tokens_used: 0,
                 worktree_path: None,
                 backgrounded: true,
+            }),
+            ScriptedBackendMode::FailNode(target) if node_id == target => Ok(SubagentResult {
+                success: false,
+                output: Arc::from(""),
+                error: Some("403 scripted non-retryable failure".to_string()),
+                cancelled: false,
+                subagent_id: request.id.clone(),
+                child_session_id: request.id,
+                tool_calls: 1,
+                turns: 1,
+                duration_ms: 20,
+                tokens_used: 10,
+                worktree_path: None,
+                backgrounded: false,
+            }),
+            ScriptedBackendMode::FailNode(_) => Ok(SubagentResult {
+                success: true,
+                output: Arc::from(node_output_json_from_prompt(&request.prompt)),
+                error: None,
+                cancelled: false,
+                subagent_id: request.id.clone(),
+                child_session_id: request.id,
+                tool_calls: 1,
+                turns: 1,
+                duration_ms: 20,
+                tokens_used: 10,
+                worktree_path: None,
+                backgrounded: false,
             }),
         }
     }

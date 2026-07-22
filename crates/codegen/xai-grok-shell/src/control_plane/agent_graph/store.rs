@@ -1,17 +1,21 @@
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 use xai_sqlite_journal::JournalMode;
 
 use super::approval::ExecutionApproval;
+use super::budget::{BudgetError, BudgetLedger, BudgetPersistentState, BudgetReservationId};
+use super::compensation::{CompensationPlan, CompensationPlanStatus};
+use super::loop_controller::{LoopState, LoopStatus};
 use super::normalization::canonical_graph_hash;
+use super::retry::RetrySchedule;
 use super::types::{GraphSpec, NodeId, NodeOutput, NodeStatus, RunStatus, UsageAccounting};
 
-pub const STORE_SCHEMA_VERSION: u32 = 1;
+pub const STORE_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -25,6 +29,10 @@ pub enum StoreError {
     RunNotFound { run_id: String },
     #[error("node `{node_id}` in run `{run_id}` was not found")]
     NodeNotFound { run_id: String, node_id: NodeId },
+    #[error("budget error: {0}")]
+    Budget(#[from] BudgetError),
+    #[error("AgentGraph store schema {found} is newer than supported schema {supported}")]
+    UnsupportedSchema { found: u32, supported: u32 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,8 +63,27 @@ pub enum GraphEvent {
         node_id: NodeId,
         attempt: u32,
     },
+    RetryScheduled {
+        schedule: RetrySchedule,
+    },
+    RetryReady {
+        node_id: NodeId,
+        next_attempt: u32,
+    },
     RunCancelled {
         reason: String,
+    },
+    RunRecovered {
+        coordinator_owner: String,
+    },
+    LoopStateUpdated {
+        node_id: NodeId,
+        iteration: u32,
+        status: LoopStatus,
+    },
+    CompensationUpdated {
+        status: CompensationPlanStatus,
+        cursor: usize,
     },
 }
 
@@ -67,6 +94,31 @@ pub struct NodeLease {
     pub attempt: u32,
     pub owner: String,
     pub lease_expires_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LeaseReservationOutcome {
+    Leased(NodeLease),
+    NotRunnable,
+    BudgetStopped { reason: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoverableRun {
+    pub run_id: String,
+    pub status: RunStatus,
+    pub session_id: Option<String>,
+    pub repo_root: PathBuf,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoordinatorLease {
+    pub scope: String,
+    pub owner: String,
+    pub expires_at_ms: i64,
+    pub heartbeat_at_ms: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -164,6 +216,15 @@ impl AgentGraphStore {
                 status: RunStatus::AwaitingApproval,
             },
             now,
+        )?;
+        tx.execute(
+            "INSERT INTO run_budget_state(run_id, state_json, updated_at_ms)
+             VALUES (?1, ?2, ?3)",
+            params![
+                run_id,
+                serde_json::to_string(&BudgetPersistentState::default())?,
+                now
+            ],
         )?;
         tx.commit()?;
         Ok(())
@@ -305,7 +366,11 @@ impl AgentGraphStore {
 
         if !matches!(
             current.0,
-            NodeStatus::Pending | NodeStatus::Ready | NodeStatus::Retrying | NodeStatus::Stale
+            NodeStatus::Pending
+                | NodeStatus::Blocked
+                | NodeStatus::Ready
+                | NodeStatus::Retrying
+                | NodeStatus::Stale
         ) {
             return Ok(None);
         }
@@ -329,6 +394,328 @@ impl AgentGraphStore {
             owner: owner.to_string(),
             lease_expires_at_ms,
         }))
+    }
+
+    pub fn reserve_and_lease_node(
+        &mut self,
+        run_id: &str,
+        node_id: &str,
+        owner: &str,
+        ttl_ms: i64,
+        estimate: UsageAccounting,
+    ) -> Result<LeaseReservationOutcome, StoreError> {
+        let at_ms = now_ms();
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current = tx
+            .query_row(
+                "SELECT status, attempt FROM node_instances WHERE run_id = ?1 AND node_id = ?2",
+                params![run_id, node_id],
+                |row| {
+                    Ok((
+                        parse_node_status(row.get::<_, String>(0)?)?,
+                        row.get::<_, u32>(1)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::NodeNotFound {
+                run_id: run_id.to_string(),
+                node_id: node_id.to_string(),
+            })?;
+        if !matches!(
+            current.0,
+            NodeStatus::Pending
+                | NodeStatus::Blocked
+                | NodeStatus::Ready
+                | NodeStatus::Retrying
+                | NodeStatus::Stale
+        ) {
+            return Ok(LeaseReservationOutcome::NotRunnable);
+        }
+
+        let spec_raw: String = tx.query_row(
+            "SELECT graph_specs.spec_json FROM graph_runs
+             JOIN graph_specs ON graph_specs.hash = graph_runs.spec_hash
+             WHERE graph_runs.id = ?1",
+            params![run_id],
+            |row| row.get(0),
+        )?;
+        let spec: GraphSpec = serde_json::from_str(&spec_raw)?;
+        let state_raw: String = tx.query_row(
+            "SELECT state_json FROM run_budget_state WHERE run_id = ?1",
+            params![run_id],
+            |row| row.get(0),
+        )?;
+        let state: BudgetPersistentState = serde_json::from_str(&state_raw)?;
+        let mut ledger = BudgetLedger::from_persistent_state(spec.spec.budgets, state);
+        let attempt = current.1.saturating_add(1);
+        let reservation_id = BudgetReservationId {
+            run_id: run_id.to_string(),
+            node_id: node_id.to_string(),
+            attempt,
+        };
+        if let Err(error @ (BudgetError::Exceeded { .. } | BudgetError::Stopped(_))) =
+            ledger.reserve(reservation_id.clone(), estimate.clone())
+        {
+            let reason = error.to_string();
+            ledger.stop(reason.clone());
+            tx.execute(
+                "UPDATE run_budget_state SET state_json = ?1, updated_at_ms = ?2 WHERE run_id = ?3",
+                params![
+                    serde_json::to_string(&ledger.persistent_state())?,
+                    at_ms,
+                    run_id
+                ],
+            )?;
+            let event = GraphEvent::RunStatusChanged {
+                status: RunStatus::BudgetStopped,
+            };
+            insert_event_tx(&tx, run_id, &event, at_ms)?;
+            apply_event_tx(&tx, run_id, &event, at_ms)?;
+            tx.commit()?;
+            return Ok(LeaseReservationOutcome::BudgetStopped { reason });
+        }
+        tx.execute(
+            "UPDATE run_budget_state SET state_json = ?1, updated_at_ms = ?2 WHERE run_id = ?3",
+            params![
+                serde_json::to_string(&ledger.persistent_state())?,
+                at_ms,
+                run_id
+            ],
+        )?;
+        tx.execute(
+            "INSERT INTO budget_reservations(run_id, node_id, attempt, usage_json, created_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                run_id,
+                node_id,
+                attempt,
+                serde_json::to_string(&estimate)?,
+                at_ms
+            ],
+        )?;
+        let lease_expires_at_ms = at_ms.saturating_add(ttl_ms.max(1));
+        let event = GraphEvent::NodeLeased {
+            node_id: node_id.to_string(),
+            attempt,
+            owner: owner.to_string(),
+            lease_expires_at_ms,
+        };
+        insert_event_tx(&tx, run_id, &event, at_ms)?;
+        apply_event_tx(&tx, run_id, &event, at_ms)?;
+        tx.commit()?;
+        Ok(LeaseReservationOutcome::Leased(NodeLease {
+            run_id: run_id.to_string(),
+            node_id: node_id.to_string(),
+            attempt,
+            owner: owner.to_string(),
+            lease_expires_at_ms,
+        }))
+    }
+
+    pub fn accept_output_and_reconcile(
+        &mut self,
+        run_id: &str,
+        node_id: &str,
+        attempt: u32,
+        output: &NodeOutput,
+        actual_usage: Option<&UsageAccounting>,
+    ) -> Result<bool, StoreError> {
+        let at_ms = now_ms();
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let current_attempt = tx
+            .query_row(
+                "SELECT attempt FROM node_instances WHERE run_id = ?1 AND node_id = ?2",
+                params![run_id, node_id],
+                |row| row.get::<_, u32>(0),
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::NodeNotFound {
+                run_id: run_id.to_string(),
+                node_id: node_id.to_string(),
+            })?;
+        if current_attempt != attempt {
+            return Ok(false);
+        }
+        let spec_raw: String = tx.query_row(
+            "SELECT graph_specs.spec_json FROM graph_runs
+             JOIN graph_specs ON graph_specs.hash = graph_runs.spec_hash
+             WHERE graph_runs.id = ?1",
+            params![run_id],
+            |row| row.get(0),
+        )?;
+        let spec: GraphSpec = serde_json::from_str(&spec_raw)?;
+        let state_raw: String = tx.query_row(
+            "SELECT state_json FROM run_budget_state WHERE run_id = ?1",
+            params![run_id],
+            |row| row.get(0),
+        )?;
+        let mut ledger = BudgetLedger::from_persistent_state(
+            spec.spec.budgets,
+            serde_json::from_str(&state_raw)?,
+        );
+        let reservation_id = BudgetReservationId {
+            run_id: run_id.to_string(),
+            node_id: node_id.to_string(),
+            attempt,
+        };
+        let charged = ledger.reconcile(&reservation_id, actual_usage.cloned())?;
+        tx.execute(
+            "UPDATE run_budget_state SET state_json = ?1, updated_at_ms = ?2 WHERE run_id = ?3",
+            params![
+                serde_json::to_string(&ledger.persistent_state())?,
+                at_ms,
+                run_id
+            ],
+        )?;
+        tx.execute(
+            "DELETE FROM budget_reservations WHERE run_id = ?1 AND node_id = ?2 AND attempt = ?3",
+            params![run_id, node_id, attempt],
+        )?;
+        tx.execute(
+            "INSERT INTO usage_records_v2(run_id, node_id, attempt, usage_json, created_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(run_id, node_id, attempt)
+             DO UPDATE SET usage_json = excluded.usage_json",
+            params![
+                run_id,
+                node_id,
+                attempt,
+                serde_json::to_string(&charged)?,
+                at_ms
+            ],
+        )?;
+        let event = GraphEvent::NodeOutputAccepted {
+            node_id: node_id.to_string(),
+            attempt,
+            status: output.status,
+        };
+        insert_event_tx(&tx, run_id, &event, at_ms)?;
+        tx.execute(
+            "UPDATE node_instances
+             SET status = ?1, output_json = ?2, lease_owner = NULL,
+                 lease_expires_at_ms = NULL, updated_at_ms = ?3
+             WHERE run_id = ?4 AND node_id = ?5 AND attempt = ?6",
+            params![
+                status_text(output.status),
+                serde_json::to_string(output)?,
+                at_ms,
+                run_id,
+                node_id,
+                attempt
+            ],
+        )?;
+        tx.execute(
+            "DELETE FROM leases WHERE run_id = ?1 AND node_id = ?2 AND attempt = ?3",
+            params![run_id, node_id, attempt],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    pub fn budget_state(&self, run_id: &str) -> Result<BudgetPersistentState, StoreError> {
+        let raw = self
+            .conn
+            .query_row(
+                "SELECT state_json FROM run_budget_state WHERE run_id = ?1",
+                params![run_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::RunNotFound {
+                run_id: run_id.to_string(),
+            })?;
+        Ok(serde_json::from_str(&raw)?)
+    }
+
+    pub fn save_loop_state(
+        &mut self,
+        run_id: &str,
+        node_id: &str,
+        state: &LoopState,
+    ) -> Result<(), StoreError> {
+        self.ensure_run(run_id)?;
+        let at_ms = now_ms();
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
+            "INSERT INTO loop_states(run_id, node_id, state_json, updated_at_ms)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(run_id, node_id) DO UPDATE SET
+               state_json = excluded.state_json,
+               updated_at_ms = excluded.updated_at_ms",
+            params![run_id, node_id, serde_json::to_string(state)?, at_ms],
+        )?;
+        let event = GraphEvent::LoopStateUpdated {
+            node_id: node_id.to_string(),
+            iteration: state.iteration,
+            status: state.status,
+        };
+        insert_event_tx(&tx, run_id, &event, at_ms)?;
+        apply_event_tx(&tx, run_id, &event, at_ms)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn loop_state(&self, run_id: &str, node_id: &str) -> Result<Option<LoopState>, StoreError> {
+        let raw = self
+            .conn
+            .query_row(
+                "SELECT state_json FROM loop_states WHERE run_id = ?1 AND node_id = ?2",
+                params![run_id, node_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        raw.map(|value| serde_json::from_str(&value))
+            .transpose()
+            .map_err(StoreError::from)
+    }
+
+    pub fn save_compensation_plan(
+        &mut self,
+        run_id: &str,
+        plan: &CompensationPlan,
+    ) -> Result<(), StoreError> {
+        self.ensure_run(run_id)?;
+        let at_ms = now_ms();
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
+            "INSERT INTO compensation_plans(run_id, plan_json, updated_at_ms)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(run_id) DO UPDATE SET
+               plan_json = excluded.plan_json,
+               updated_at_ms = excluded.updated_at_ms",
+            params![run_id, serde_json::to_string(plan)?, at_ms],
+        )?;
+        let event = GraphEvent::CompensationUpdated {
+            status: plan.status,
+            cursor: plan.cursor,
+        };
+        insert_event_tx(&tx, run_id, &event, at_ms)?;
+        apply_event_tx(&tx, run_id, &event, at_ms)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn compensation_plan(&self, run_id: &str) -> Result<Option<CompensationPlan>, StoreError> {
+        let raw = self
+            .conn
+            .query_row(
+                "SELECT plan_json FROM compensation_plans WHERE run_id = ?1",
+                params![run_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        raw.map(|value| serde_json::from_str(&value))
+            .transpose()
+            .map_err(StoreError::from)
     }
 
     pub fn accept_output(
@@ -396,6 +783,315 @@ impl AgentGraphStore {
             ],
         )?;
         Ok(())
+    }
+
+    pub fn schedule_retry(&mut self, schedule: &RetrySchedule) -> Result<(), StoreError> {
+        self.ensure_run(&schedule.run_id)?;
+        let now = now_ms();
+        let event = GraphEvent::RetryScheduled {
+            schedule: schedule.clone(),
+        };
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
+            "INSERT INTO retry_schedules(
+               run_id, node_id, prior_attempt, next_attempt, classification,
+               chosen_delay_ms, next_attempt_at_ms, retry_after_ms, jitter_ms,
+               equivalent_failure_count, no_progress_count, created_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+             ON CONFLICT(run_id, node_id) DO UPDATE SET
+               prior_attempt = excluded.prior_attempt,
+               next_attempt = excluded.next_attempt,
+               classification = excluded.classification,
+               chosen_delay_ms = excluded.chosen_delay_ms,
+               next_attempt_at_ms = excluded.next_attempt_at_ms,
+               retry_after_ms = excluded.retry_after_ms,
+               jitter_ms = excluded.jitter_ms,
+               equivalent_failure_count = excluded.equivalent_failure_count,
+               no_progress_count = excluded.no_progress_count,
+               created_at_ms = excluded.created_at_ms",
+            params![
+                schedule.run_id,
+                schedule.node_id,
+                schedule.prior_attempt,
+                schedule.next_attempt,
+                status_text(schedule.classification),
+                schedule.chosen_delay_ms,
+                schedule.next_attempt_at_ms,
+                schedule.retry_after_ms,
+                schedule.jitter_ms,
+                schedule.equivalent_failure_count,
+                schedule.no_progress_count,
+                now,
+            ],
+        )?;
+        tx.execute(
+            "INSERT OR IGNORE INTO retry_history(
+               run_id, node_id, prior_attempt, schedule_json, chosen_delay_ms, created_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                schedule.run_id,
+                schedule.node_id,
+                schedule.prior_attempt,
+                serde_json::to_string(schedule)?,
+                schedule.chosen_delay_ms,
+                now,
+            ],
+        )?;
+        insert_event_tx(&tx, &schedule.run_id, &event, now)?;
+        apply_event_tx(&tx, &schedule.run_id, &event, now)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn retry_schedule(
+        &self,
+        run_id: &str,
+        node_id: &str,
+    ) -> Result<Option<RetrySchedule>, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT prior_attempt, next_attempt, classification, chosen_delay_ms,
+                        next_attempt_at_ms, retry_after_ms, jitter_ms,
+                        equivalent_failure_count, no_progress_count
+                 FROM retry_schedules WHERE run_id = ?1 AND node_id = ?2",
+                params![run_id, node_id],
+                |row| {
+                    let classification_raw: String = row.get(2)?;
+                    Ok(RetrySchedule {
+                        run_id: run_id.to_string(),
+                        node_id: node_id.to_string(),
+                        prior_attempt: row.get(0)?,
+                        next_attempt: row.get(1)?,
+                        classification: parse_json_enum(classification_raw, 2)?,
+                        chosen_delay_ms: row.get(3)?,
+                        next_attempt_at_ms: row.get(4)?,
+                        retry_after_ms: row.get(5)?,
+                        jitter_ms: row.get(6)?,
+                        equivalent_failure_count: row.get(7)?,
+                        no_progress_count: row.get(8)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+
+    pub fn activate_due_retries(&mut self, at_ms: i64) -> Result<Vec<RetrySchedule>, StoreError> {
+        self.activate_due_retries_matching(None, at_ms)
+    }
+
+    pub fn activate_due_retries_for_run(
+        &mut self,
+        run_id: &str,
+        at_ms: i64,
+    ) -> Result<Vec<RetrySchedule>, StoreError> {
+        self.activate_due_retries_matching(Some(run_id), at_ms)
+    }
+
+    fn activate_due_retries_matching(
+        &mut self,
+        run_id: Option<&str>,
+        at_ms: i64,
+    ) -> Result<Vec<RetrySchedule>, StoreError> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let sql = if run_id.is_some() {
+            "SELECT run_id, node_id, prior_attempt, next_attempt, classification,
+                    chosen_delay_ms, next_attempt_at_ms, retry_after_ms, jitter_ms,
+                    equivalent_failure_count, no_progress_count
+             FROM retry_schedules WHERE run_id = ?1 AND next_attempt_at_ms <= ?2
+             ORDER BY next_attempt_at_ms, node_id"
+        } else {
+            "SELECT run_id, node_id, prior_attempt, next_attempt, classification,
+                    chosen_delay_ms, next_attempt_at_ms, retry_after_ms, jitter_ms,
+                    equivalent_failure_count, no_progress_count
+             FROM retry_schedules WHERE next_attempt_at_ms <= ?1
+             ORDER BY next_attempt_at_ms, run_id, node_id"
+        };
+        let mut stmt = tx.prepare(sql)?;
+        let map_row = |row: &rusqlite::Row<'_>| {
+            let classification_raw: String = row.get(4)?;
+            Ok(RetrySchedule {
+                run_id: row.get(0)?,
+                node_id: row.get(1)?,
+                prior_attempt: row.get(2)?,
+                next_attempt: row.get(3)?,
+                classification: parse_json_enum(classification_raw, 4)?,
+                chosen_delay_ms: row.get(5)?,
+                next_attempt_at_ms: row.get(6)?,
+                retry_after_ms: row.get(7)?,
+                jitter_ms: row.get(8)?,
+                equivalent_failure_count: row.get(9)?,
+                no_progress_count: row.get(10)?,
+            })
+        };
+        let schedules = if let Some(run_id) = run_id {
+            stmt.query_map(params![run_id, at_ms], map_row)?
+                .collect::<Result<Vec<_>, _>>()?
+        } else {
+            stmt.query_map(params![at_ms], map_row)?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        drop(stmt);
+        for schedule in &schedules {
+            let event = GraphEvent::RetryReady {
+                node_id: schedule.node_id.clone(),
+                next_attempt: schedule.next_attempt,
+            };
+            insert_event_tx(&tx, &schedule.run_id, &event, at_ms)?;
+            apply_event_tx(&tx, &schedule.run_id, &event, at_ms)?;
+            tx.execute(
+                "DELETE FROM retry_schedules WHERE run_id = ?1 AND node_id = ?2",
+                params![schedule.run_id, schedule.node_id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(schedules)
+    }
+
+    pub fn next_retry_at(&self, run_id: &str) -> Result<Option<i64>, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT MIN(next_attempt_at_ms) FROM retry_schedules WHERE run_id = ?1",
+                params![run_id],
+                |row| row.get(0),
+            )
+            .map_err(StoreError::from)
+    }
+
+    pub fn retry_history_totals(
+        &self,
+        run_id: &str,
+        node_id: &str,
+    ) -> Result<(u64, u32, u32), StoreError> {
+        self.conn
+            .query_row(
+                "SELECT COALESCE(SUM(chosen_delay_ms), 0), COUNT(*), COUNT(*)
+                 FROM retry_history WHERE run_id = ?1 AND node_id = ?2",
+                params![run_id, node_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map_err(StoreError::from)
+    }
+
+    pub fn run_created_at_ms(&self, run_id: &str) -> Result<i64, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT created_at_ms FROM graph_runs WHERE id = ?1",
+                params![run_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::RunNotFound {
+                run_id: run_id.to_string(),
+            })
+    }
+
+    pub fn nonterminal_runs(&self) -> Result<Vec<RecoverableRun>, StoreError> {
+        let terminal = [
+            RunStatus::Completed,
+            RunStatus::PartiallyCompleted,
+            RunStatus::Failed,
+            RunStatus::Cancelled,
+            RunStatus::Compensated,
+            RunStatus::CompensationFailed,
+            RunStatus::ManualInterventionRequired,
+        ]
+        .map(status_text);
+        let mut stmt = self.conn.prepare(
+            "SELECT id, status, session_id, repo_root, created_at_ms, updated_at_ms
+             FROM graph_runs
+             WHERE status NOT IN (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ORDER BY created_at_ms, id",
+        )?;
+        let rows = stmt
+            .query_map(
+                params![
+                    terminal[0],
+                    terminal[1],
+                    terminal[2],
+                    terminal[3],
+                    terminal[4],
+                    terminal[5],
+                    terminal[6]
+                ],
+                |row| {
+                    Ok(RecoverableRun {
+                        run_id: row.get(0)?,
+                        status: parse_run_status(row.get(1)?)?,
+                        session_id: row.get(2)?,
+                        repo_root: PathBuf::from(row.get::<_, String>(3)?),
+                        created_at_ms: row.get(4)?,
+                        updated_at_ms: row.get(5)?,
+                    })
+                },
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn try_acquire_coordinator(
+        &mut self,
+        scope: &str,
+        owner: &str,
+        at_ms: i64,
+        ttl_ms: i64,
+    ) -> Result<bool, StoreError> {
+        let expires_at_ms = at_ms.saturating_add(ttl_ms.max(1));
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = tx.execute(
+            "INSERT INTO coordinator_leases(scope, owner, expires_at_ms, heartbeat_at_ms)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(scope) DO UPDATE SET
+               owner = excluded.owner,
+               expires_at_ms = excluded.expires_at_ms,
+               heartbeat_at_ms = excluded.heartbeat_at_ms
+             WHERE coordinator_leases.owner = excluded.owner
+                OR coordinator_leases.expires_at_ms <= excluded.heartbeat_at_ms",
+            params![scope, owner, expires_at_ms, at_ms],
+        )?;
+        tx.commit()?;
+        Ok(changed == 1)
+    }
+
+    pub fn heartbeat_coordinator(
+        &mut self,
+        scope: &str,
+        owner: &str,
+        at_ms: i64,
+        ttl_ms: i64,
+    ) -> Result<bool, StoreError> {
+        let changed = self.conn.execute(
+            "UPDATE coordinator_leases
+             SET expires_at_ms = ?1, heartbeat_at_ms = ?2
+             WHERE scope = ?3 AND owner = ?4 AND expires_at_ms > ?2",
+            params![at_ms.saturating_add(ttl_ms.max(1)), at_ms, scope, owner],
+        )?;
+        Ok(changed == 1)
+    }
+
+    pub fn coordinator_lease(&self, scope: &str) -> Result<Option<CoordinatorLease>, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT owner, expires_at_ms, heartbeat_at_ms
+                 FROM coordinator_leases WHERE scope = ?1",
+                params![scope],
+                |row| {
+                    Ok(CoordinatorLease {
+                        scope: scope.to_string(),
+                        owner: row.get(0)?,
+                        expires_at_ms: row.get(1)?,
+                        heartbeat_at_ms: row.get(2)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(StoreError::from)
     }
 
     pub fn expire_leases(&mut self, now_ms: i64) -> Result<usize, StoreError> {
@@ -537,6 +1233,41 @@ impl AgentGraphStore {
             .map_err(StoreError::from)
     }
 
+    pub fn cleanup_run(&mut self, run_id: &str) -> Result<(), StoreError> {
+        self.ensure_run(run_id)?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for table in [
+            "active_graph_runs",
+            "execution_approvals",
+            "compensation_plans",
+            "loop_states",
+            "retry_history",
+            "retry_schedules",
+            "budget_reservations",
+            "run_budget_state",
+            "leases",
+            "node_attempts",
+            "node_instances",
+            "graph_events",
+            "artifacts",
+            "usage_records",
+            "usage_records_v2",
+            "approvals",
+            "resource_claims",
+            "cache_entries",
+        ] {
+            tx.execute(
+                &format!("DELETE FROM {table} WHERE run_id = ?1"),
+                params![run_id],
+            )?;
+        }
+        tx.execute("DELETE FROM graph_runs WHERE id = ?1", params![run_id])?;
+        tx.commit()?;
+        Ok(())
+    }
+
     fn ensure_run(&self, run_id: &str) -> Result<(), StoreError> {
         let exists = self
             .conn
@@ -557,6 +1288,26 @@ impl AgentGraphStore {
     }
 
     fn migrate(&self) -> Result<(), StoreError> {
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS schema_migrations(
+                component TEXT PRIMARY KEY,
+                version INTEGER NOT NULL
+            );",
+        )?;
+        let installed = self
+            .conn
+            .query_row(
+                "SELECT version FROM schema_migrations WHERE component = 'agent_graph_store'",
+                [],
+                |row| row.get::<_, u32>(0),
+            )
+            .optional()?;
+        if installed.is_some_and(|found| found > STORE_SCHEMA_VERSION) {
+            return Err(StoreError::UnsupportedSchema {
+                found: installed.unwrap_or_default(),
+                supported: STORE_SCHEMA_VERSION,
+            });
+        }
         self.conn.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS schema_migrations(
@@ -685,6 +1436,69 @@ impl AgentGraphStore {
                 output_json TEXT NOT NULL,
                 created_at_ms INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS retry_schedules(
+                run_id TEXT NOT NULL,
+                node_id TEXT NOT NULL,
+                prior_attempt INTEGER NOT NULL,
+                next_attempt INTEGER NOT NULL,
+                classification TEXT NOT NULL,
+                chosen_delay_ms INTEGER NOT NULL,
+                next_attempt_at_ms INTEGER NOT NULL,
+                retry_after_ms INTEGER,
+                jitter_ms INTEGER NOT NULL,
+                equivalent_failure_count INTEGER NOT NULL,
+                no_progress_count INTEGER NOT NULL,
+                created_at_ms INTEGER NOT NULL,
+                PRIMARY KEY(run_id, node_id),
+                FOREIGN KEY(run_id, node_id) REFERENCES node_instances(run_id, node_id)
+            );
+            CREATE INDEX IF NOT EXISTS retry_schedules_due
+                ON retry_schedules(next_attempt_at_ms);
+            CREATE TABLE IF NOT EXISTS retry_history(
+                run_id TEXT NOT NULL,
+                node_id TEXT NOT NULL,
+                prior_attempt INTEGER NOT NULL,
+                schedule_json TEXT NOT NULL,
+                chosen_delay_ms INTEGER NOT NULL,
+                created_at_ms INTEGER NOT NULL,
+                PRIMARY KEY(run_id, node_id, prior_attempt),
+                FOREIGN KEY(run_id, node_id) REFERENCES node_instances(run_id, node_id)
+            );
+            CREATE TABLE IF NOT EXISTS coordinator_leases(
+                scope TEXT PRIMARY KEY,
+                owner TEXT NOT NULL,
+                expires_at_ms INTEGER NOT NULL,
+                heartbeat_at_ms INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS run_budget_state(
+                run_id TEXT PRIMARY KEY,
+                state_json TEXT NOT NULL,
+                updated_at_ms INTEGER NOT NULL,
+                FOREIGN KEY(run_id) REFERENCES graph_runs(id)
+            );
+            CREATE TABLE IF NOT EXISTS budget_reservations(
+                run_id TEXT NOT NULL,
+                node_id TEXT NOT NULL,
+                attempt INTEGER NOT NULL,
+                usage_json TEXT NOT NULL,
+                created_at_ms INTEGER NOT NULL,
+                PRIMARY KEY(run_id, node_id, attempt),
+                FOREIGN KEY(run_id, node_id) REFERENCES node_instances(run_id, node_id)
+            );
+            CREATE TABLE IF NOT EXISTS loop_states(
+                run_id TEXT NOT NULL,
+                node_id TEXT NOT NULL,
+                state_json TEXT NOT NULL,
+                updated_at_ms INTEGER NOT NULL,
+                PRIMARY KEY(run_id, node_id),
+                FOREIGN KEY(run_id, node_id) REFERENCES node_instances(run_id, node_id)
+            );
+            CREATE TABLE IF NOT EXISTS compensation_plans(
+                run_id TEXT PRIMARY KEY,
+                plan_json TEXT NOT NULL,
+                updated_at_ms INTEGER NOT NULL,
+                FOREIGN KEY(run_id) REFERENCES graph_runs(id)
+            );
             ",
         )?;
         self.conn.execute(
@@ -796,11 +1610,69 @@ fn apply_event_tx(
                 "DELETE FROM leases WHERE run_id = ?1 AND node_id = ?2 AND attempt = ?3",
                 params![run_id, node_id, attempt],
             )?;
+            reconcile_budget_tx(tx, run_id, node_id, *attempt, None, now)?;
+        }
+        GraphEvent::RetryScheduled { schedule } => {
+            tx.execute(
+                "UPDATE node_instances
+                 SET status = ?1, lease_owner = NULL, lease_expires_at_ms = NULL, updated_at_ms = ?2
+                 WHERE run_id = ?3 AND node_id = ?4 AND attempt = ?5",
+                params![
+                    status_text(NodeStatus::Retrying),
+                    now,
+                    run_id,
+                    schedule.node_id,
+                    schedule.prior_attempt
+                ],
+            )?;
+            tx.execute(
+                "DELETE FROM leases WHERE run_id = ?1 AND node_id = ?2",
+                params![run_id, schedule.node_id],
+            )?;
+        }
+        GraphEvent::RetryReady {
+            node_id,
+            next_attempt: _,
+        } => {
+            tx.execute(
+                "UPDATE node_instances SET status = ?1, updated_at_ms = ?2
+                 WHERE run_id = ?3 AND node_id = ?4 AND status = ?5",
+                params![
+                    status_text(NodeStatus::Ready),
+                    now,
+                    run_id,
+                    node_id,
+                    status_text(NodeStatus::Retrying)
+                ],
+            )?;
         }
         GraphEvent::RunCancelled { .. } => {
             tx.execute(
                 "UPDATE graph_runs SET status = ?1, updated_at_ms = ?2 WHERE id = ?3",
                 params![status_text(RunStatus::Cancelled), now, run_id],
+            )?;
+        }
+        GraphEvent::RunRecovered { .. } => {
+            tx.execute(
+                "UPDATE graph_runs SET updated_at_ms = ?1 WHERE id = ?2",
+                params![now, run_id],
+            )?;
+        }
+        GraphEvent::LoopStateUpdated { .. } => {}
+        GraphEvent::CompensationUpdated { status, .. } => {
+            let run_status = match status {
+                CompensationPlanStatus::Pending | CompensationPlanStatus::Running => {
+                    RunStatus::Compensating
+                }
+                CompensationPlanStatus::Completed => RunStatus::Compensated,
+                CompensationPlanStatus::Failed => RunStatus::CompensationFailed,
+                CompensationPlanStatus::ManualInterventionRequired => {
+                    RunStatus::ManualInterventionRequired
+                }
+            };
+            tx.execute(
+                "UPDATE graph_runs SET status = ?1, updated_at_ms = ?2 WHERE id = ?3",
+                params![status_text(run_status), now, run_id],
             )?;
         }
     }
@@ -815,8 +1687,82 @@ fn event_type(event: &GraphEvent) -> &'static str {
         GraphEvent::NodeLeased { .. } => "node_leased",
         GraphEvent::NodeOutputAccepted { .. } => "node_output_accepted",
         GraphEvent::LeaseExpired { .. } => "lease_expired",
+        GraphEvent::RetryScheduled { .. } => "node_retry_scheduled",
+        GraphEvent::RetryReady { .. } => "node_retry_ready",
         GraphEvent::RunCancelled { .. } => "run_cancelled",
+        GraphEvent::RunRecovered { .. } => "graph_recovered",
+        GraphEvent::LoopStateUpdated { .. } => "loop_state_updated",
+        GraphEvent::CompensationUpdated { .. } => "compensation_updated",
     }
+}
+
+fn reconcile_budget_tx(
+    tx: &rusqlite::Transaction<'_>,
+    run_id: &str,
+    node_id: &str,
+    attempt: u32,
+    actual: Option<UsageAccounting>,
+    at_ms: i64,
+) -> Result<(), StoreError> {
+    let reservation_exists = tx
+        .query_row(
+            "SELECT 1 FROM budget_reservations
+             WHERE run_id = ?1 AND node_id = ?2 AND attempt = ?3",
+            params![run_id, node_id, attempt],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if !reservation_exists {
+        return Ok(());
+    }
+    let spec_raw: String = tx.query_row(
+        "SELECT graph_specs.spec_json FROM graph_runs
+         JOIN graph_specs ON graph_specs.hash = graph_runs.spec_hash
+         WHERE graph_runs.id = ?1",
+        params![run_id],
+        |row| row.get(0),
+    )?;
+    let spec: GraphSpec = serde_json::from_str(&spec_raw)?;
+    let state_raw: String = tx.query_row(
+        "SELECT state_json FROM run_budget_state WHERE run_id = ?1",
+        params![run_id],
+        |row| row.get(0),
+    )?;
+    let mut ledger =
+        BudgetLedger::from_persistent_state(spec.spec.budgets, serde_json::from_str(&state_raw)?);
+    let reservation_id = BudgetReservationId {
+        run_id: run_id.to_string(),
+        node_id: node_id.to_string(),
+        attempt,
+    };
+    let charged = ledger.reconcile(&reservation_id, actual)?;
+    tx.execute(
+        "UPDATE run_budget_state SET state_json = ?1, updated_at_ms = ?2 WHERE run_id = ?3",
+        params![
+            serde_json::to_string(&ledger.persistent_state())?,
+            at_ms,
+            run_id
+        ],
+    )?;
+    tx.execute(
+        "DELETE FROM budget_reservations WHERE run_id = ?1 AND node_id = ?2 AND attempt = ?3",
+        params![run_id, node_id, attempt],
+    )?;
+    tx.execute(
+        "INSERT INTO usage_records_v2(run_id, node_id, attempt, usage_json, created_at_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(run_id, node_id, attempt)
+         DO UPDATE SET usage_json = excluded.usage_json",
+        params![
+            run_id,
+            node_id,
+            attempt,
+            serde_json::to_string(&charged)?,
+            at_ms
+        ],
+    )?;
+    Ok(())
 }
 
 pub fn now_ms() -> i64 {
@@ -842,5 +1788,18 @@ fn parse_run_status(raw: String) -> rusqlite::Result<RunStatus> {
 fn parse_node_status(raw: String) -> rusqlite::Result<NodeStatus> {
     serde_json::from_str(&format!("{raw:?}")).map_err(|err| {
         rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
+    })
+}
+
+fn parse_json_enum<T: serde::de::DeserializeOwned>(
+    raw: String,
+    column: usize,
+) -> rusqlite::Result<T> {
+    serde_json::from_str(&format!("{raw:?}")).map_err(|err| {
+        rusqlite::Error::FromSqlConversionFailure(
+            column,
+            rusqlite::types::Type::Text,
+            Box::new(err),
+        )
     })
 }

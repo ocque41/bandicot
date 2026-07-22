@@ -1,4 +1,5 @@
 pub mod accounts;
+pub mod agent_graph;
 pub mod auth;
 pub(crate) mod auth_gate;
 pub mod billing;
