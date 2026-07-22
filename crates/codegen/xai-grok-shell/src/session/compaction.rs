@@ -215,6 +215,7 @@ impl SessionActor {
             &sampling_config,
             self.inference_idle_timeout,
             wall_clock_budget_secs,
+            self.compaction.tool_choice,
         )
         .await
         {
@@ -1045,6 +1046,7 @@ impl SessionActor {
             compaction_sampling_config,
             self.inference_idle_timeout,
             wall_clock_budget_secs,
+            self.compaction.tool_choice,
         );
         let observer =
             crate::session::helpers::full_replace_compaction::ShellFullReplaceObserver::new(
@@ -1389,6 +1391,7 @@ impl SessionActor {
                             agent_edited_paths: edited_paths.clone(),
                             connected_mcp_servers,
                             todos,
+                            ..Default::default()
                         },
                     )
                     .await
@@ -2353,6 +2356,7 @@ mod inline_auto_compact_flow_tests {
         let state = TokioMutex::new(State {
             running_task: None,
             pending_inputs: VecDeque::new(),
+            combine_edit_holds: std::collections::HashSet::new(),
             pending_notifications: Vec::new(),
             notifications_suppressed: false,
             rewindable: false,
@@ -2384,12 +2388,13 @@ mod inline_auto_compact_flow_tests {
         );
         chat_state_handle.record_token_usage(total_tokens);
         SessionActor {
+            unattributed_background_usage: std::sync::atomic::AtomicBool::new(false),
             session_info: SessionInfo {
                 id: acp::SessionId::new("test-auto-compact"),
                 cwd: cwd.as_str().to_string(),
             },
             auth_method_id: test_auth_method_id("test-auth"),
-            model_auth_facts: std::cell::RefCell::new(None),
+            model_auth_memo: std::cell::RefCell::new(None),
             attribution_callback: None,
             auth_manager: None,
             state,
@@ -2431,6 +2436,7 @@ mod inline_auto_compact_flow_tests {
                 previous_model: std::cell::Cell::new(None),
                 compaction_mode: xai_chat_state::CompactionMode::Transcript,
                 verbatim_input: true,
+                tool_choice: crate::util::config::CompactionToolChoice::Auto,
                 prefire: crate::session::compaction_config::PrefireState::default(),
                 prefix_released: std::sync::atomic::AtomicBool::new(false),
             },
@@ -2491,6 +2497,7 @@ mod inline_auto_compact_flow_tests {
                 )),
             )),
             goal_enabled: false,
+            background_workflows_enabled: false,
             goal_harness_enabled: std::sync::atomic::AtomicBool::new(false),
             goal_harness_availability_reconciled: std::sync::atomic::AtomicBool::new(false),
             goal_tracker: Arc::new(parking_lot::Mutex::new(
@@ -2501,8 +2508,10 @@ mod inline_auto_compact_flow_tests {
             goal_turn_task_ids: parking_lot::Mutex::new(std::collections::HashSet::new()),
             goal_continuation_streak: std::sync::atomic::AtomicU32::new(0),
             goal_blocked_streak: std::sync::atomic::AtomicU32::new(0),
-            goal_update_rx: std::cell::RefCell::new(Some(tokio::sync::mpsc::unbounded_channel().1)),
+            goal_update_rx: std::cell::RefCell::new(None),
             goal_update_tx: tokio::sync::mpsc::unbounded_channel().0,
+            workflow_manager: crate::session::workflow::manager::WorkflowManager::test_bundle().0,
+            workflow_launch_tx: tokio::sync::mpsc::unbounded_channel().0,
             goal_classifier_enabled: false,
             goal_planner_enabled: false,
             goal_summary_enabled: false,
@@ -2558,7 +2567,6 @@ mod inline_auto_compact_flow_tests {
             image_describe_cache: Arc::new(
                 crate::session::image_describe::ImageDescribeCache::new(),
             ),
-            subagent_spawn_info: parking_lot::Mutex::new(std::collections::HashMap::new()),
             subagent_token_records: parking_lot::Mutex::new(std::collections::HashMap::new()),
             workspace_ops: xai_grok_workspace::WorkspaceOps::for_test(),
             trace_config_template: std::cell::RefCell::new(None),
@@ -3359,6 +3367,7 @@ mod inline_auto_compact_flow_tests {
                 context_window: Some(context_window),
                 max_completion_tokens: None,
                 models_etag: None,
+                rate_limits: None,
             }),
             empty_response_context: None,
             doom_loop_triggers: None,

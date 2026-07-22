@@ -20,8 +20,8 @@ pub use self::doom_loop::{
     DoomLoopSignal, DoomLoopSignalKind, is_check_event, peek_doom_loop,
 };
 pub use self::error::{
-    EmptyReason, EmptyResponseContext, ResponseModelMetadata, Result, SamplingError,
-    is_context_length_error, is_quota_exhausted_message,
+    EmptyReason, EmptyResponseContext, RateLimitMetadata, RateLimitWindow, ResponseModelMetadata,
+    Result, SamplingError, is_context_length_error, is_quota_exhausted_message,
 };
 pub use self::service_tier::*;
 pub use self::types::*;

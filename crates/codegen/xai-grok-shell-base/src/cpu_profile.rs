@@ -1007,7 +1007,8 @@ mod tests {
             CpuProfileStatus::Stopping {
                 svg_path: status_path,
                 ..
-            } if status_path == svg_path
+            }
+if status_path == svg_path
         ));
 
         let err = manager
@@ -1141,7 +1142,8 @@ mod tests {
                 svg_path: status_path,
                 frequency_hz: DEFAULT_FREQUENCY_HZ,
                 ..
-            } if status_path == svg_path
+            }
+if status_path == svg_path
         ));
     }
 

@@ -386,6 +386,19 @@ impl ModelsManager {
         available_models(&selectable, self.is_session_auth())
     }
 
+    /// Credential-free snapshot used by AgentGraph model selection.
+    ///
+    /// Returning only shared model metadata prevents graph validation and
+    /// telemetry from ever receiving API keys or environment-key values.
+    pub(crate) fn agent_graph_catalog(&self) -> Vec<config::ModelInfo> {
+        self.inner
+            .models
+            .read()
+            .values()
+            .map(|entry| entry.info.clone())
+            .collect()
+    }
+
     pub(crate) fn task_model_error(&self, requested: &str) -> Option<String> {
         let is_session_auth = self.is_session_auth();
         let models = self.inner.models.read();
@@ -1388,6 +1401,7 @@ fn build_prefetched_map(
             info,
             api_key: None,
             env_key: None,
+            auth_provider: None,
             api_base_url: m.api_base_url.clone().or(api_base_url_override.clone()),
         };
         map.insert(key, entry);
@@ -2015,6 +2029,7 @@ mod tests {
             info: config::ModelInfo::fallback("fp-model"),
             api_key: None,
             env_key: None,
+            auth_provider: None,
             api_base_url: None,
         };
         flagged.info.show_model_fingerprint = true;
@@ -2027,6 +2042,7 @@ mod tests {
                 info: config::ModelInfo::fallback("plain-model"),
                 api_key: None,
                 env_key: None,
+                auth_provider: None,
                 api_base_url: None,
             },
         );
@@ -2037,6 +2053,7 @@ mod tests {
             info: config::ModelInfo::fallback("enterprise-slug"),
             api_key: None,
             env_key: None,
+            auth_provider: None,
             api_base_url: None,
         };
         custom.info.show_model_fingerprint = true;
@@ -2207,6 +2224,7 @@ mod tests {
                 info: config::ModelInfo::fallback("test-model"),
                 api_key: None,
                 env_key: None,
+                auth_provider: None,
                 api_base_url: None,
             },
         );
@@ -2261,6 +2279,7 @@ mod tests {
             info: config::ModelInfo::fallback("reasoning-model"),
             api_key: None,
             env_key: None,
+            auth_provider: None,
             api_base_url: None,
         };
         reasoning_entry.info.supports_reasoning_effort = true;
@@ -2283,6 +2302,7 @@ mod tests {
             info: config::ModelInfo::fallback("plain-model"),
             api_key: None,
             env_key: None,
+            auth_provider: None,
             api_base_url: None,
         };
         prefetched.insert("plain-model".to_string(), plain_entry);
@@ -2310,6 +2330,7 @@ mod tests {
             info: config::ModelInfo::fallback("grok-4.5"),
             api_key: None,
             env_key: None,
+            auth_provider: None,
             api_base_url: None,
         };
         no_none.info.supports_reasoning_effort = true;
@@ -2328,6 +2349,7 @@ mod tests {
             info: config::ModelInfo::fallback("legacy-none"),
             api_key: None,
             env_key: None,
+            auth_provider: None,
             api_base_url: None,
         };
         with_none.info.supports_reasoning_effort = true;
@@ -2434,6 +2456,7 @@ mod tests {
             info: config::ModelInfo::fallback("reasoning-model"),
             api_key: None,
             env_key: None,
+            auth_provider: None,
             api_base_url: None,
         };
         reasoning_entry.info.supports_reasoning_effort = true;
@@ -2443,6 +2466,7 @@ mod tests {
             info: config::ModelInfo::fallback("plain-model"),
             api_key: None,
             env_key: None,
+            auth_provider: None,
             api_base_url: None,
         };
         prefetched.insert("plain-model".to_string(), plain_entry);
@@ -2485,6 +2509,7 @@ mod tests {
             info: config::ModelInfo::fallback(model_id),
             api_key: None,
             env_key: None,
+            auth_provider: None,
             api_base_url: None,
         }
     }
@@ -3268,6 +3293,7 @@ mod tests {
                 info: config::ModelInfo::fallback("static-one"),
                 api_key: None,
                 env_key: None,
+                auth_provider: None,
                 api_base_url: None,
             },
         );
@@ -3295,6 +3321,7 @@ mod tests {
             info: config::ModelInfo::fallback("oauth-only"),
             api_key: None,
             env_key: None,
+            auth_provider: None,
             api_base_url: None,
         };
         oauth_only.info.supported_in_api = false;
@@ -3304,6 +3331,7 @@ mod tests {
             info: config::ModelInfo::fallback("public-model"),
             api_key: None,
             env_key: None,
+            auth_provider: None,
             api_base_url: None,
         };
         catalog.insert("public-model".to_string(), public);

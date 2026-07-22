@@ -7,16 +7,18 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use thiserror::Error;
 use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 use xai_grok_tools::implementations::grok_build::task::backend::SubagentBackend as ExistingSubagentBackend;
 use xai_grok_tools::implementations::grok_build::task::types::{
-    ModelOverrideProvenance, SubagentCancelOutcome, SubagentRequest, SubagentResult,
+    ModelOverrideProvenance, SubagentCancelOutcome, SubagentOwner, SubagentRequest, SubagentResult,
     SubagentRuntimeOverrides, SubagentSnapshotStatus, SubagentValidateTypeOutcome,
 };
 use xai_tool_types::{
     SubagentCapabilityMode, SubagentIsolationMode, SubagentServiceTierPreference,
 };
 
+use super::model_selector::{builtin_selector, resolve_live_selector};
 use super::resources::is_nested_orchestration_tool;
 use super::types::{
     AGENTGRAPH_SCHEMA_VERSION, CapabilityMode, NodeDefaults, NodeId, NodeOutput, NodeSpec,
@@ -41,6 +43,8 @@ pub struct WorkerCompletion {
     pub output: NodeOutput,
     #[serde(default)]
     pub usage: UsageAccounting,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_capacity: Option<super::rate_limit::ProviderCapacityObservation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,6 +75,7 @@ pub struct SubagentWorkerBackend {
     parent_session_id: String,
     parent_prompt_id: Option<String>,
     cwd: PathBuf,
+    models_manager: Option<crate::agent::models::ModelsManager>,
 }
 
 impl std::fmt::Debug for SubagentWorkerBackend {
@@ -94,7 +99,16 @@ impl SubagentWorkerBackend {
             parent_session_id: parent_session_id.into(),
             parent_prompt_id: None,
             cwd: cwd.as_ref().to_path_buf(),
+            models_manager: None,
         }
+    }
+
+    pub fn with_models_manager(
+        mut self,
+        models_manager: crate::agent::models::ModelsManager,
+    ) -> Self {
+        self.models_manager = Some(models_manager);
+        self
     }
 
     pub fn with_parent_prompt_id(mut self, parent_prompt_id: Option<String>) -> Self {
@@ -122,7 +136,7 @@ impl SubagentWorkerBackend {
             attempt,
             worker_id.clone(),
             subagent_type,
-        );
+        )?;
         let result = self
             .backend
             .spawn(request)
@@ -150,14 +164,18 @@ impl SubagentWorkerBackend {
             result
         };
 
-        Ok(completion_from_subagent_result(
+        let child_session_id = result.child_session_id.clone();
+        let mut completion = completion_from_subagent_result(
             graph_run_id,
             node,
             schemas,
             &self.cwd,
             attempt,
             result,
-        ))
+        );
+        completion.provider_capacity =
+            super::rate_limit::take_session_observation(&child_session_id);
+        Ok(completion)
     }
 
     pub async fn cancel(&self, worker_id: &str) -> Result<(), WorkerError> {
@@ -193,11 +211,14 @@ impl SubagentWorkerBackend {
         }
 
         let capability = node.effective_capability(defaults);
-        if capability != CapabilityMode::ReadOnly {
+        if matches!(
+            capability,
+            CapabilityMode::UnisolatedWrite | CapabilityMode::ExternalEffect
+        ) {
             return Err(WorkerError::Rejected {
                 node_id: node.id.clone(),
                 reason: format!(
-                    "real AgentGraph workers currently require read-only authority; node requested {capability:?}"
+                    "local AgentGraph workers require read-only or isolated-worktree authority; node requested {capability:?}"
                 ),
             });
         }
@@ -207,7 +228,7 @@ impl SubagentWorkerBackend {
             .as_deref()
             .or(defaults.model_selector.as_deref())
             && selector != "inherit"
-            && resolve_builtin_model_selector(selector).is_none()
+            && builtin_selector(selector).is_none()
         {
             return Err(WorkerError::Rejected {
                 node_id: node.id.clone(),
@@ -272,9 +293,10 @@ impl SubagentWorkerBackend {
         attempt: u32,
         worker_id: String,
         subagent_type: String,
-    ) -> SubagentRequest {
+    ) -> Result<SubagentRequest, WorkerError> {
         let (result_tx, _) = oneshot::channel();
-        SubagentRequest {
+        let model = self.resolve_model(node, defaults)?;
+        Ok(SubagentRequest {
             id: worker_id,
             prompt: graph_worker_prompt(graph_run_id, node, defaults, attempt),
             description: graph_worker_description(node),
@@ -284,29 +306,107 @@ impl SubagentWorkerBackend {
             resume_from: None,
             cwd: Some(self.cwd.display().to_string()),
             runtime_overrides: SubagentRuntimeOverrides {
-                model: node
-                    .model_selector
-                    .as_deref()
-                    .or(defaults.model_selector.as_deref())
-                    .and_then(resolve_builtin_model_selector),
+                model,
                 model_override_provenance: ModelOverrideProvenance::Harness,
                 reasoning_effort: Some(reasoning_effort_name(
                     node.reasoning_effort.unwrap_or(defaults.reasoning_effort),
                 )),
                 persona: None,
-                capability_mode: Some(SubagentCapabilityMode::ReadOnly),
-                isolation: Some(SubagentIsolationMode::None),
+                capability_mode: Some(match node.effective_capability(defaults) {
+                    CapabilityMode::ReadOnly => SubagentCapabilityMode::ReadOnly,
+                    CapabilityMode::WorktreeWrite => SubagentCapabilityMode::ReadWrite,
+                    CapabilityMode::UnisolatedWrite | CapabilityMode::ExternalEffect => {
+                        SubagentCapabilityMode::ReadOnly
+                    }
+                }),
+                isolation: Some(match node.effective_capability(defaults) {
+                    CapabilityMode::WorktreeWrite => SubagentIsolationMode::Worktree,
+                    _ => SubagentIsolationMode::None,
+                }),
                 service_tier: Some(graph_service_tier_to_subagent(
                     node.effective_service_tier(defaults),
                 )),
                 hosted_multi_agent: Some(false),
                 harness_agent_type: None,
+                completion_output_cap: None,
+                spawn_depth: None,
+                output_token_budget: None,
+                output_schema: None,
+                loop_task_id: None,
             },
             run_in_background: false,
             surface_completion: false,
+            await_to_completion: false,
             fork_context: false,
+            owner: SubagentOwner::Task,
+            cancel_token: CancellationToken::new(),
             result_tx,
+        })
+    }
+
+    fn resolve_model(
+        &self,
+        node: &NodeSpec,
+        defaults: &NodeDefaults,
+    ) -> Result<Option<String>, WorkerError> {
+        let Some(selector_name) = node
+            .model_selector
+            .as_deref()
+            .or(defaults.model_selector.as_deref())
+        else {
+            return Ok(None);
+        };
+        let Some(selector) = builtin_selector(selector_name) else {
+            return Err(WorkerError::Rejected {
+                node_id: node.id.clone(),
+                reason: format!("unknown model selector `{selector_name}`"),
+            });
+        };
+        if selector.allow_inherit {
+            return Ok(None);
         }
+        if let Some(manager) = &self.models_manager {
+            return resolve_live_selector(
+                manager,
+                &selector,
+                node.reasoning_effort.unwrap_or(defaults.reasoning_effort),
+                node.effective_service_tier(defaults),
+            )
+            .map(|resolution| Some(resolution.selected_model))
+            .map_err(|err| WorkerError::Rejected {
+                node_id: node.id.clone(),
+                reason: format!("model selector `{selector_name}` did not resolve: {err:?}"),
+            });
+        }
+        // Compatibility for embedders that have not supplied a catalog. The
+        // production command path always supplies ModelsManager and therefore
+        // never assumes these models exist.
+        Ok(selector
+            .candidates
+            .first()
+            .map(|candidate| candidate.model_slug.clone()))
+    }
+
+    pub fn provider_route_for_node(
+        &self,
+        node: &NodeSpec,
+        defaults: &NodeDefaults,
+    ) -> Result<Option<super::rate_limit::ProviderRouteKey>, WorkerError> {
+        let Some(manager) = &self.models_manager else {
+            return Ok(None);
+        };
+        let Some(model_id) = self.resolve_model(node, defaults)? else {
+            return Ok(None);
+        };
+        let catalog = manager.agent_graph_catalog();
+        let model = catalog
+            .iter()
+            .find(|model| model.model == model_id || model.id.as_deref() == Some(model_id.as_str()))
+            .ok_or_else(|| WorkerError::Rejected {
+                node_id: node.id.clone(),
+                reason: format!("resolved model `{model_id}` disappeared from the live catalog"),
+            })?;
+        Ok(Some(super::rate_limit::route_for_base_url(&model.base_url)))
     }
 
     async fn resolve_backgrounded_result(
@@ -341,6 +441,9 @@ impl SubagentWorkerBackend {
                 turns,
                 duration_ms: snapshot.duration_ms,
                 tokens_used: 0,
+                output_tokens_used: 0,
+                total_tokens_used: 0,
+                output_usage_incomplete: false,
                 worktree_path,
                 backgrounded: false,
             })),
@@ -355,6 +458,9 @@ impl SubagentWorkerBackend {
                 turns: 0,
                 duration_ms: snapshot.duration_ms,
                 tokens_used: 0,
+                output_tokens_used: 0,
+                total_tokens_used: 0,
+                output_usage_incomplete: false,
                 worktree_path: None,
                 backgrounded: false,
             })),
@@ -369,6 +475,9 @@ impl SubagentWorkerBackend {
                 turns: 0,
                 duration_ms: snapshot.duration_ms,
                 tokens_used: 0,
+                output_tokens_used: 0,
+                total_tokens_used: 0,
+                output_usage_incomplete: false,
                 worktree_path: None,
                 backgrounded: false,
             })),
@@ -377,17 +486,6 @@ impl SubagentWorkerBackend {
                 Ok(None)
             }
         }
-    }
-}
-
-fn resolve_builtin_model_selector(selector: &str) -> Option<String> {
-    match selector {
-        "inherit" => None,
-        "worker-light" | "luna" => Some("gpt-5.6-luna".to_string()),
-        "reducer-balanced" | "terra" => Some("gpt-5.6-terra".to_string()),
-        "critical-verifier" | "sol" => Some("gpt-5.6-sol".to_string()),
-        explicit if explicit.starts_with("gpt-") => Some(explicit.to_string()),
-        _ => None,
     }
 }
 
@@ -508,6 +606,7 @@ fn completion_for_request(request: &WorkerRequest, status: NodeStatus) -> Worker
             node_attempts: 1,
             ..UsageAccounting::default()
         },
+        provider_capacity: None,
     }
 }
 
@@ -580,6 +679,7 @@ fn completion_from_subagent_result(
         attempt,
         output,
         usage,
+        provider_capacity: None,
     }
 }
 
@@ -625,6 +725,7 @@ fn terminal_text_completion(
             failures: u64::from(status != NodeStatus::Succeeded),
             ..UsageAccounting::default()
         },
+        provider_capacity: None,
     }
 }
 
@@ -789,6 +890,15 @@ fn graph_worker_prompt(
             .collect::<Vec<_>>()
             .join("\n")
     };
+    let write_set = if node.write_set.is_empty() {
+        "- No writes are allowed.".to_string()
+    } else {
+        node.write_set
+            .iter()
+            .map(|path| format!("- {path}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
 
     format!(
         "You are executing one AgentGraph worker node.\n\
@@ -801,10 +911,11 @@ fn graph_worker_prompt(
          Definition of done:\n{definition_of_done}\n\n\
          Inputs:\n{inputs}\n\n\
          Read set:\n{read_set}\n\n\
+         Write set:\n{write_set}\n\n\
          Restrictions:\n\
          - Do not spawn child agents.\n\
          - Do not use /graph, /swarm, provider-hosted multi-agent features, or nested orchestration tools.\n\
-         - Stay within read-only authority.\n\
+         - Stay within the declared capability, read set, write set, network policy, and tool policy.\n\
          - Return only a single JSON object matching the AgentGraph NodeOutput schema.\n\
          - Set graphRunId to {graph_run_id}, nodeInstanceId to {node_id}, and attemptId to attempt-{attempt}.\n\
          - Do not wrap the JSON in Markdown or prose.",

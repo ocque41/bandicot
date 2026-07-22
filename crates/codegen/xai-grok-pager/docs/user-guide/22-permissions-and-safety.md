@@ -55,13 +55,10 @@ After splitting chained commands (on `&&`, `||`, `;`, and pipes), the following 
 **Search and inspection:**
 - `grep`, `rg` (not `rg --pre` / `rg --pre=…`, which spawn a preprocessor per file)
 
-**Build and check (read-only):**
-- `cargo check`
-
 **Kubernetes (read-only):**
 - `kubectl get`, `kubectl logs`, `kubectl describe`
 
-> **Note:** `tee` is not on this list because it can write its input to arbitrary files.
+> **Note:** `tee` is not on this list because it can write its input to arbitrary files. `cargo check` is not on this list because it compiles and runs `build.rs`, proc-macros, and any `build.rustc-wrapper` from the repo (in Ask mode it therefore prompts; Auto mode may still heuristic-allow `cargo` as a project code runner). `sort --compress-program=…` (including unique long-option abbreviations), `git -c` / `--config-env` overrides, and a git command whose local/worktree config installs an executable hook (`core.fsmonitor`, a `diff.*.command`/`textconv`/`external` driver, or a shell `alias.<safe-subcommand> = !…`) raise a request-level floor and prompt rather than auto-approve, unless the user granted that exact full script or YOLO is on.
 
 These checks apply per segment. In a command like `ls && rm -rf /`, the `ls` segment is recognized as read-only, but the `rm` segment is not on the list. In `default` mode the `rm` segment prompts; under `dontAsk` it is denied.
 
@@ -273,7 +270,7 @@ Path patterns are globs matched against the path string the tool was called with
 - Paths are matched as given, without canonicalization. Whether a path is absolute or relative depends on how the tool was invoked, so patterns intended as boundaries should cover both forms (for example both `/repo/secrets/**` and `secrets/**`).
 - `Read` rules also govern `grep` searches; `Grep(...)` rules match only grep.
 
-`Read` and `Edit` deny rules additionally apply to file paths that shell commands touch (for example `cat` or `sed` on a denied path), and that shell-level check resolves symlinks. The direct `read_file`/`search_replace` tool checks do not resolve symlinks. For OS-level enforcement that covers every process, combine deny rules with the sandbox ([18-sandbox.md](18-sandbox.md)).
+`Read` and `Edit` deny rules additionally apply to file paths that shell commands touch (for example `cat` or `sed` on a denied path), including literal inline scripts passed to `bash`, `sh`, `dash`, `zsh`, or `ksh` with `-c`; that shell-level check also resolves symlinks. The direct `read_file`/`search_replace` tool checks do not resolve symlinks. For OS-level enforcement that covers every process, combine deny rules with the sandbox ([18-sandbox.md](18-sandbox.md)).
 
 ### MCP Rules
 
@@ -476,3 +473,10 @@ Recommended combination for untrusted code:
 - [14-headless-mode.md](14-headless-mode.md) — Headless flags, including permission-related ones
 - [18-sandbox.md](18-sandbox.md) — OS-level isolation profiles
 - [05-configuration.md](05-configuration.md) — Native `config.toml` structure
+## AgentGraph worker authority
+
+Graph workers receive only their declared tool allowlist and read-only or
+isolated-worktree authority. Nested Bandicot orchestration and provider-hosted
+multi-agent execution are forced off. Unisolated writes and external effects
+fail closed. Durable budgets, leases, retry deadlines, compensation state, and
+approval bindings remain host-owned and cannot be increased by worker output.

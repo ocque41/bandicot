@@ -5,7 +5,10 @@
 //! Cancellation is cooperative via `CancellationToken`.
 
 use std::pin::pin;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Duration;
 
 use futures_util::StreamExt;
@@ -89,7 +92,12 @@ pub(crate) async fn run_request_task(
             .idle_timeout_secs
             .unwrap_or(DEFAULT_IDLE_TIMEOUT_SECS),
     );
-    let max_retries = resolve_max_retries(config.max_retries.or(Some(retry_policy.max_retries)));
+    let configured_max_retries = config.max_retries.or(Some(retry_policy.max_retries));
+    let max_retries = if configured_max_retries == Some(0) {
+        0
+    } else {
+        resolve_max_retries(configured_max_retries)
+    };
 
     // Build the initial client. Configuration errors here are fatal
     // (no point retrying with the same broken config).
@@ -117,9 +125,12 @@ pub(crate) async fn run_request_task(
     let mut retry_count: u32 = 0;
     // Doom-loop recovery keeps its own resample budget, independent of the
     // transport/empty budget above.
-    let doom_policy = config.doom_loop_recovery;
+    let doom_policy = (max_retries > 0)
+        .then_some(config.doom_loop_recovery)
+        .flatten();
     let doom_max_retries = doom_policy.map_or(0, |p| p.max_retries);
     let mut doom_retry_count: u32 = 0;
+    let output_observed = Arc::new(AtomicBool::new(false));
 
     loop {
         if cancel_token.is_cancelled() {
@@ -138,9 +149,17 @@ pub(crate) async fn run_request_task(
             &event_tx,
             &cancel_token,
             doom_check,
+            Arc::clone(&output_observed),
         )
         .instrument(sampling_span.clone())
         .await;
+
+        let effective_max_retries =
+            if retry_policy.retry_only_before_output && output_observed.load(Ordering::Relaxed) {
+                0
+            } else {
+                max_retries
+            };
 
         match outcome {
             AttemptOutcome::Completed {
@@ -196,7 +215,7 @@ pub(crate) async fn run_request_task(
                 if !apply_retry_decision(
                     &err,
                     &mut retry_count,
-                    max_retries,
+                    effective_max_retries,
                     &retry_policy,
                     &event_tx,
                     &request_id,
@@ -215,6 +234,13 @@ pub(crate) async fn run_request_task(
                 // consult the transport classifier, so no classifier change
                 // can silently debit the transport budget for a doom failure.
                 if let SamplingError::DoomLoopDetected { .. } = &error {
+                    if retry_policy.retry_only_before_output
+                        && output_observed.load(Ordering::Relaxed)
+                    {
+                        emit_failed(&event_tx, &request_id, &error);
+                        send_completion(&mut completion_tx, Err(clone_error(&error)));
+                        return request_id;
+                    }
                     let backoff = retry_mod::doom_loop_backoff(doom_retry_count + 1);
                     doom_retry_count += 1;
                     tracing::warn!(
@@ -238,7 +264,7 @@ pub(crate) async fn run_request_task(
                 if !apply_retry_decision(
                     &error,
                     &mut retry_count,
-                    max_retries,
+                    effective_max_retries,
                     &retry_policy,
                     &event_tx,
                     &request_id,
@@ -260,7 +286,7 @@ pub(crate) async fn run_request_task(
                 if !apply_retry_decision(
                     &error,
                     &mut retry_count,
-                    max_retries,
+                    effective_max_retries,
                     &retry_policy,
                     &event_tx,
                     &request_id,
@@ -424,6 +450,7 @@ async fn run_one_attempt(
     event_tx: &mpsc::UnboundedSender<SamplingEvent>,
     cancel_token: &CancellationToken,
     doom_check: Option<xai_grok_sampling_types::DoomLoopRecoveryPolicy>,
+    output_observed: Arc<AtomicBool>,
 ) -> AttemptOutcome {
     if client.transport() == InferenceTransport::AppleFoundationModels {
         let (model, temperature, max_tokens) = client.apple_defaults();
@@ -436,7 +463,16 @@ async fn run_one_attempt(
             request_id.clone(),
             Arc::clone(&captured),
         );
-        return drive_l2(l2, request_id, event_tx, cancel_token, captured, None).await;
+        return drive_l2(
+            l2,
+            request_id,
+            event_tx,
+            cancel_token,
+            captured,
+            None,
+            output_observed,
+        )
+        .await;
     }
     match client.api_backend() {
         ApiBackend::ChatCompletions => {
@@ -446,7 +482,16 @@ async fn run_one_attempt(
             };
             let (teed, captured) = tee_errors(raw);
             let l2 = stream_chat_completions(teed, metadata, request_id.clone(), idle_timeout);
-            drive_l2(l2, request_id, event_tx, cancel_token, captured, None).await
+            drive_l2(
+                l2,
+                request_id,
+                event_tx,
+                cancel_token,
+                captured,
+                None,
+                output_observed,
+            )
+            .await
         }
         ApiBackend::Responses => {
             let (raw, metadata, doom_loop) =
@@ -461,7 +506,16 @@ async fn run_one_attempt(
             }
             let (teed, captured) = tee_errors(raw);
             let l2 = stream_responses(teed, metadata, request_id.clone(), idle_timeout, doom_loop);
-            drive_l2(l2, request_id, event_tx, cancel_token, captured, doom_check).await
+            drive_l2(
+                l2,
+                request_id,
+                event_tx,
+                cancel_token,
+                captured,
+                doom_check,
+                output_observed,
+            )
+            .await
         }
         ApiBackend::Messages => {
             let (raw, metadata) = match client.conversation_stream_messages(request).await {
@@ -470,7 +524,16 @@ async fn run_one_attempt(
             };
             let (teed, captured) = tee_errors(raw);
             let l2 = stream_messages(teed, metadata, request_id.clone(), idle_timeout);
-            drive_l2(l2, request_id, event_tx, cancel_token, captured, None).await
+            drive_l2(
+                l2,
+                request_id,
+                event_tx,
+                cancel_token,
+                captured,
+                None,
+                output_observed,
+            )
+            .await
         }
     }
 }
@@ -517,6 +580,7 @@ async fn drive_l2(
     cancel_token: &CancellationToken,
     captured: ErrorCell,
     doom_check: Option<xai_grok_sampling_types::DoomLoopRecoveryPolicy>,
+    output_observed: Arc<AtomicBool>,
 ) -> AttemptOutcome {
     let mut l2 = pin!(l2);
     loop {
@@ -527,6 +591,7 @@ async fn drive_l2(
             }
             next = l2.next() => match next {
                 Some(SamplingEvent::Completed { response, metrics, .. }) => {
+                    output_observed.store(true, Ordering::Relaxed);
                     // Doom outranks the truncation/empty classes: a confident
                     // loop poisons the attempt whatever else it looks like.
                     if let Some(policy) = doom_check {
@@ -565,6 +630,16 @@ async fn drive_l2(
                     return AttemptOutcome::Failed { error };
                 }
                 Some(other) => {
+                    if matches!(
+                        other,
+                        SamplingEvent::FirstToken { .. }
+                            | SamplingEvent::ChannelToken { .. }
+                            | SamplingEvent::ToolCallDelta { .. }
+                            | SamplingEvent::BackendToolCallStarted { .. }
+                            | SamplingEvent::BackendToolCallCompleted { .. }
+                    ) {
+                        output_observed.store(true, Ordering::Relaxed);
+                    }
                     let _ = event_tx.send(retag(other, &request_id));
                 }
                 None => {

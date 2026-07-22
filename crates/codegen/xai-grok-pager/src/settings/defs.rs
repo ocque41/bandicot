@@ -134,12 +134,12 @@ const CODING_DATA_SHARING_CHOICES: &[EnumChoice] = &[
     EnumChoice {
         canonical: "opt-in",
         display: "Opt in",
-        description: "Allow SpaceXAI to retain and use coding session data for training and product improvement.",
+        description: "Allow SpaceXAI to retain coding session data for model training and product improvement.",
     },
     EnumChoice {
         canonical: "opt-out",
         display: "Opt out",
-        description: "Do not retain coding session data. Code requests will not be used for training.",
+        description: "Do not retain coding session data for training. Does not disable product analytics.",
     },
 ];
 
@@ -212,6 +212,24 @@ const PLAN_MODE_CHOICES: &[EnumChoice] = &[
         canonical: "on",
         display: "On",
         description: "Agent summarises a plan and asks for approval before running tools.",
+    },
+];
+
+const ORCHESTRATION_SERVICE_TIER_CHOICES: &[EnumChoice] = &[
+    EnumChoice {
+        canonical: "inherit",
+        display: "Inherit",
+        description: "Use the selected model and provider default.",
+    },
+    EnumChoice {
+        canonical: "standard",
+        display: "Standard",
+        description: "Explicitly request standard service.",
+    },
+    EnumChoice {
+        canonical: "fast",
+        display: "Fast",
+        description: "Request priority service when the provider supports it.",
     },
 ];
 
@@ -524,6 +542,110 @@ pub fn default_settings() -> Vec<SettingMeta> {
 
     vec![
         SettingMeta {
+            key: "orchestration.service_tier",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shell,
+            label: "Default service tier",
+            description: "Default for new sessions. Active-session /fast overrides remain separate.",
+            keywords: &["fast", "service", "tier", "priority", "orchestration"],
+            kind: SettingKind::Enum {
+                default: "inherit",
+                choices: ORCHESTRATION_SERVICE_TIER_CHOICES,
+                supports_preview: false,
+            },
+            restart_required: true,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: "orchestration.ultra_enabled",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shell,
+            label: "Ultra by default",
+            description: "Enable proactive delegation for new root sessions. /ultra remains session-only.",
+            keywords: &["ultra", "agents", "delegation", "orchestration"],
+            kind: SettingKind::Bool { default: false },
+            restart_required: true,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: "orchestration.ultra_max_children",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shell,
+            label: "Ultra maximum children",
+            description: "Maximum child agents for new Ultra sessions.",
+            keywords: &["ultra", "children", "limit", "concurrency"],
+            kind: SettingKind::Int {
+                default: 6,
+                min: 1,
+                max: 6,
+            },
+            restart_required: true,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: "orchestration.graph_enabled",
+            category: SettingCategory::Advanced,
+            owner: SettingOwner::Shell,
+            label: "AgentGraph",
+            description: "Enable the AgentGraph command and ACP surfaces.",
+            keywords: &["graph", "agentgraph", "orchestration"],
+            kind: SettingKind::Bool { default: true },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: "orchestration.swarm_enabled",
+            category: SettingCategory::Advanced,
+            owner: SettingOwner::Shell,
+            label: "Swarm",
+            description: "Enable Swarm planning, preview, and offline benchmark controls.",
+            keywords: &["swarm", "graph", "orchestration"],
+            kind: SettingKind::Bool { default: true },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: "orchestration.live_swarm_enabled",
+            category: SettingCategory::Advanced,
+            owner: SettingOwner::Shell,
+            label: "Live provider Swarm",
+            description: "Allow approved provider-backed Swarm runs. High-cost approval is still required.",
+            keywords: &["swarm", "live", "provider", "cost", "approval"],
+            kind: SettingKind::Bool { default: false },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: "orchestration.swarm_max_active_workers",
+            category: SettingCategory::Advanced,
+            owner: SettingOwner::Shell,
+            label: "Swarm worker limit",
+            description: "Host ceiling for active provider-backed Swarm workers.",
+            keywords: &["swarm", "workers", "limit", "concurrency"],
+            kind: SettingKind::Int {
+                default: 100,
+                min: 1,
+                max: 100,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: "orchestration.graph_artifact_retention_days",
+            category: SettingCategory::Advanced,
+            owner: SettingOwner::Shell,
+            label: "Graph artifact retention",
+            description: "Days to retain completed graph artifacts. Zero keeps them until explicit cleanup.",
+            keywords: &["graph", "artifacts", "retention", "cleanup", "days"],
+            kind: SettingKind::Int {
+                default: 0,
+                min: 0,
+                max: 3650,
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
             key: "compact_mode",
             category: SettingCategory::Appearance,
             owner: SettingOwner::Shared,
@@ -595,6 +717,39 @@ pub fn default_settings() -> Vec<SettingMeta> {
             restart_required: false,
             // Minimal mode has no interactive scrollback pane for the rail.
             hidden_in_minimal: true,
+        },
+        SettingMeta {
+            key: "page_flip_on_send",
+            category: SettingCategory::Appearance,
+            owner: SettingOwner::Shared,
+            label: "Snap prompt to top on send",
+            description: "When you send a prompt, scroll it to the top of the screen so the \
+                          response starts on a fresh page (default). Turn off to leave the scroll \
+                          position unchanged when you send.",
+            keywords: &[
+                "page", "flip", "send", "prompt", "scroll", "top", "jump", "auto", "snap",
+            ],
+            kind: SettingKind::Bool {
+                default: ui_default.page_flip_on_send_enabled(),
+            },
+            restart_required: false,
+            hidden_in_minimal: true,
+        },
+        SettingMeta {
+            key: "combine_queued_prompts",
+            category: SettingCategory::Editor,
+            owner: SettingOwner::Shared,
+            label: "Combine queued prompts",
+            description: "Merge consecutive plain follow-ups into one model turn \
+                          (TUI shows one bubble each). Stops at bash, slash commands, \
+                          cron, expanded skills, image follow-ups, or a row under edit. \
+                          Default off; applies on local drain and shell promote.",
+            keywords: &["queue", "combine", "batch", "follow-up", "merge", "pending"],
+            kind: SettingKind::Bool {
+                default: ui_default.combine_queued_prompts.unwrap_or(false),
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
         },
         SettingMeta {
             // Persisted key stays `simple_mode`; the user-facing label
@@ -1107,27 +1262,31 @@ pub fn default_settings() -> Vec<SettingMeta> {
         },
         // SHELL-owned. Persisted in auth metadata (not config.toml).
         // Reads from `PagerLocalSnapshot.coding_data_sharing_opt_out`.
-        // Default "opt-in" matches `AuthEntry::coding_data_retention_opt_out = false`.
+        // Default "opt-out" matches `AuthEntry::coding_data_retention_opt_out = true`
+        // (safer consumer default; server enrichment may still opt the user in).
         // ZDR / non-admin guards are enforced at dispatch time.
+        // Do not put "telemetry" in keywords — that word is the config-file
+        // analytics toggle (Monitoring / Configuration docs).
         SettingMeta {
             key: "coding_data_sharing",
             category: SettingCategory::Privacy,
             owner: SettingOwner::Shell,
             label: "Coding data sharing",
-            description: "Controls whether SpaceXAI may retain and train on coding session data.",
+            description: "Controls whether SpaceXAI may retain and train on coding session \
+                          data. Does not affect product analytics; see Configuration and \
+                          Monitoring docs.",
             keywords: &[
                 "privacy",
                 "data",
                 "sharing",
                 "coding",
                 "retention",
-                "telemetry",
                 "training",
                 "opt-in",
                 "opt-out",
             ],
             kind: SettingKind::Enum {
-                default: "opt-in",
+                default: "opt-out",
                 choices: CODING_DATA_SHARING_CHOICES,
                 supports_preview: false,
             },

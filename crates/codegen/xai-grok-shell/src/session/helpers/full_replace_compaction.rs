@@ -147,6 +147,7 @@ pub(crate) struct ShellCompactionSampler {
     /// Wall-clock budget (secs) forwarded to `generate_session_compact` as the
     /// reasoning-runaway backstop; `0` disables it.
     wall_clock_budget_secs: u64,
+    tool_choice: crate::util::config::CompactionToolChoice,
     /// Full output of the most recent successful sample (for L5 telemetry).
     last_success: Mutex<Option<CompactOutput>>,
 }
@@ -164,6 +165,7 @@ impl ShellCompactionSampler {
         sampling_config: SamplingConfig,
         idle_timeout: Duration,
         wall_clock_budget_secs: u64,
+        tool_choice: crate::util::config::CompactionToolChoice,
     ) -> Self {
         Self {
             use_short_prompt,
@@ -176,6 +178,7 @@ impl ShellCompactionSampler {
             sampling_config,
             idle_timeout,
             wall_clock_budget_secs,
+            tool_choice,
             last_success: Mutex::new(None),
         }
     }
@@ -229,6 +232,7 @@ impl CompactionSampler for ShellCompactionSampler {
             &self.sampling_config,
             self.idle_timeout,
             self.wall_clock_budget_secs,
+            self.tool_choice,
         )
         .await
         {

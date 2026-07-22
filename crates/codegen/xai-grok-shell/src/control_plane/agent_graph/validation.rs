@@ -339,6 +339,45 @@ impl GraphLinter {
                     node_id: Some(node.id.clone()),
                 });
             }
+            if node.kind == NodeKind::Barrier {
+                let incoming = spec
+                    .spec
+                    .edges
+                    .iter()
+                    .filter(|edge| edge.to == node.id)
+                    .count();
+                let outgoing = spec
+                    .spec
+                    .edges
+                    .iter()
+                    .filter(|edge| edge.from == node.id)
+                    .count();
+                if incoming <= 1 || outgoing <= 1 {
+                    warnings.push(ValidationWarning {
+                        code: "unnecessary-barrier",
+                        message: "barrier has one or fewer inputs or outputs and may be removable"
+                            .to_string(),
+                        node_id: Some(node.id.clone()),
+                    });
+                }
+            }
+        }
+
+        for edge in &spec.spec.edges {
+            if edge.kind == EdgeKind::Control
+                && edge.bindings.is_empty()
+                && edge.condition.is_none()
+                && edge.join.is_none()
+            {
+                warnings.push(ValidationWarning {
+                    code: "fake-dependency-candidate",
+                    message: format!(
+                        "control-only dependency {} -> {} carries no data, condition, or join policy",
+                        edge.from, edge.to
+                    ),
+                    node_id: Some(edge.to.clone()),
+                });
+            }
         }
 
         if let Some(topology) = topology {

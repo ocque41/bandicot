@@ -220,10 +220,12 @@ impl SessionActor {
             .tool_bridge()
             .create_scheduled_task(
                 xai_grok_tools::implementations::grok_build::scheduler::create::SchedulerCreateInput {
-                    interval,
-                    prompt: format!("/__approved-loop-wake {workflow_id}"),
-                    recurring: false,
+                    task_id: None,
+                    interval: Some(interval),
+                    prompt: Some(format!("/__approved-loop-wake {workflow_id}")),
+                    recurring: true,
                     durable: Some(true),
+                    foreground: Some(true),
                     fire_immediately: false,
                 },
             )
@@ -256,13 +258,9 @@ impl SessionActor {
             .tool_bridge()
             .list_scheduled_tasks()
             .await
-            .ok()
-            .map(|tasks| {
-                tasks
-                    .into_iter()
-                    .map(|task| task.id)
-                    .collect::<std::collections::HashSet<_>>()
-            });
+            .into_iter()
+            .map(|task| task.id)
+            .collect::<std::collections::HashSet<_>>();
         let should_reconcile =
             {
                 let mut tracker = self.plan_mode.lock();
@@ -273,7 +271,7 @@ impl SessionActor {
                     false
                 } else {
                     if workflow.pending_task_id.as_ref().is_some_and(|id| {
-                        scheduled_ids.as_ref().is_some_and(|ids| !ids.contains(id))
+                        !scheduled_ids.contains(id)
                     }) {
                         workflow.pending_task_id = None;
                     }
@@ -316,9 +314,6 @@ impl SessionActor {
             .await;
     }
 
-    /// Body of [`drain_goal_updates`] accepting pre-popped envelopes
-    /// from the drainer task. Test callers pass an empty `extra` and
-    /// rely on `goal_update_rx` for the channel half.
     pub(super) async fn drain_goal_updates_with_extra(
         &self,
         current_tokens: i64,
@@ -328,16 +323,6 @@ impl SessionActor {
         use xai_grok_tools::implementations::grok_build::update_goal::{
             RejectReason, UpdateGoalAck,
         };
-        // The `update_goal` tool and its `GoalUpdateHandle` are always
-        // registered (see `spawn_session_actor`), so a model can call
-        // `update_goal` in a session that never entered goal mode — e.g. any
-        // plain eval/coding rollout. When the harness is disabled there is no
-        // orchestration to update, but every envelope must still be answered:
-        // dropping the ack oneshot here surfaces to the tool as the misleading
-        // `harness_no_ack` ("Goal-update harness dropped the response channel")
-        // error. Reject cleanly instead, draining both the drainer-supplied
-        // `extra` envelopes and any channel-buffered ones so no ack receiver is
-        // left hanging.
         if !self.goal_harness_enabled() {
             let reject = || UpdateGoalAck::Rejected {
                 reason: RejectReason::HarnessDisabled,
@@ -355,12 +340,6 @@ impl SessionActor {
             }
             return;
         }
-        // FIFO over three sources:
-        //   1. `pending_classifier_completions` — inputs deferred by
-        //      an earlier MidTurn drain; their acks are already resolved.
-        //   2. `extra` — envelopes from the drainer task; ack live.
-        //   3. The mpsc channel — used by tests that drive this
-        //      function directly.
         let mut cmds: Vec<DrainSource> = match purpose {
             DrainPurpose::TurnEnd => self
                 .pending_classifier_completions
@@ -379,18 +358,11 @@ impl SessionActor {
         }
         let notify = self.goal_notify_sender();
         let mut block_seen = false;
-        // When an auto-pause (cap, stall/no_progress, or blocked) fires
-        // mid-drain, remaining entries are collapsed into a single
-        // `GoalClassifierPendingQueueCleared` event instead of per-entry
-        // `dropped_after_pause` / `fail_open` noise.
         let mut cap_dropped: u32 = 0;
         let mut auto_paused_mid_drain = false;
         for source in cmds {
             let (cmd, ack_tx) = source.into_parts();
             if auto_paused_mid_drain {
-                // Strictly-later drop after the goal auto-paused. Counted
-                // for the summary event after the loop; ack resolved as
-                // Rejected so the tool reply is not left hanging.
                 cap_dropped = cap_dropped.saturating_add(1);
                 try_send_ack(
                     ack_tx,
@@ -405,9 +377,6 @@ impl SessionActor {
                 continue;
             }
             if block_seen {
-                // A prior cmd transitioned to Blocked; reject the
-                // rest so a follow-up `completed: true` cannot race
-                // past the just-fired pause.
                 try_send_ack(
                     ack_tx,
                     UpdateGoalAck::Rejected {
@@ -443,8 +412,6 @@ impl SessionActor {
                 }
                 let detail = cmd.message;
                 let chat_text = format_blocked_chat_notification(&reason, detail.as_deref());
-                // Format the success summary from `&reason` BEFORE
-                // consuming `reason` into `pause_msg` — saves a clone.
                 let success_summary = format!("Goal blocked: {reason}.");
                 let pause_msg = match detail {
                     Some(d) => format!("{reason}\n{d}"),
@@ -466,10 +433,6 @@ impl SessionActor {
                         },
                     );
                 } else {
-                    // Block signal against a non-Active goal is
-                    // silently dropped today — surface the drop as an
-                    // explicit Rejected ack so the tool reply is
-                    // accurate.
                     try_send_ack(
                         ack_tx,
                         UpdateGoalAck::Rejected {
@@ -480,14 +443,7 @@ impl SessionActor {
                 }
                 continue;
             }
-            // Verdict files are harness-owned (skeptic panel, per-goal
-            // scratch root); this drain never gates `completed: true` on
-            // verdict-file state.
             if cmd.completed != Some(true) {
-                // Message-only updates emit a refreshed `GoalUpdated`
-                // without status mutation — preserves today's behaviour
-                // for tool calls that carry neither `completed` nor
-                // `blocked_reason`.
                 let (tokens_used, finished_marginal) = self.goal_tokens(current_tokens);
                 let mut tracker = self.goal_tracker.lock();
                 notify.emit_goal_updated(&mut tracker, tokens_used, finished_marginal);
@@ -501,20 +457,14 @@ impl SessionActor {
                 continue;
             }
 
-            // Reset before the verification-stage guards: the disabled
-            // fast-path and the NonActive guard both early-return.
             self.goal_blocked_streak
                 .store(0, std::sync::atomic::Ordering::Relaxed);
 
             let policy = self.resolve_goal_classifier_policy();
 
-            // Classifier disabled: straight to `tracker.complete()`.
             if !policy.enabled {
                 let (tokens_used, finished_marginal) = self.goal_tokens(current_tokens);
                 self.prune_subagent_records_for_active_goal();
-                // An earlier blocked-path command in this drain awaits, so a
-                // concurrent mid-turn drain can refill the queue before a
-                // later `completed: true` lands here.
                 self.clear_pending_classifier_completions();
                 let mut tracker = self.goal_tracker.lock();
                 tracker.complete();
@@ -524,16 +474,6 @@ impl SessionActor {
                 continue;
             }
 
-            // Guard 1: only fire when the goal is Active. Non-Active
-            // splits into "post-cap drop" (emit
-            // `GoalClassifierDroppedAfterCap` with the real
-            // attempts_seen) and "other non-Active" (emit
-            // `FailOpen { GoalNotActiveAtResolve }`).
-            //
-            // Single-lock fast-path returning `None` on Active (no
-            // field reads needed); `Some((attempts_seen, post_cap))`
-            // on non-Active. An absent snapshot maps to
-            // `Some((0, false))` so the FailOpen branch fires.
             let non_active_meta: Option<(u32, bool)> = {
                 let tracker = self.goal_tracker.lock();
                 match tracker.snapshot() {
@@ -588,21 +528,7 @@ impl SessionActor {
                 continue;
             }
 
-            // Guard 2: defer classifier-eligible completions if this
-            // drain is mid-turn. The deferred command will be processed
-            // at the next `DrainPurpose::TurnEnd` drain ahead of the
-            // regular channel, preserving FIFO order. Cap the queue at
-            // `GOAL_CLASSIFIER_PENDING_QUEUE_CAP`; on overflow drop the
-            // OLDEST entry (the new entry reflects the model's current
-            // intent) and emit `FailClosed { PendingQueueFull }`.
             if matches!(purpose, DrainPurpose::MidTurn) {
-                // Cap the queue at `GOAL_CLASSIFIER_PENDING_QUEUE_CAP`;
-                // on overflow drop the OLDEST entry (the new entry
-                // reflects the model's current intent). The dropped
-                // entry's ack was ALREADY resolved at its own MidTurn
-                // defer time, so we just emit the eviction telemetry
-                // and let the dropped input fall out of scope —
-                // there's no parked ack to update.
                 let pending_depth = {
                     let mut q = self.pending_classifier_completions.lock();
                     if q.len() >= GOAL_CLASSIFIER_PENDING_QUEUE_CAP {
@@ -622,17 +548,10 @@ impl SessionActor {
                 self.events.emit(
                     crate::session::events::Event::GoalClassifierMidTurnDeferred { pending_depth },
                 );
-                // Ack immediately to avoid deadlocking the actor on
-                // the tool's `await`.
                 try_send_ack(ack_tx, UpdateGoalAck::DeferredToTurnEnd { pending_depth });
                 continue;
             }
 
-            // Guard 3: re-entry guard. A second `completed: true`
-            // racing in while a classifier is already running is
-            // accounted as a synthetic NotAchieved so retry spam is
-            // bounded by `classifier_max_runs`. `SeqCst` pairs with
-            // the `InFlightGuard` drop for panic-safe acquire/release.
             if self
                 .goal_classifier_in_flight
                 .compare_exchange(
@@ -656,14 +575,8 @@ impl SessionActor {
                         NotAchievedSyntheticReason::ConcurrentInFlight,
                     )
                     .await;
-                // Resolve the second tool call's ack with the synthetic
-                // verdict so the model gets immediate feedback instead
-                // of discovering the rejection via a nudge.
                 if let Some((attempt, details_path, cap_reached)) = synthetic_info {
                     if cap_reached {
-                        // Source the flag from the tracker via
-                        // `cap_just_reached` to keep the two emit
-                        // sites in lock-step.
                         if self.cap_just_reached() {
                             auto_paused_mid_drain = true;
                         }
@@ -685,8 +598,6 @@ impl SessionActor {
                         );
                     }
                 } else {
-                    // Orchestration vanished mid-flight — distinct
-                    // from "classifier still verifying".
                     try_send_ack(
                         ack_tx,
                         UpdateGoalAck::Rejected {
@@ -698,20 +609,11 @@ impl SessionActor {
                 }
                 continue;
             }
-            // Scope-guard the in-flight flag for panic safety.
             let _in_flight_guard = InFlightGuard {
                 flag: &self.goal_classifier_in_flight,
             };
-            // Capture fire-start time so post-fire branches emit real
-            // wall-clock elapsed, not `latency_ms: 0`.
             let fire_started = std::time::Instant::now();
 
-            // Reserve an attempt slot under the tracker mutex (no
-            // `.await` held). Defense-in-depth: orchestration vanishing
-            // between Guard 1 and slot reservation requires a non-async
-            // mutation by another path (no `.await` between them under
-            // the LocalSet); the bail-out emits a fail-open event so
-            // any production occurrence is observable.
             let Some(attempt) = self.reserve_classifier_attempt_slot(&policy) else {
                 self.events
                     .emit(crate::session::events::Event::GoalClassifierFailOpen {
@@ -734,14 +636,8 @@ impl SessionActor {
 
             self.emit_goal_verifying(current_tokens);
 
-            // Refund the reserved slot if this future is dropped (turn cancel /
-            // user pause) before it resolves; disarmed before
-            // `apply_classifier_outcome`, which owns its own rollback. The
-            // skip-list below states which paused states keep the slot.
             let mut slot_guard = TrackerDropGuard::new(&self.goal_tracker, |t| {
                 use crate::session::goal_tracker::GoalStatus;
-                // `Blocked` is defensive (its only setter disarms first);
-                // kept so the skip-list states the full pause policy.
                 if !matches!(
                     t.status(),
                     Some(
@@ -754,9 +650,6 @@ impl SessionActor {
                 }
             });
 
-            // Scoped so the "Verifying…" latch clears on normal exit AND on
-            // a turn cancel dropping this future — later `GoalUpdated`s
-            // carry the cleared flag, and a cancelled turn never latches it.
             let outcome = {
                 let _verifying_latch = TrackerDropGuard::new(&self.goal_tracker, |t| {
                     if let Some(o) = t.snapshot_mut() {
@@ -767,10 +660,6 @@ impl SessionActor {
                     .await
             };
 
-            // Re-check status: the user may have paused mid-classifier.
-            // Emit fail-open with real elapsed (not `0`) so dashboards
-            // can filter by attempt > 0. The slot refund rides the
-            // still-armed `slot_guard` drop at the end of this iteration.
             let status_changed = self.goal_tracker.lock().status()
                 != Some(crate::session::goal_tracker::GoalStatus::Active);
             if status_changed {
@@ -794,13 +683,8 @@ impl SessionActor {
             slot_guard.disarm();
 
             let ack = self
-                .apply_classifier_outcome(&policy, attempt, outcome, &notify)
+                .apply_classifier_outcome_legacy(&policy, attempt, outcome, &notify)
                 .await;
-            // Any auto-pause this outcome triggered (cap, stall, or
-            // blocked) leaves the goal paused; consolidate the rest of
-            // the drain instead of letting each fall through Guard 1 as
-            // per-entry FailOpen noise. A completion (Complete) does not
-            // pause, so it keeps its existing per-entry handling.
             if !auto_paused_mid_drain && self.goal_is_paused() {
                 auto_paused_mid_drain = true;
             }
@@ -815,24 +699,21 @@ impl SessionActor {
         }
     }
 
-    /// Reserve the next classifier attempt slot. `None` if the
-    /// orchestration vanished between Guard 1 and reservation.
+    /// Reserve the next classifier attempt slot. `None` if the active goal
+    /// disappeared between validation and verification.
     pub(super) fn reserve_classifier_attempt_slot(
         &self,
         policy: &GoalClassifierPolicy,
     ) -> Option<u32> {
         let mut tracker = self.goal_tracker.lock();
-        let o = tracker.snapshot_mut()?;
-        o.classifier_runs_attempted = o.classifier_runs_attempted.saturating_add(1);
-        o.classifier_max_runs = Some(policy.max_runs);
-        // Verification is firing — restart the re-verify round counter.
-        o.rounds_since_verify = 0;
-        Some(o.classifier_runs_attempted)
+        let orchestration = tracker.snapshot_mut()?;
+        orchestration.classifier_runs_attempted =
+            orchestration.classifier_runs_attempted.saturating_add(1);
+        orchestration.classifier_max_runs = Some(policy.max_runs);
+        orchestration.rounds_since_verify = 0;
+        Some(orchestration.classifier_runs_attempted)
     }
 
-    /// `true` iff the orchestration is BackOff-paused with the
-    /// classifier-run counter at or past its cap (cap just fired,
-    /// remaining drain entries are stale).
     fn cap_just_reached(&self) -> bool {
         let tracker = self.goal_tracker.lock();
         tracker.snapshot().is_some_and(|o| {
@@ -842,9 +723,6 @@ impl SessionActor {
         })
     }
 
-    /// `true` iff the goal is in any paused state — used after applying
-    /// a classifier outcome to detect a cap / stall / blocked auto-pause
-    /// and consolidate the rest of the mid-drain queue.
     fn goal_is_paused(&self) -> bool {
         self.goal_tracker
             .lock()
@@ -852,9 +730,27 @@ impl SessionActor {
             .is_some_and(|s| s.is_paused())
     }
 
-    /// Apply a `GoalClassifierOutcome` to the tracker and queue any
-    /// resulting side-effects (nudge push, cap-reached pause).
-    async fn apply_classifier_outcome(
+    /// In-turn goal loop step: run verification for the round just completed
+    /// and decide whether to continue the loop in-turn (with the continuation
+    /// directive) or end the turn. The premature-stop signal, if any, is
+    /// emitted here — once per continued round.
+    pub(super) async fn run_goal_round_end_legacy(&self) -> GoalRoundDecision {
+        let current_tokens = self.chat_state_handle.get_total_tokens().await as i64;
+        let Some(plan) = self.prepare_goal_continuation(current_tokens).await else {
+            return GoalRoundDecision::EndTurn;
+        };
+        // A Continue directive is unconditionally injected — returning it
+        // commits the embedded strategist note for delivery.
+        if let Some(rec) = plan.strategy_rec.as_deref() {
+            self.consume_strategist_note(rec);
+        }
+        if let Some(pattern) = plan.stop_pattern {
+            self.record_and_emit_premature_stop(pattern);
+        }
+        GoalRoundDecision::Continue(plan.directive)
+    }
+
+    async fn apply_classifier_outcome_legacy(
         &self,
         policy: &GoalClassifierPolicy,
         attempt: u32,
@@ -870,8 +766,6 @@ impl SessionActor {
         match outcome {
             GoalClassifierOutcome::Achieved { details_path } => {
                 self.prune_subagent_records_for_active_goal();
-                // Entries deferred by a concurrent mid-turn drain while the
-                // panel ran claim against the now-achieved goal.
                 self.clear_pending_classifier_completions();
                 let details_path = {
                     let mut tracker = self.goal_tracker.lock();
@@ -881,12 +775,8 @@ impl SessionActor {
                         Some(details_path.as_str()),
                         GapsUpdate::Clear,
                     );
-                    // Goal solved: the NotAchieved streak is broken and any
-                    // stale strategist note must stop replaying.
                     tracker.reset_strategist_state();
                     tracker.complete();
-                    // Ack the location `complete()` rescued the details file
-                    // to, so the "See <path>" pointer stays readable.
                     let details_path = tracker
                         .snapshot()
                         .and_then(|o| o.last_classifier_details_path.clone())
@@ -894,9 +784,6 @@ impl SessionActor {
                     notify.emit_goal_updated(&mut tracker, tokens_used, finished_marginal);
                     details_path
                 };
-                // Real, verified achievement (NOT the FailOpenAchieved arm
-                // below): run the ONE closing summarizer. Fail-OPEN — never
-                // blocks the completion that already happened above.
                 self.maybe_run_goal_summarizer(attempt).await;
                 UpdateGoalAck::ClassifierAchieved { details_path }
             }
@@ -914,14 +801,8 @@ impl SessionActor {
                         Some(details_path.as_str()),
                         GapsUpdate::Set(gaps_summary.as_str()),
                     );
-                    // Bump the strategist streak under the same lock; the
-                    // trigger below (after the cap/stall guards, so a paused
-                    // round never also fires) reads the persisted state.
                     tracker.record_not_achieved_streak();
                 }
-                // Cap takes precedence over the stall check: an at-cap
-                // rejection acks CapReached even if its fingerprint also
-                // repeated (matters at max_runs == 1).
                 if attempt >= policy.max_runs {
                     self.auto_pause_for_classifier_cap(attempt, &details_path, &pause_summary)
                         .await;
@@ -930,11 +811,6 @@ impl SessionActor {
                         attempt,
                     };
                 }
-                // Stall early-exit: an unchanged gap fingerprint across
-                // consecutive attempts means the model addressed nothing,
-                // so pause now rather than spend the rest of the cap. An
-                // empty fingerprint carries no stable content, so it never
-                // counts as a repeat.
                 let stalled = !gap_fingerprint.is_empty()
                     && self
                         .goal_tracker
@@ -948,14 +824,6 @@ impl SessionActor {
                         attempt,
                     };
                 }
-                // Stall-triggered strategist: fire only when neither the cap
-                // nor the stall paused this round (both returned above). The
-                // trigger is SKIP-ROBUST (`>= last_fired + N`) so a synthetic
-                // streak bump that jumps past a multiple of N still fires.
-                // Claim the fire atomically (check + record under one lock) so
-                // re-entrancy can't double-fire, then release the lock before
-                // the await. The strategist is best-effort / fail-open — never
-                // pauses the goal, never changes the ack.
                 let every = self.goal_strategist_every;
                 let claimed =
                     self.goal_tracker
@@ -971,9 +839,6 @@ impl SessionActor {
                     self.maybe_run_goal_strategist(attempt, consecutive_not_achieved)
                         .await;
                 }
-                // Feedback is delivered by the in-turn continuation directive
-                // (`prepare_goal_continuation` inlines the persisted gaps), so
-                // no separate nudge turn is queued.
                 notify.emit_goal_updated(
                     &mut self.goal_tracker.lock(),
                     tokens_used,
@@ -997,11 +862,6 @@ impl SessionActor {
                         Some(details_path.as_str()),
                         GapsUpdate::Clear,
                     );
-                    // A blocked rejection is not an ordinary retry — give
-                    // the reserved slot back and clear the stall streak +
-                    // ALL strategist state (streak, last-fired, stale note)
-                    // so a resumed goal starts clean (symmetric to the slot
-                    // rollback).
                     tracker.rollback_classifier_attempt();
                     tracker.reset_classifier_stall();
                     tracker.reset_strategist_state();
@@ -1027,8 +887,6 @@ impl SessionActor {
                     (!details_path.is_empty()).then_some(details_path.as_str()),
                     GapsUpdate::Clear,
                 );
-                // Fail-open is treated as Achieved: break the streak and drop
-                // any stale strategist note, symmetric with the real Achieved.
                 tracker.reset_strategist_state();
                 tracker.complete();
                 notify.emit_goal_updated(&mut tracker, tokens_used, finished_marginal);
@@ -2262,7 +2120,7 @@ impl SessionActor {
             let verifier_gaps = o
                 .last_classifier_gaps
                 .as_deref()
-                .map(|gaps| render_verifier_gaps_block(gaps, goal_tool))
+                .map(|gaps| render_verifier_gaps_block_legacy(gaps, goal_tool))
                 .unwrap_or_default();
             // One-shot, unlike verifier_gaps: cloned out so the caller can
             // compare-and-clear (`consume_strategist_note`) only once a
@@ -2302,13 +2160,13 @@ impl SessionActor {
             ""
         };
         // Empty until a refuted goal has churned past the threshold.
-        let reverify_block = render_goal_reverify_block(
+        let reverify_block = render_goal_reverify_block_legacy(
             rounds_since_verify,
             refuted,
             self.goal_reverify_after,
             goal_tool,
         );
-        let directive = render_goal_continuation_directive(
+        let directive = render_goal_continuation_directive_legacy(
             &objective,
             tokens,
             &elapsed,
@@ -2452,6 +2310,7 @@ impl SessionActor {
                 parsed_prompt_tx: None,
                 queue_meta: None,
                 send_now: false,
+                task_wake_fallback: None,
             });
         }
         // Past the authoritative gate the queued directive will be delivered;

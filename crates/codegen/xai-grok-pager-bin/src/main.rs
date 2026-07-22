@@ -951,6 +951,41 @@ fn shutdown_and_flush_telemetry(exit_code: i32) -> ! {
     xai_grok_telemetry::debug_log::flush();
     std::process::exit(exit_code);
 }
+async fn forward_stdio_line_to_leader(
+    line: Vec<u8>,
+    leader_tx: &tokio::sync::Mutex<tokio::sync::mpsc::UnboundedSender<String>>,
+    replay_state: &std::sync::Mutex<StdioReplayState>,
+    cancel: &CancellationToken,
+) {
+    let line = String::from_utf8_lossy(&line);
+    let mut trimmed = line.trim_end_matches(['\r', '\n']).to_string();
+    if trimmed.is_empty() {
+        return;
+    }
+    if trimmed.contains("\"initialize\"")
+        || trimmed.contains("\"session/load\"")
+        || trimmed.contains("\"session/new\"")
+    {
+        cache_outgoing_acp_state(&trimmed, replay_state);
+    }
+    let send_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(300);
+    loop {
+        {
+            let tx = leader_tx.lock().await;
+            match tx.send(trimmed) {
+                Ok(()) => break,
+                Err(tokio::sync::mpsc::error::SendError(v)) => trimmed = v,
+            }
+        }
+        if cancel.is_cancelled() || tokio::time::Instant::now() >= send_deadline {
+            tracing::error!(
+                "stdio bridge: dropping client message after reconnect retries were exhausted"
+            );
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+}
 /// Emitted by both leader guards (server mode and leader-connect) so the two sites
 /// can't drift.
 const PLUGIN_DIR_LEADER_WARNING: &str = "grok: --plugin-dir is ignored in leader mode; run with --no-leader to \
@@ -968,16 +1003,11 @@ async fn run_agent_command(
         #[cfg(unix)]
         {
             use tokio::signal::unix::{SignalKind, signal};
+            use xai_grok_pager::app::signal_handler::next_signal_code;
             let mut term = signal(SignalKind::terminate()).ok();
             let mut hup = signal(SignalKind::hangup()).ok();
-            tokio::select! {
-                _ = tokio::signal::ctrl_c() => { shutdown_and_flush_telemetry(130); } _ =
-                async { if let Some(sig) = term.as_mut() { let _ = sig.recv(). await; }
-                else { std::future::pending::< () > (). await; } } => {
-                shutdown_and_flush_telemetry(143); } _ = async { if let Some(sig) = hup
-                .as_mut() { let _ = sig.recv(). await; } else { std::future::pending::<
-                () > (). await; } } => { shutdown_and_flush_telemetry(129); }
-            }
+            let code = next_signal_code(&mut term, &mut hup).await;
+            shutdown_and_flush_telemetry(code);
         }
         #[cfg(not(unix))]
         {
@@ -1062,7 +1092,6 @@ async fn run_agent_command(
     agent_config.resolve_runtime_fields(&xai_grok_shell::agent::config::RuntimeResolutionContext {
         raw_config: &raw_config,
         remote_settings: remote_settings.as_ref(),
-        cwd: None,
         is_headless: !is_leader,
         cli_subagents: None,
         cli_web_search_model: None,
@@ -1165,23 +1194,9 @@ async fn run_agent_command(
                         tokio::select! {
                             biased; _ = cancel_stdin.cancelled() => break, maybe_line =
                             stdin_lines.recv() => { let Some(line) = maybe_line else {
-                            break }; let line = String::from_utf8_lossy(& line); let
-                            trimmed = line.trim_end_matches(['\r', '\n']).to_string(); if
-                            trimmed.is_empty() { continue; } if trimmed
-                            .contains("\"initialize\"") || trimmed
-                            .contains("\"session/load\"") || trimmed
-                            .contains("\"session/new\"") { cache_outgoing_acp_state(&
-                            trimmed, & replay_state_stdin); } let send_deadline =
-                            tokio::time::Instant::now() +
-                            std::time::Duration::from_secs(300); loop { { let tx =
-                            leader_tx_stdin.lock(). await; if tx.send(trimmed.clone())
-                            .is_ok() { break; } } if cancel_stdin.is_cancelled() ||
-                            tokio::time::Instant::now() >= send_deadline {
-                            tracing::error!("stdio bridge: dropping client message after \
-                                             reconnect retries were exhausted");
-                            break; }
-                            tokio::time::sleep(std::time::Duration::from_millis(250)).
-                            await; } }
+                            break }; forward_stdio_line_to_leader(line, &
+                            leader_tx_stdin, & replay_state_stdin, & cancel_stdin,).
+                            await; }
                         }
                     }
                 });
@@ -1590,7 +1605,46 @@ fn install_heap_profile_hooks() {
         prof_available: jemalloc_prof_available,
     });
 }
+fn version_text(channel_label: &str) -> String {
+    format!(
+        "grok {}\n",
+        xai_grok_version::display_version_with_commit(env!("VERSION_WITH_COMMIT"), channel_label,)
+    )
+}
+fn write_version(writer: &mut impl std::io::Write, channel_label: &str) -> std::io::Result<()> {
+    writer.write_all(version_text(channel_label).as_bytes())
+}
+fn dispatch_version_if_requested(args: &PagerArgs) -> bool {
+    if !args.version {
+        return false;
+    }
+    if let Err(error) = write_version(
+        &mut std::io::stdout().lock(),
+        xai_grok_update::channel_label(),
+    ) {
+        eprintln!("Error: {error}");
+        std::process::exit(1);
+    }
+    true
+}
+fn dispatch_doctor_if_requested(args: &PagerArgs) -> bool {
+    let Some(Command::Doctor(doctor_args)) = &args.command else {
+        return false;
+    };
+    if let Err(error) = xai_grok_pager::doctor_cmd::run(doctor_args.clone()) {
+        eprintln!("Error: {error:#}");
+        std::process::exit(1);
+    }
+    true
+}
 fn main() {
+    if let Some(code) = xai_grok_pager::app::mermaid_worker::maybe_run_render_subprocess() {
+        std::process::exit(code);
+    }
+    let args = PagerArgs::parse_cli();
+    if dispatch_version_if_requested(&args) || dispatch_doctor_if_requested(&args) {
+        return;
+    }
     xai_grok_pager_minimal::install();
     #[cfg(all(feature = "jemalloc", unix))]
     xai_grok_pager::memory_release::install_release_hook(purge_jemalloc_retained_pages);
@@ -1601,9 +1655,6 @@ fn main() {
     }
     #[cfg(all(feature = "jemalloc", unix))]
     install_heap_profile_hooks();
-    if let Some(code) = xai_grok_pager::app::mermaid_worker::maybe_run_render_subprocess() {
-        std::process::exit(code);
-    }
     xai_grok_pager::memory_trace::start(
         xai_grok_shell::util::grok_home::grok_home().join("memtrace"),
     );
@@ -1655,7 +1706,7 @@ fn main() {
         .enable_all()
         .build()
         .unwrap_or_else(|e| panic!("failed to start tokio runtime: {e}"));
-    let result = run_and_shutdown(runtime, async_main(), RUNTIME_SHUTDOWN_GRACE);
+    let result = run_and_shutdown(runtime, async_main(args), RUNTIME_SHUTDOWN_GRACE);
     xai_grok_telemetry::debug_log::flush();
     if let Err(e) = result {
         xai_tty_utils::restore_native_stderr();
@@ -1664,9 +1715,9 @@ fn main() {
         std::process::exit(1);
     }
 }
-async fn async_main() -> Result<()> {
+async fn async_main(args: PagerArgs) -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let mut args = PagerArgs::parse_and_apply_cwd()?;
+    let mut args = args.apply_cwd()?;
     if let Some(ref mode) = args.compaction_mode {
         unsafe { std::env::set_var("GROK_COMPACTION_MODE", mode) };
     }
@@ -1773,6 +1824,9 @@ async fn async_main() -> Result<()> {
                     &update_config,
                 )
                 .await;
+            }
+            Command::Doctor(_) => {
+                unreachable!("doctor was consumed before runtime startup")
             }
             Command::Inspect { json } => {
                 let cwd = std::env::current_dir().unwrap_or_default();
@@ -1955,16 +2009,10 @@ async fn async_main() -> Result<()> {
             .as_deref()
             .map(xai_grok_pager::headless::parse_json_schema)
             .transpose()?;
-        if json_schema.is_some() {
-            if args.output_format == xai_grok_pager::headless::OutputFormat::Plain {
-                args.output_format = xai_grok_pager::headless::OutputFormat::Json;
-            }
-            if args.self_verify {
-                anyhow::bail!(
-                    "--json-schema and --self-verify cannot be used together: \
-                     verification output would corrupt the structured response"
-                );
-            }
+        if json_schema.is_some()
+            && args.output_format == xai_grok_pager::headless::OutputFormat::Plain
+        {
+            args.output_format = xai_grok_pager::headless::OutputFormat::Json;
         }
         return xai_grok_pager::headless::run_single_turn(
             prompt,
@@ -1994,8 +2042,6 @@ async fn async_main() -> Result<()> {
                 max_turns: args.max_turns,
                 permission_mode_flag: args.permission_mode_flag.clone(),
                 reasoning_effort: args.reasoning_effort.clone(),
-                self_verify: args.self_verify,
-                best_of_n: args.best_of_n,
                 wait_for_background: !args.no_wait_for_background,
                 background_wait_timeout: std::time::Duration::from_secs(
                     args.background_wait_timeout_secs,
@@ -2281,6 +2327,36 @@ async fn signal_leaders_to_relaunch(installed_version: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn version_output_writer_preserves_channel_aware_contract() {
+        for (label, expected_suffix) in [
+            (" [alpha]", " [alpha]\n"),
+            (" [stable]", " [stable]\n"),
+            ("", ")\n"),
+        ] {
+            let mut output = Vec::new();
+            write_version(&mut output, label).unwrap();
+            let output = String::from_utf8(output).unwrap();
+            assert!(output.starts_with("grok "));
+            assert!(output.contains(env!("VERSION_WITH_COMMIT")));
+            assert!(output.ends_with(expected_suffix), "{output:?}");
+        }
+    }
+    #[test]
+    fn version_flags_and_doctor_are_distinct_early_intents() {
+        let version = PagerArgs::try_parse_from(["grok", "--version"]).unwrap();
+        assert!(version.version);
+        assert!(version.command.is_none());
+        let short = PagerArgs::try_parse_from(["grok", "-v"]).unwrap();
+        assert!(short.version);
+        assert!(short.command.is_none());
+        let subcommand = PagerArgs::try_parse_from(["grok", "version"]).unwrap();
+        assert!(!subcommand.version);
+        assert!(matches!(
+            subcommand.command,
+            Some(Command::Version { json: false })
+        ));
+    }
     #[cfg(all(feature = "jemalloc", unix))]
     struct TempHeapDump(std::path::PathBuf);
     #[cfg(all(feature = "jemalloc", unix))]

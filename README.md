@@ -155,6 +155,7 @@ Fork-specific documents:
 
 - [OpenAI setup and operation](docs/OPENAI.md)
 - [Provider profiles and isolation](docs/PROVIDERS.md)
+- [Fast, Ultra, AgentGraph, and Swarm control plane](docs/CONTROL_PLANE.md)
 - [One-command upstream updates](docs/UPDATING.md)
 - [Fork change and attribution notice](FORK-NOTICE.md)
 

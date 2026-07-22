@@ -273,8 +273,6 @@ mod tests {
             top_p: None,
             api_backend: Default::default(),
             extra_headers: Default::default(),
-            effective_service_tier: Default::default(),
-            hosted_multi_agent: Default::default(),
             context_window: std::num::NonZeroU64::new(128_000).unwrap(),
             reasoning_effort: None,
             stream_tool_calls: None,

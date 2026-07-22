@@ -3,11 +3,12 @@
 use super::setters::{
     pr13_effective_default, set_ask_user_question_timeout_enabled_inner, set_auto_dark_theme_inner,
     set_auto_light_theme_inner, set_auto_update_inner, set_collapsed_edit_blocks_inner,
-    set_compact_mode, set_compact_mode_inner, set_contextual_hint_inner, set_default_model_inner,
-    set_default_selected_permission_inner, set_display_refresh_auto_cadence_inner,
-    set_fork_secondary_model_inner, set_group_tool_verbs_inner, set_hunk_tracker_mode_inner,
-    set_invert_scroll_inner, set_keep_text_selection_inner, set_max_thoughts_width_inner,
-    set_multiline_mode, set_prompt_suggestions_inner, set_remember_tool_approvals_inner,
+    set_combine_queued_prompts_inner, set_compact_mode, set_compact_mode_inner,
+    set_contextual_hint_inner, set_default_model_inner, set_default_selected_permission_inner,
+    set_display_refresh_auto_cadence_inner, set_fork_secondary_model_inner,
+    set_group_tool_verbs_inner, set_hunk_tracker_mode_inner, set_invert_scroll_inner,
+    set_keep_text_selection_inner, set_max_thoughts_width_inner, set_multiline_mode,
+    set_page_flip_on_send_inner, set_prompt_suggestions_inner, set_remember_tool_approvals_inner,
     set_render_mermaid_inner, set_respect_manual_folds_inner, set_screen_mode_inner,
     set_scroll_lines_inner, set_scroll_mode_inner, set_scroll_speed_inner,
     set_show_thinking_blocks_inner, set_show_tips_inner, set_simple_mode_inner, set_theme_inner,
@@ -67,6 +68,9 @@ pub(crate) fn refresh_open_settings_modals(app: &mut AppView) {
             state.rebuild_rows();
             state.ui_snapshot = ui_snapshot.clone();
             state.pager_snapshot = crate::settings::PagerLocalSnapshot {
+                orchestration: xai_grok_shell::agent::config::load_orchestration_config_for_cwd(
+                    Some(&agent.session.cwd),
+                ),
                 multiline_mode: agent.multiline_mode,
                 yolo_mode: agent.session.is_yolo(),
                 auto_mode: agent.session.is_auto(),
@@ -113,7 +117,10 @@ pub(in crate::app::dispatch) fn dispatch_open_command_palette(app: &mut AppView)
         return vec![];
     }
     agent.active_modal = Some(ActiveModal::CommandPalette {
-        entries: crate::views::modal::default_palette_entries(agent.sharing_enabled),
+        entries: crate::views::modal::default_palette_entries(
+            agent.sharing_enabled,
+            agent.prompt.slash_controller.screen_mode(),
+        ),
         // Type-to-find: open in input mode (matches Ctrl+P).
         state: crate::views::picker::PickerState::input_active(),
         window: crate::views::modal_window::ModalWindowState::new(),
@@ -180,6 +187,9 @@ pub(in crate::app::dispatch) fn dispatch_open_settings(app: &mut AppView) -> Vec
     tracing::info!(target: "settings", "opened modal");
 
     let pager_snapshot = crate::settings::PagerLocalSnapshot {
+        orchestration: xai_grok_shell::agent::config::load_orchestration_config_for_cwd(Some(
+            &agent.session.cwd,
+        )),
         multiline_mode: agent.multiline_mode,
         yolo_mode: agent.session.is_yolo(),
         auto_mode: agent.session.is_auto(),
@@ -656,7 +666,15 @@ fn agent_available_models(app: &AppView) -> Vec<(String, acp::ModelId)> {
 
 /// Build a `PagerLocalSnapshot` from the current `AppView`.
 pub(crate) fn build_pager_snapshot(app: &AppView) -> crate::settings::PagerLocalSnapshot {
+    let orchestration = if let ActiveView::Agent(id) = app.active_view
+        && let Some(agent) = app.agents.get(&id)
+    {
+        xai_grok_shell::agent::config::load_orchestration_config_for_cwd(Some(&agent.session.cwd))
+    } else {
+        xai_grok_shell::agent::config::load_orchestration_config_for_cwd(None)
+    };
     crate::settings::PagerLocalSnapshot {
+        orchestration,
         multiline_mode: agent_multiline_mode(app),
         yolo_mode: agent_yolo_mode(app),
         auto_mode: agent_auto_mode(app),
@@ -685,9 +703,37 @@ pub(in crate::app::dispatch) fn action_for_reset(
 ) -> Option<Action> {
     use crate::settings::SettingValue;
     match (key, value) {
+        ("orchestration.service_tier", SettingValue::Enum(value)) => {
+            Some(Action::SetOrchestrationServiceTier(value))
+        }
+        ("orchestration.ultra_enabled", SettingValue::Bool(value)) => {
+            Some(Action::SetOrchestrationUltraEnabled(*value))
+        }
+        ("orchestration.ultra_max_children", SettingValue::Int(value)) => {
+            Some(Action::SetOrchestrationUltraMaxChildren(*value))
+        }
+        ("orchestration.graph_enabled", SettingValue::Bool(value)) => {
+            Some(Action::SetOrchestrationGraphEnabled(*value))
+        }
+        ("orchestration.swarm_enabled", SettingValue::Bool(value)) => {
+            Some(Action::SetOrchestrationSwarmEnabled(*value))
+        }
+        ("orchestration.live_swarm_enabled", SettingValue::Bool(value)) => {
+            Some(Action::SetOrchestrationLiveSwarmEnabled(*value))
+        }
+        ("orchestration.swarm_max_active_workers", SettingValue::Int(value)) => {
+            Some(Action::SetOrchestrationSwarmMaxActiveWorkers(*value))
+        }
+        ("orchestration.graph_artifact_retention_days", SettingValue::Int(value)) => {
+            Some(Action::SetOrchestrationGraphArtifactRetentionDays(*value))
+        }
         ("compact_mode", SettingValue::Bool(b)) => Some(Action::SetCompactMode(*b)),
         ("show_timestamps", SettingValue::Bool(b)) => Some(Action::SetTimestamps(*b)),
         ("show_timeline", SettingValue::Bool(b)) => Some(Action::SetTimeline(*b)),
+        ("page_flip_on_send", SettingValue::Bool(b)) => Some(Action::SetPageFlipOnSend(*b)),
+        ("combine_queued_prompts", SettingValue::Bool(b)) => {
+            Some(Action::SetCombineQueuedPrompts(*b))
+        }
         ("simple_mode", SettingValue::Bool(b)) => Some(Action::SetSimpleMode(*b)),
         ("contextual_hints.undo", SettingValue::Bool(b)) => Some(Action::SetContextualHintUndo(*b)),
         ("contextual_hints.plan_mode", SettingValue::Bool(b)) => {
@@ -803,7 +849,7 @@ pub(in crate::app::dispatch) fn action_for_reset(
         // max_thoughts_width: direct round-trip.
         ("max_thoughts_width", SettingValue::Int(i)) => Some(Action::SetMaxThoughtsWidth(*i)),
         // coding_data_sharing: "opt-in" / "opt-out" → bool.
-        // "opt-out" arm is a skew guard (default is "opt-in").
+        // Both arms needed (registry default is "opt-out").
         ("coding_data_sharing", SettingValue::Enum("opt-in")) => {
             Some(Action::SetCodingDataSharing { opted_in: true })
         }
@@ -874,9 +920,25 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
     use crate::settings::SettingValue;
     let mut companion_effects: Vec<Effect> = Vec::new();
     match (key, rollback_value) {
+        ("orchestration.service_tier", SettingValue::Enum(_))
+        | ("orchestration.ultra_enabled", SettingValue::Bool(_))
+        | ("orchestration.ultra_max_children", SettingValue::Int(_))
+        | ("orchestration.graph_enabled", SettingValue::Bool(_))
+        | ("orchestration.swarm_enabled", SettingValue::Bool(_))
+        | ("orchestration.live_swarm_enabled", SettingValue::Bool(_))
+        | ("orchestration.swarm_max_active_workers", SettingValue::Int(_))
+        | ("orchestration.graph_artifact_retention_days", SettingValue::Int(_)) => {
+            // These values are read directly from durable config snapshots.
+            // A failed write leaves that source unchanged, so no in-memory
+            // mutation needs reversing.
+        }
         ("compact_mode", SettingValue::Bool(b)) => set_compact_mode_inner(app, *b),
         ("show_timestamps", SettingValue::Bool(b)) => set_timestamps_inner(app, *b),
         ("show_timeline", SettingValue::Bool(b)) => set_timeline_inner(app, *b),
+        ("page_flip_on_send", SettingValue::Bool(b)) => set_page_flip_on_send_inner(app, *b),
+        ("combine_queued_prompts", SettingValue::Bool(b)) => {
+            set_combine_queued_prompts_inner(app, *b)
+        }
         ("simple_mode", SettingValue::Bool(b)) => set_simple_mode_inner(app, *b),
         ("contextual_hints.undo", SettingValue::Bool(b)) => {
             set_contextual_hint_inner(app, |h, v| h.undo = v, *b)

@@ -10,6 +10,7 @@ use xai_grok_shell::sampling::error::{
     RATE_LIMITED_ERROR_CODE, error_detail_from_data, format_rate_limited_user_message,
 };
 use xai_grok_shell::session::ExtMethodResult;
+use xai_grok_shell::session::unified_list::ListScope;
 /// Typed progress message for session restore.
 /// Keeps the progress channel from accepting arbitrary `TaskResult` variants.
 pub(crate) struct RestoreProgressMsg {
@@ -88,7 +89,9 @@ pub(super) async fn fetch_plugin_cta_mcps(
 pub(super) fn format_acp_error(err: &acp::Error, is_api_key_auth: bool) -> String {
     if i32::from(err.code) == RATE_LIMITED_ERROR_CODE {
         let detail = err.data.as_ref().and_then(error_detail_from_data);
-        return format_rate_limited_user_message(detail.as_deref(), is_api_key_auth);
+        return sanitize_user_error(
+            &format_rate_limited_user_message(detail.as_deref(), is_api_key_auth),
+        );
     }
     if err.code == acp::ErrorCode::InvalidParams && let Some(data) = &err.data
         && let Some(msg) = error_detail_from_data(data) && !msg.is_empty()
@@ -444,6 +447,18 @@ pub(super) fn parse_session_list_partial(
         },
     )
 }
+/// Reads `_meta["x.ai/listScope"]` from a session-list payload.
+pub(super) fn parse_session_list_scope(payload: &serde_json::Value) -> ListScope {
+    match payload
+        .get("_meta")
+        .and_then(|m| m.get("x.ai/listScope"))
+        .and_then(|v| v.as_str())
+    {
+        Some("repo") => ListScope::Repo,
+        Some("all") => ListScope::All,
+        _ => ListScope::Cwd,
+    }
+}
 /// Parse the `x.ai/session/list` response payload (the unwrapped
 /// `{ "sessions": [...] }` object) into [`SessionPickerEntry`] rows.
 ///
@@ -774,6 +789,70 @@ pub(crate) async fn persist_setting(
         format!("persist_setting({key}) expected {expected}, got {got:?}")
     }
     match key {
+        "orchestration.service_tier" => {
+            let SettingValue::Enum(value) = value else {
+                return Err(kind_mismatch(key, "Enum", &value));
+            };
+            xai_grok_shell::util::config::set_orchestration_service_tier(value.to_string())
+                .await
+                .map_err(|error| error.to_string())
+        }
+        "orchestration.ultra_enabled" => {
+            let SettingValue::Bool(value) = value else {
+                return Err(kind_mismatch(key, "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_orchestration_ultra_enabled(value)
+                .await
+                .map_err(|error| error.to_string())
+        }
+        "orchestration.ultra_max_children" => {
+            let SettingValue::Int(value) = value else {
+                return Err(kind_mismatch(key, "Int", &value));
+            };
+            xai_grok_shell::util::config::set_orchestration_ultra_max_children(value)
+                .await
+                .map_err(|error| error.to_string())
+        }
+        "orchestration.graph_enabled" => {
+            let SettingValue::Bool(value) = value else {
+                return Err(kind_mismatch(key, "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_orchestration_graph_enabled(value)
+                .await
+                .map_err(|error| error.to_string())
+        }
+        "orchestration.swarm_enabled" => {
+            let SettingValue::Bool(value) = value else {
+                return Err(kind_mismatch(key, "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_orchestration_swarm_enabled(value)
+                .await
+                .map_err(|error| error.to_string())
+        }
+        "orchestration.live_swarm_enabled" => {
+            let SettingValue::Bool(value) = value else {
+                return Err(kind_mismatch(key, "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_orchestration_live_swarm_enabled(value)
+                .await
+                .map_err(|error| error.to_string())
+        }
+        "orchestration.swarm_max_active_workers" => {
+            let SettingValue::Int(value) = value else {
+                return Err(kind_mismatch(key, "Int", &value));
+            };
+            xai_grok_shell::util::config::set_orchestration_swarm_max_active_workers(value)
+                .await
+                .map_err(|error| error.to_string())
+        }
+        "orchestration.graph_artifact_retention_days" => {
+            let SettingValue::Int(value) = value else {
+                return Err(kind_mismatch(key, "Int", &value));
+            };
+            xai_grok_shell::util::config::set_orchestration_graph_artifact_retention_days(value)
+                .await
+                .map_err(|error| error.to_string())
+        }
         "compact_mode" => {
             let SettingValue::Bool(b) = value else {
                 return Err(kind_mismatch("compact_mode", "Bool", &value));
@@ -787,6 +866,22 @@ pub(crate) async fn persist_setting(
                 return Err(kind_mismatch("show_timestamps", "Bool", &value));
             };
             xai_grok_shell::util::config::set_show_timestamps(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "page_flip_on_send" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("page_flip_on_send", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_page_flip_on_send(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "combine_queued_prompts" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("combine_queued_prompts", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_combine_queued_prompts(b)
                 .await
                 .map_err(|e| e.to_string())
         }

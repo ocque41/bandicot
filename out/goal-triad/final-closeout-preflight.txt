@@ -1,58 +1,18 @@
-Bandicot control-plane closeout preflight
-Captured: 2026-07-22 CEST
+# Final closeout preflight
 
-Command: git rev-parse --show-toplevel
-Exit: 0
-Output: /Users/miguel/Documents/bandicot
+Captured: 2026-07-22 (Europe/Madrid)
 
-Command: git branch --show-current
-Exit: 0
-Output: main
+- Repository: /Users/miguel/Documents/bandicot
+- Branch: main
+- Starting and current HEAD: 31c102d
+- Cargo metadata: PASS
+- Root Cargo.toml: generated; not edited by this completion
+- Initial feature branch scan: no separate AgentGraph work found
+- Initial worktree scan: main worktree only
+- Later worktree scan: detached workflow-integration snapshot at 7b16972 inspected read-only; broad unrelated snapshot, no separate committed AgentGraph implementation to merge
+- Existing user changes: preserved
+- Staging/commit authorization: not granted
+- Final staged-file count: 0
+- Final commit count created by this task: 0
 
-Command: git log -5 --oneline
-Exit: 0
-Output:
-6e799e6 fallbacks
-cde1dff 0.0.0
-1c70387 feat: launch Bandicot with ChatGPT sign-in
-139fe9a Merge upstream grok-build updates
-98c3b24 Synced from monorepo
-
-Command: git status --short
-Exit: 0
-Summary: 89 tracked files modified. Untracked control-plane, pager command,
-documentation, .agent, .codex, and out files are present. The complete live
-inventory remains available from this command and was captured before edits in
-the Codex tool transcript. Existing changes are treated as user-owned.
-
-Command: git diff --name-status
-Exit: 0
-Summary: 89 tracked files modified; no tracked deletions were reported.
-
-Command: git diff --stat
-Exit: 0
-Output summary: 89 files changed, 6053 insertions, 894 deletions.
-
-Command: git ls-files --others --exclude-standard
-Exit: 0
-Summary: untracked paths include .agent/, .codex/, the control-plane module,
-Fast/Ultra/Graph/Swarm pager commands, service_tier.rs, provider account
-extensions, control-plane docs/ADRs, and out/goal-triad records.
-
-Command: cargo metadata --no-deps --format-version 1
-Exit: 0
-Resolved summary:
-  workspace_root: /Users/miguel/Documents/bandicot
-  target_directory: /Users/miguel/Documents/bandicot/target
-  workspace_members: 79
-  packages: 79
-Note: the raw JSON exceeded 100,000 output tokens. A jq projection was rerun
-with exit 0 to store the stable facts above without embedding generated package
-metadata in this record.
-
-Safety constraints acknowledged:
-- Do not edit generated root Cargo.toml.
-- Do not reset, clean, restore, checkout, or stash the working tree.
-- Do not terminate unrelated Cargo processes.
-- Do not stage or commit.
-- Use target/control-plane-closeout for Cargo validation.
+See final-gap-matrix.md, final-completion-report.md, and final-verification-log.md for current evidence.

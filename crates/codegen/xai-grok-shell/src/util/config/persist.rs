@@ -42,6 +42,7 @@ pub async fn save_config(config: &Config) -> Result<()> {
     merge_section(table, "models", &config.models);
     merge_section(table, "ui", &config.ui);
     merge_section(table, "harness", &config.harness);
+    merge_section(table, "orchestration", &config.orchestration);
     merge_section(table, "session", &config.session);
     merge_ask_user_question_section(table, &config.ask_user_question);
 
