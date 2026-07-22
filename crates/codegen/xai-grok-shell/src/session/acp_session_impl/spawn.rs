@@ -73,6 +73,109 @@ mod cli_catchall_drop_tests {
         assert!(dropped.is_empty());
     }
 }
+
+fn restored_ultra_orchestration(
+    session_info: &SessionInfo,
+    is_subagent: bool,
+    configured: crate::control_plane::agent_graph::UltraOrchestrationConfig,
+) -> crate::control_plane::agent_graph::UltraOrchestrationConfig {
+    let summary_path = crate::session::persistence::session_dir(session_info).join("summary.json");
+    let persisted = std::fs::read(&summary_path)
+        .ok()
+        .and_then(|bytes| {
+            serde_json::from_slice::<crate::session::persistence::Summary>(&bytes).ok()
+        })
+        .map(|summary| summary.ultra_orchestration);
+    let base = match persisted {
+        Some(config) if !config.is_default() => config,
+        _ => configured,
+    };
+    crate::control_plane::agent_graph::ultra_config_for_session(base, is_subagent)
+}
+
+fn resolve_restored_fast_service_tier(
+    persisted: Option<xai_grok_sampling_types::ServiceTierPreference>,
+    configured: xai_grok_sampling_types::ResolvedServiceTier,
+    capabilities: &xai_grok_sampling_types::ServiceTierCapabilities,
+) -> xai_grok_sampling_types::ResolvedServiceTier {
+    match persisted {
+        Some(requested) => xai_grok_sampling_types::resolve_service_tier(
+            requested,
+            capabilities,
+            xai_grok_sampling_types::ServiceTierSource::Session,
+        ),
+        None => configured,
+    }
+}
+
+fn restored_fast_service_tier(
+    session_info: &SessionInfo,
+    configured: xai_grok_sampling_types::ResolvedServiceTier,
+    capabilities: &xai_grok_sampling_types::ServiceTierCapabilities,
+) -> xai_grok_sampling_types::ResolvedServiceTier {
+    let summary_path = crate::session::persistence::session_dir(session_info).join("summary.json");
+    let persisted = std::fs::read(&summary_path)
+        .ok()
+        .and_then(|bytes| {
+            serde_json::from_slice::<crate::session::persistence::Summary>(&bytes).ok()
+        })
+        .and_then(|summary| summary.fast_service_tier);
+    resolve_restored_fast_service_tier(persisted, configured, capabilities)
+}
+
+#[cfg(test)]
+mod fast_service_tier_restore_tests {
+    use super::resolve_restored_fast_service_tier;
+    use xai_grok_sampling_types::{
+        EffectiveServiceTier, ResolvedServiceTier, ServiceTierCapabilities, ServiceTierPreference,
+        ServiceTierSource,
+    };
+
+    #[test]
+    fn persisted_fast_request_recomputes_against_current_provider_capabilities() {
+        let configured = ResolvedServiceTier::standard(
+            ServiceTierPreference::Inherit,
+            ServiceTierSource::Config,
+        );
+        let restored = resolve_restored_fast_service_tier(
+            Some(ServiceTierPreference::Fast),
+            configured,
+            &ServiceTierCapabilities::default(),
+        );
+
+        assert_eq!(restored.requested, ServiceTierPreference::Fast);
+        assert_eq!(restored.effective, EffectiveServiceTier::Standard);
+        assert_eq!(restored.source, ServiceTierSource::Session);
+        assert!(!restored.supported);
+
+        let restored = resolve_restored_fast_service_tier(
+            Some(ServiceTierPreference::Fast),
+            ResolvedServiceTier::standard(
+                ServiceTierPreference::Inherit,
+                ServiceTierSource::Config,
+            ),
+            &ServiceTierCapabilities {
+                priority: true,
+                default_service_tier: None,
+            },
+        );
+        assert_eq!(restored.effective, EffectiveServiceTier::Priority);
+        assert!(restored.supported);
+    }
+
+    #[test]
+    fn missing_persisted_request_keeps_configured_service_tier() {
+        let configured = ResolvedServiceTier::fast(ServiceTierSource::Config);
+        let restored = resolve_restored_fast_service_tier(
+            None,
+            configured.clone(),
+            &ServiceTierCapabilities::default(),
+        );
+
+        assert_eq!(restored, configured);
+    }
+}
+
 /// Spawns a session actor and returns the session handle plus a receiver for permission events.
 ///
 /// The permission events receiver should be used to collect telemetry about permission
@@ -91,7 +194,7 @@ mod cli_catchall_drop_tests {
 pub(crate) async fn spawn_session_actor(
     session_info: SessionInfo,
     gateway: GatewaySender,
-    sampling_config: SamplingConfig,
+    mut sampling_config: SamplingConfig,
     credentials: xai_chat_state::Credentials,
     auth_method_id: crate::agent::auth_method::SharedAuthMethodId,
     auth_manager: Option<Arc<AuthManager>>,
@@ -357,6 +460,17 @@ pub(crate) async fn spawn_session_actor(
             (0, Vec::new(), Vec::new())
         };
     let primary_model_id = sampling_config.model.clone();
+    let orchestration_config =
+        crate::agent::config::load_orchestration_config_for_cwd(Some(tool_context.cwd.as_path()));
+    let configured_service_tier =
+        orchestration_config.resolve_service_tier(&sampling_config.capabilities.service_tiers);
+    sampling_config.effective_service_tier = restored_fast_service_tier(
+        &session_info,
+        configured_service_tier,
+        &sampling_config.capabilities.service_tiers,
+    );
+    sampling_config.hosted_multi_agent = orchestration_config
+        .resolve_hosted_multi_agent(sampling_config.capabilities.hosted_multi_agent);
     let web_search_config = if disable_web_search {
         xai_grok_tools::implementations::WebSearchConfig::Disabled
     } else if let Some(cfg) = web_search_sampling_config {
@@ -409,10 +523,19 @@ pub(crate) async fn spawn_session_actor(
         top_p: sampling_config.top_p,
         api_backend: sampling_config.api_backend.clone(),
         extra_headers: sampling_config.extra_headers.clone(),
+        effective_service_tier: sampling_config.effective_service_tier.clone(),
+        hosted_multi_agent: sampling_config.hosted_multi_agent,
         context_window: context_window_override.unwrap_or(baseline_context_window),
         reasoning_effort: sampling_config.reasoning_effort,
         stream_tool_calls: Some(sampling_config.stream_tool_calls),
     };
+    let ultra_orchestration = restored_ultra_orchestration(
+        &session_info,
+        startup_hints.is_subagent,
+        orchestration_config.resolve_ultra_orchestration_config(),
+    );
+    let ultra_orchestration = Arc::new(parking_lot::Mutex::new(ultra_orchestration));
+    let ultra_child_counts = Arc::new(crate::agent::subagent::SharedChildCounts::default());
     let actor_pruning_config = xai_chat_state::PruningConfig {
         enabled: session_pruning_config.enabled,
         keep_last_n_turns: session_pruning_config.keep_last_n_turns,
@@ -1130,6 +1253,8 @@ pub(crate) async fn spawn_session_actor(
         compaction_at_tokens: std::cell::Cell::new(sampling_config.compaction_at_tokens),
         doom_loop_recovery,
         doom_loop_turn_tally: Default::default(),
+        ultra_orchestration: ultra_orchestration.clone(),
+        ultra_child_counts: ultra_child_counts.clone(),
         file_state_tracker,
         rewind_pending_prompt: std::sync::Mutex::new(None),
         startup_hints,
@@ -1605,6 +1730,8 @@ pub(crate) async fn spawn_session_actor(
             model_id: session_model_id,
             reasoning_effort: sampling_config.reasoning_effort,
             yolo_mode: session_yolo_mode,
+            ultra_orchestration,
+            ultra_child_counts,
             origin_client: origin_client.clone(),
             code_nav_enabled,
             ask_user_question_enabled,

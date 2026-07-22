@@ -1903,7 +1903,8 @@ impl SessionActor {
             None,
         )
         .await;
-        let tool_chat = ConversationItem::tool_result(call_id.to_string(), message);
+        let history_message = self.externalize_oversized_tool_result(message).await;
+        let tool_chat = ConversationItem::tool_result(call_id.to_string(), history_message);
         self.chat_state_handle.push_tool_result(tool_chat);
         Ok(())
     }
@@ -2029,6 +2030,90 @@ impl SessionActor {
                 had_commit_in_session: false,
             });
     }
+    async fn externalize_oversized_tool_result(&self, text: String) -> String {
+        use sha2::{Digest as _, Sha256};
+
+        let policy = crate::session::compaction_config::ContextPolicy::default();
+        let band = policy.band(if self.startup_hints.is_subagent {
+            crate::session::compaction_config::ContextSessionKind::Subagent
+        } else {
+            crate::session::compaction_config::ContextSessionKind::Main
+        });
+        if text.len() as u64 <= band.max_inline_tool_result_bytes {
+            return text;
+        }
+
+        fn excerpt(value: &str, from_end: bool) -> String {
+            const LIMIT: usize = 4_096;
+            if value.len() <= LIMIT {
+                return value.to_string();
+            }
+            if from_end {
+                let mut start = value.len().saturating_sub(LIMIT);
+                while !value.is_char_boundary(start) {
+                    start += 1;
+                }
+                value[start..].to_string()
+            } else {
+                let mut end = LIMIT;
+                while !value.is_char_boundary(end) {
+                    end -= 1;
+                }
+                value[..end].to_string()
+            }
+        }
+
+        let bytes = text.len() as u64;
+        let sha256 = format!("{:x}", Sha256::digest(text.as_bytes()));
+        let artifact_dir = self
+            .tool_context
+            .cwd
+            .join(".bandicot/artifacts/tool-results");
+        let artifact_path = artifact_dir.join(format!("{}.txt", uuid::Uuid::new_v4()));
+        let write_path = artifact_path.clone();
+        let payload = text.clone().into_bytes();
+        let write_result = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+            use std::io::Write as _;
+
+            std::fs::create_dir_all(&artifact_dir)?;
+            let mut options = std::fs::OpenOptions::new();
+            options.create_new(true).write(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt as _;
+                options.mode(0o600);
+            }
+            let mut file = options.open(&write_path)?;
+            file.write_all(&payload)?;
+            file.sync_all()?;
+            Ok(())
+        })
+        .await;
+
+        let (artifact, status) = match write_result {
+            Ok(Ok(())) => (Some(artifact_path.to_string()), "ok"),
+            Ok(Err(error)) => {
+                tracing::error!(%error, "failed to externalize oversized tool result");
+                (None, "artifact_write_failed")
+            }
+            Err(error) => {
+                tracing::error!(%error, "tool-result artifact writer failed");
+                (None, "artifact_writer_failed")
+            }
+        };
+        serde_json::json!({
+            "status": status,
+            "truncated": true,
+            "artifact_path": artifact,
+            "sha256": sha256,
+            "bytes": bytes,
+            "summary": "Oversized tool result was externalized. Read or query the artifact only if the omitted detail is needed.",
+            "head": excerpt(&text, false),
+            "tail": excerpt(&text, true),
+        })
+        .to_string()
+    }
+
     pub(super) async fn handle_bridge_tool_success(
         &self,
         tool_call_id: &acp::ToolCallId,
@@ -2221,6 +2306,7 @@ impl SessionActor {
                 pdf.total_pages,
             );
         }
+        prompt_text = self.externalize_oversized_tool_result(prompt_text).await;
         let tool_chat = if inline_images.is_empty() {
             ConversationItem::tool_result(call_id.to_string(), prompt_text)
         } else {
@@ -2321,7 +2407,8 @@ impl SessionActor {
             None,
         )
         .await;
-        let tool_chat = ConversationItem::tool_result(call_id.to_string(), message);
+        let history_message = self.externalize_oversized_tool_result(message).await;
+        let tool_chat = ConversationItem::tool_result(call_id.to_string(), history_message);
         self.chat_state_handle.push_tool_result(tool_chat);
         vec![]
     }

@@ -838,6 +838,12 @@ impl JsonlStorageAdapter {
             .new_model_id
             .map(acp::ModelId::new)
             .unwrap_or(source_summary.current_model_id);
+        let target_session_kind = options.session_kind.unwrap_or_else(|| "fork".to_string());
+        let ultra_orchestration = if target_session_kind.starts_with("subagent") {
+            crate::control_plane::agent_graph::UltraOrchestrationConfig::default()
+        } else {
+            source_summary.ultra_orchestration.normalized()
+        };
         let target_summary = crate::session::persistence::Summary {
             info: target_info.clone(),
             session_summary: source_summary.session_summary,
@@ -852,7 +858,7 @@ impl JsonlStorageAdapter {
             next_trace_turn: 0,
             chat_format_version: CHAT_FORMAT_VERSION,
             prompt_display_cwd: options.prompt_display_cwd,
-            session_kind: Some(options.session_kind.unwrap_or_else(|| "fork".to_string())),
+            session_kind: Some(target_session_kind),
             fork_context_source: options.fork_context_source,
             fork_parent_prompt_id: options.fork_parent_prompt_id,
             inherited_prefix_len,
@@ -871,6 +877,8 @@ impl JsonlStorageAdapter {
             agent_name: source_summary.agent_name,
             sandbox_profile: source_summary.sandbox_profile,
             reasoning_effort: source_summary.reasoning_effort,
+            fast_service_tier: source_summary.fast_service_tier,
+            ultra_orchestration,
         };
         let summary_bytes = serde_json::to_vec_pretty(&target_summary)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
@@ -1134,6 +1142,34 @@ impl StorageAdapter for JsonlStorageAdapter {
                     agent_name: agent_name.map(String::from),
                     reasoning_effort,
                 }),
+                ..Default::default()
+            },
+        )
+        .await
+    }
+    async fn update_ultra_orchestration(
+        &self,
+        info: &Info,
+        config: crate::control_plane::agent_graph::UltraOrchestrationConfig,
+    ) -> io::Result<()> {
+        self.apply_summary_patch(
+            info,
+            super::summary_write::SummaryPatch {
+                ultra_orchestration: Some(config),
+                ..Default::default()
+            },
+        )
+        .await
+    }
+    async fn update_fast_service_tier(
+        &self,
+        info: &Info,
+        requested: Option<xai_grok_sampling_types::ServiceTierPreference>,
+    ) -> io::Result<()> {
+        self.apply_summary_patch(
+            info,
+            super::summary_write::SummaryPatch {
+                fast_service_tier: Some(requested),
                 ..Default::default()
             },
         )
@@ -1516,7 +1552,38 @@ impl StorageAdapter for JsonlStorageAdapter {
         let path = dir.join(format!("{}.json", checkpoint.checkpoint_id));
         let bytes = serde_json::to_vec_pretty(checkpoint)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        tokio::fs::write(path, bytes).await
+        tokio::task::spawn_blocking(move || {
+            use std::io::Write as _;
+
+            let temp_path = dir.join(format!(".checkpoint-{}.tmp", uuid::Uuid::new_v4()));
+            let mut options = std::fs::OpenOptions::new();
+            options.create_new(true).write(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt as _;
+                options.mode(0o600);
+            }
+            let result = (|| -> io::Result<()> {
+                let mut file = options.open(&temp_path)?;
+                file.write_all(&bytes)?;
+                file.sync_all()?;
+                std::fs::rename(&temp_path, &path)?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt as _;
+                    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+                }
+                #[cfg(unix)]
+                std::fs::File::open(&dir)?.sync_all()?;
+                Ok(())
+            })();
+            if result.is_err() {
+                let _ = std::fs::remove_file(&temp_path);
+            }
+            result
+        })
+        .await
+        .map_err(io::Error::other)?
     }
     async fn write_compaction_request(
         &self,

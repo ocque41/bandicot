@@ -102,6 +102,10 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
         compaction_at_tokens: std::cell::Cell::new(None),
         doom_loop_recovery: None,
         doom_loop_turn_tally: Default::default(),
+        ultra_orchestration: std::sync::Arc::new(parking_lot::Mutex::new(
+            crate::control_plane::agent_graph::UltraOrchestrationConfig::default(),
+        )),
+        ultra_child_counts: Default::default(),
         file_state_tracker: Arc::new(FileStateTracker::new()),
         rewind_pending_prompt: std::sync::Mutex::new(None),
         startup_hints: StartupHints::default(),

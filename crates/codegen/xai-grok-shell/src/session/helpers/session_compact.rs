@@ -1597,6 +1597,8 @@ mod reasoning_compaction_regression_tests {
             transport: Default::default(),
             auth_scheme: Default::default(),
             capabilities: Default::default(),
+            effective_service_tier: Default::default(),
+            hosted_multi_agent: Default::default(),
             wire_quirks: Default::default(),
             extra_headers: Default::default(),
             context_window: 256_000,

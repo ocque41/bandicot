@@ -110,17 +110,15 @@ impl ApiKeyProvider for FallbackWrapper {
 
     fn current_api_key_async(
         &self,
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Option<String>> + Send + '_>,
-    > {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<String>> + Send + '_>> {
         self.provider.current_api_key_async()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::fallback_provider::{AuthScheme, ProviderEntry};
+    use super::*;
 
     fn test_providers() -> Vec<ProviderEntry> {
         vec![
@@ -159,7 +157,7 @@ mod tests {
     fn test_record_failure_switches_provider() {
         let provider = FallbackApiKeyProvider::new(test_providers());
         let wrapper = FallbackWrapper::new(provider);
-        
+
         assert_eq!(wrapper.current_provider_name(), Some("primary"));
         wrapper.record_failure(true, false); // Rate limit
         assert_eq!(wrapper.current_provider_name(), Some("fallback-1"));
@@ -181,7 +179,7 @@ mod tests {
                 {"name": "b", "api_key": "sk-b"}
             ]
         }"#;
-        
+
         let wrapper = FallbackWrapper::from_json(json).unwrap();
         assert_eq!(wrapper.current_api_key(), Some("sk-a".to_string()));
     }

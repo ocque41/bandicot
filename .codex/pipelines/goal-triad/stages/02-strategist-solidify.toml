@@ -1,0 +1,42 @@
+name = "strategist-solidify"
+order = 2
+assigned_agents = ["strategist-solidify"]
+assigned_packages = []
+required_skills = []
+acceptance_gates = ["gap_scan_read_or_absence_labeled", "architecture_ideas_are_goal_safe", "ideas_have_file_or_test_targets", "non_goals_preserved"]
+
+[assigned_agent_paths]
+"strategist-solidify" = "/Users/miguel/.codex/agents/strategist-solidify.toml"
+
+[[inputs]]
+name = "gap-scan-report"
+path = "/Users/miguel/Documents/bandicot/out/goal-triad/gap_scan.md"
+required = true
+truth_type = "stage_output"
+
+[[inputs]]
+name = "active-goal"
+path = "/Users/miguel/.codex/attachments/27a8a857-af32-4137-bc21-345c476d8df5/pasted-text.txt"
+required = true
+truth_type = "goal_contract"
+
+[[outputs]]
+name = "architecture-solidification-ideas"
+path = "/Users/miguel/Documents/bandicot/out/goal-triad/architecture_solidification_ideas.md"
+required = true
+
+[stage_manifest]
+path = "/Users/miguel/Documents/bandicot/out/goal-triad/stage_manifests/02-strategist-solidify.stage_manifest.json"
+format = "json"
+schema = "agent-pipeline.stage_manifest.v1"
+required_for_final_ready = true
+
+[blocker_policy]
+on_missing_input = "stop"
+on_failed_gate = "stop"
+on_agent_unavailable = "stop"
+
+[handoff_contract]
+summary = "Pass prioritized reliability ideas and blockers to sure-polish."
+next_stage = "sure-polish"
+required_evidence = ["architecture_solidification_ideas.md", "02-strategist-solidify.stage_manifest.json"]

@@ -19,8 +19,9 @@ use std::path::Path;
 use agent_client_protocol as acp;
 use chrono::{DateTime, Utc};
 use fs2::FileExt;
-use xai_grok_sampling_types::ReasoningEffort;
+use xai_grok_sampling_types::{ReasoningEffort, ServiceTierPreference};
 
+use crate::control_plane::agent_graph::UltraOrchestrationConfig;
 use crate::session::persistence::Summary;
 
 /// How a counter field changes. `Increment` is applied to the in-lock fresh
@@ -81,6 +82,8 @@ pub(crate) struct SummaryPatch {
     pub chat_format_version: Option<u8>,
     pub trace_turn: Option<TraceTurnPatch>,
     pub model: Option<ModelPatch>,
+    pub ultra_orchestration: Option<UltraOrchestrationConfig>,
+    pub fast_service_tier: Option<Option<ServiceTierPreference>>,
     pub git_head: Option<GitHeadPatch>,
     pub collection_id: Option<String>,
     /// Set the session title unconditionally (last-writer-wins). Used by the
@@ -137,6 +140,12 @@ impl Summary {
             if let Some(reasoning_effort) = &model.reasoning_effort {
                 self.reasoning_effort = *reasoning_effort;
             }
+        }
+        if let Some(config) = patch.ultra_orchestration {
+            self.ultra_orchestration = config.normalized();
+        }
+        if let Some(requested) = patch.fast_service_tier {
+            self.fast_service_tier = requested;
         }
         if let Some(git_head) = &patch.git_head {
             self.head_commit = git_head.commit.clone();

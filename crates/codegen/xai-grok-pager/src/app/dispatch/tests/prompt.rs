@@ -1,6 +1,7 @@
 //! Tests for prompt and bash submission, queueing, and interject shims.
 
 use super::*;
+use crate::app::dispatch::prompt::sanitize_prompt_history;
 
 /// Sending a prompt is a submit: it retires the active ephemeral tip.
 #[test]
@@ -2646,6 +2647,15 @@ fn slash_and_exit_input_does_not_trigger_project_picker() {
     assert!(!input_can_trigger_project_picker(":wq!"));
     assert!(!input_can_trigger_project_picker(""));
     assert!(!input_can_trigger_project_picker("   "));
+}
+
+#[test]
+fn connect_inline_key_is_redacted_before_prompt_history() {
+    assert_eq!(
+        sanitize_prompt_history("/connect add zen-a zen sk-private"),
+        "/connect add zen-a zen [REDACTED]"
+    );
+    assert_eq!(sanitize_prompt_history("/connect list"), "/connect list");
 }
 
 // ── Minimal-mode slash gate tests ───────────────────────────────────

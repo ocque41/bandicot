@@ -11,7 +11,8 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use xai_grok_sampling_types::{
     ApiBackend, CompactionAtTokens, CompactionsRemaining, DoomLoopRecoveryPolicy,
-    InferenceTransport, ReasoningEffort,
+    HostedMultiAgentCapability, HostedMultiAgentConfig, InferenceTransport, ReasoningEffort,
+    ResolvedServiceTier, ServiceTierCapabilities,
 };
 
 use crate::attribution::SharedAttributionCallback;
@@ -42,10 +43,17 @@ pub enum ReasoningResponseField {
     Reasoning,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProviderCapabilities {
     pub tools: bool,
     pub image_input: bool,
+    #[serde(default)]
+    pub service_tiers: ServiceTierCapabilities,
+    #[serde(default)]
+    pub hosted_multi_agent: HostedMultiAgentCapability,
+    /// Whether this route preserves OpenAI Responses prompt-cache fields.
+    #[serde(default)]
+    pub prompt_cache: bool,
 }
 
 impl Default for ProviderCapabilities {
@@ -53,6 +61,9 @@ impl Default for ProviderCapabilities {
         Self {
             tools: true,
             image_input: true,
+            service_tiers: ServiceTierCapabilities::default(),
+            hosted_multi_agent: HostedMultiAgentCapability::default(),
+            prompt_cache: false,
         }
     }
 }
@@ -113,6 +124,10 @@ pub struct SamplerConfig {
     pub auth_scheme: AuthScheme,
     #[serde(default)]
     pub capabilities: ProviderCapabilities,
+    #[serde(default)]
+    pub effective_service_tier: ResolvedServiceTier,
+    #[serde(default)]
+    pub hosted_multi_agent: HostedMultiAgentConfig,
     #[serde(default)]
     pub wire_quirks: WireQuirks,
     /// Extra request headers supplied by the caller. The sampler does not
@@ -199,6 +214,8 @@ impl Default for SamplerConfig {
             transport: InferenceTransport::default(),
             auth_scheme: AuthScheme::default(),
             capabilities: ProviderCapabilities::default(),
+            effective_service_tier: ResolvedServiceTier::default(),
+            hosted_multi_agent: HostedMultiAgentConfig::default(),
             wire_quirks: WireQuirks::default(),
             extra_headers: IndexMap::new(),
             context_window: 0,

@@ -113,7 +113,12 @@ fn opencode_go_profile_owns_one_credential_for_every_subscription_model() {
         "go profile must expose exactly its subscription models"
     );
     assert!(catalog["go-kimi-k3"].info.capabilities.image_input);
-    assert!(!catalog["go-deepseek-v4-flash"].info.capabilities.image_input);
+    assert!(
+        !catalog["go-deepseek-v4-flash"]
+            .info
+            .capabilities
+            .image_input
+    );
 }
 
 #[test]

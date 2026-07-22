@@ -1,5 +1,6 @@
 //! ACP slash command advertising and resolution.
 
+use crate::control_plane::agent_graph::{FastCommand, parse_fast_command};
 use agent_client_protocol as acp;
 use xai_grok_tools::implementations::skills::skill::format_skill_name;
 use xai_grok_tools::implementations::skills::types::SkillInfo;
@@ -42,7 +43,8 @@ pub(crate) enum BuiltinGate {
     Hooks,
     Plugins,
     Goal,
-    /// Account management for `/connect` — always available when accounts.json exists.
+    /// Legacy capability bit retained for wire compatibility. `/connect` is
+    /// always-on because it must be able to create the first account.
     Accounts,
 }
 
@@ -61,6 +63,14 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
                 Some(args.to_string())
             },
         },
+    },
+    BuiltinCommand {
+        name: "reload-prompts",
+        description: "Reload the runtime compaction prompt",
+        argument_hint: None,
+        aliases: &[],
+        gate: BuiltinGate::AlwaysOn,
+        resolve: |_| BuiltinAction::ReloadPrompts,
     },
     BuiltinCommand {
         name: "always-approve",
@@ -113,6 +123,46 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
         aliases: &[],
         gate: BuiltinGate::AlwaysOn,
         resolve: |_args| BuiltinAction::ContextInfo,
+    },
+    BuiltinCommand {
+        name: "fast",
+        description: "Set or show the OpenAI priority service tier for this session",
+        argument_hint: Some("on|off|status"),
+        aliases: &[],
+        gate: BuiltinGate::AlwaysOn,
+        resolve: |args| BuiltinAction::Fast {
+            command: parse_fast_command(args),
+        },
+    },
+    BuiltinCommand {
+        name: "ultra",
+        description: "Show Ultra orchestration status",
+        argument_hint: Some("status|on|off"),
+        aliases: &[],
+        gate: BuiltinGate::AlwaysOn,
+        resolve: |args| BuiltinAction::Ultra {
+            args: args.trim().to_string(),
+        },
+    },
+    BuiltinCommand {
+        name: "graph",
+        description: "Validate, preview, or manage AgentGraph runs",
+        argument_hint: Some("status|validate <path>|preview <path>|run|pause|drain|resume|cancel"),
+        aliases: &[],
+        gate: BuiltinGate::AlwaysOn,
+        resolve: |args| BuiltinAction::Graph {
+            args: args.trim().to_string(),
+        },
+    },
+    BuiltinCommand {
+        name: "swarm",
+        description: "Validate Swarm graphs or run the local exact-100 fake benchmark",
+        argument_hint: Some("status|benchmark --fake [--limit <n>]|validate <path>"),
+        aliases: &[],
+        gate: BuiltinGate::AlwaysOn,
+        resolve: |args| BuiltinAction::Swarm {
+            args: args.trim().to_string(),
+        },
     },
     BuiltinCommand {
         name: "hooks-trust",
@@ -261,26 +311,29 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
     BuiltinCommand {
         name: "connect",
         description: "Manage API accounts and provider fallback chain",
-        argument_hint: Some("[list|add <name> <provider> <key>|remove <name>|enable <name>|disable <name>|order <name> <pos>|status]"),
+        argument_hint: Some(
+            "[list|add <name> <provider> <key> [base-url] [models]|remove <name>|enable <name>|disable <name>|order <name> <pos>|status]",
+        ),
         aliases: &[],
-        gate: BuiltinGate::Accounts,
+        // Account management creates the first account, so it must never be
+        // gated on an accounts file or an already-running session.
+        gate: BuiltinGate::AlwaysOn,
         resolve: |args| {
             let trimmed = args.trim();
             if trimmed.is_empty() {
                 BuiltinAction::ConnectBrowse
             } else if let Some(rest) = trimmed.strip_prefix("add ") {
-                let parts: Vec<&str> = rest.splitn(3, ' ').collect();
-                match parts.as_slice() {
-                    [name, provider, key] => BuiltinAction::ConnectAdd {
-                        name: name.to_string(),
-                        provider: provider.to_string(),
-                        api_key: key.to_string(),
-                    },
-                    _ => BuiltinAction::ConnectAdd {
-                        name: String::new(),
-                        provider: String::new(),
-                        api_key: String::new(),
-                    },
+                let mut parts = rest.split_whitespace();
+                BuiltinAction::ConnectAdd {
+                    name: parts.next().unwrap_or_default().to_owned(),
+                    provider: parts.next().unwrap_or_default().to_owned(),
+                    api_key: parts.next().unwrap_or_default().to_owned(),
+                    base_url: parts.next().map(str::to_owned),
+                    models: parts
+                        .flat_map(|value| value.split(','))
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_owned)
+                        .collect(),
                 }
             } else if let Some(name) = trimmed.strip_prefix("remove ") {
                 BuiltinAction::ConnectRemove {
@@ -313,8 +366,58 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
                 }
             } else if trimmed == "status" {
                 BuiltinAction::ConnectStatus
+            } else if let Some(name) = trimmed.strip_prefix("refresh ") {
+                BuiltinAction::ConnectRefreshModels {
+                    name: name.trim().to_owned(),
+                }
+            } else if let Some(rest) = trimmed.strip_prefix("models ") {
+                let mut parts = rest.splitn(2, char::is_whitespace);
+                BuiltinAction::ConnectSetModels {
+                    name: parts.next().unwrap_or_default().trim().to_owned(),
+                    models: parts
+                        .next()
+                        .unwrap_or_default()
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|model| !model.is_empty())
+                        .map(str::to_owned)
+                        .collect(),
+                }
+            } else if let Some(rest) = trimmed.strip_prefix("fallback ") {
+                let mut parts = rest.splitn(2, char::is_whitespace);
+                BuiltinAction::ConnectFallback {
+                    operation: parts.next().unwrap_or_default().trim().to_owned(),
+                    route_id: parts.next().unwrap_or_default().trim().to_owned(),
+                }
             } else {
                 BuiltinAction::ConnectBrowse
+            }
+        },
+    },
+    BuiltinCommand {
+        name: "models",
+        description: "Browse account/model routes or select one for this session",
+        argument_hint: Some("[account-id::model-id]"),
+        aliases: &[],
+        gate: BuiltinGate::AlwaysOn,
+        resolve: |args| {
+            let route_id = args.trim();
+            if route_id.is_empty() {
+                BuiltinAction::ModelsBrowse
+            } else if let Some(route_id) = route_id.strip_prefix("favorite ") {
+                BuiltinAction::ModelsFavorite {
+                    route_id: route_id.trim().to_owned(),
+                    favorite: true,
+                }
+            } else if let Some(route_id) = route_id.strip_prefix("unfavorite ") {
+                BuiltinAction::ModelsFavorite {
+                    route_id: route_id.trim().to_owned(),
+                    favorite: false,
+                }
+            } else {
+                BuiltinAction::ModelsSelect {
+                    route_id: route_id.to_owned(),
+                }
             }
         },
     },
@@ -449,7 +552,7 @@ pub(crate) struct CommandAvailability {
     pub hooks: bool,
     pub plugins: bool,
     pub goal: bool,
-    /// Account management for `/connect` — always available when accounts.json exists.
+    /// Legacy account capability bit. The command itself is always-on.
     pub accounts: bool,
 }
 
@@ -680,12 +783,25 @@ pub(super) enum BuiltinAction {
     Compact {
         user_context: Option<String>,
     },
+    ReloadPrompts,
     SetYolo {
         enabled: bool,
     },
     FlushMemory,
     Dream,
     ContextInfo,
+    Fast {
+        command: FastCommand,
+    },
+    Ultra {
+        args: String,
+    },
+    Graph {
+        args: String,
+    },
+    Swarm {
+        args: String,
+    },
     HooksTrust,
     HooksList,
     HooksAdd {
@@ -733,11 +849,13 @@ pub(super) enum BuiltinAction {
     GoalClear,
     /// Open interactive account picker.
     ConnectBrowse,
-    /// Add a new account: `/connect add <name> <provider> <key>`.
+    /// Add a new account, optionally with a custom endpoint and model allowlist.
     ConnectAdd {
         name: String,
         provider: String,
         api_key: String,
+        base_url: Option<String>,
+        models: Vec<String>,
     },
     /// Remove an account: `/connect remove <name>`.
     ConnectRemove {
@@ -760,16 +878,40 @@ pub(super) enum BuiltinAction {
     },
     /// Show health status of all accounts: `/connect status`.
     ConnectStatus,
+    ConnectRefreshModels {
+        name: String,
+    },
+    ConnectSetModels {
+        name: String,
+        models: Vec<String>,
+    },
+    ConnectFallback {
+        operation: String,
+        route_id: String,
+    },
+    ModelsBrowse,
+    ModelsSelect {
+        route_id: String,
+    },
+    ModelsFavorite {
+        route_id: String,
+        favorite: bool,
+    },
 }
 
 impl BuiltinAction {
     pub(crate) fn command_name(&self) -> &'static str {
         match self {
             BuiltinAction::Compact { .. } => "compact",
+            BuiltinAction::ReloadPrompts => "reload-prompts",
             BuiltinAction::SetYolo { .. } => "yolo",
             BuiltinAction::FlushMemory => "flush",
             BuiltinAction::Dream => "dream",
             BuiltinAction::ContextInfo => "context",
+            BuiltinAction::Fast { .. } => "fast",
+            BuiltinAction::Ultra { .. } => "ultra",
+            BuiltinAction::Graph { .. } => "graph",
+            BuiltinAction::Swarm { .. } => "swarm",
             BuiltinAction::HooksTrust => "hooks-trust",
             BuiltinAction::HooksList => "hooks-list",
             BuiltinAction::HooksAdd { .. } => "hooks-add",
@@ -799,17 +941,28 @@ impl BuiltinAction {
             | BuiltinAction::ConnectEnable { .. }
             | BuiltinAction::ConnectDisable { .. }
             | BuiltinAction::ConnectOrder { .. }
-            | BuiltinAction::ConnectStatus => "connect",
+            | BuiltinAction::ConnectStatus
+            | BuiltinAction::ConnectRefreshModels { .. }
+            | BuiltinAction::ConnectSetModels { .. }
+            | BuiltinAction::ConnectFallback { .. } => "connect",
+            BuiltinAction::ModelsBrowse
+            | BuiltinAction::ModelsSelect { .. }
+            | BuiltinAction::ModelsFavorite { .. } => "models",
         }
     }
 
     pub(crate) fn args_provided(&self) -> bool {
         match self {
             BuiltinAction::Compact { user_context } => user_context.is_some(),
+            BuiltinAction::ReloadPrompts => false,
             BuiltinAction::SetYolo { .. } => true,
             BuiltinAction::FlushMemory => false,
             BuiltinAction::Dream => false,
             BuiltinAction::ContextInfo => false,
+            BuiltinAction::Fast { command } => !matches!(command, FastCommand::Status),
+            BuiltinAction::Ultra { args }
+            | BuiltinAction::Graph { args }
+            | BuiltinAction::Swarm { args } => !args.is_empty(),
             BuiltinAction::HooksTrust => false,
             BuiltinAction::HooksList => false,
             BuiltinAction::HooksAdd { .. } => true,
@@ -840,6 +993,11 @@ impl BuiltinAction {
             BuiltinAction::ConnectDisable { .. } => true,
             BuiltinAction::ConnectOrder { .. } => true,
             BuiltinAction::ConnectStatus => false,
+            BuiltinAction::ConnectRefreshModels { .. }
+            | BuiltinAction::ConnectSetModels { .. }
+            | BuiltinAction::ConnectFallback { .. } => true,
+            BuiltinAction::ModelsBrowse => false,
+            BuiltinAction::ModelsSelect { .. } | BuiltinAction::ModelsFavorite { .. } => true,
         }
     }
 }
@@ -1413,6 +1571,27 @@ mod tests {
     }
 
     #[test]
+    fn connect_is_advertised_before_accounts_or_session_capabilities_exist() {
+        let commands = all_commands(&[], CommandAvailability::default());
+        assert!(commands.iter().any(|command| command.name() == "connect"));
+    }
+
+    #[test]
+    fn connect_resolves_to_builtin_and_never_becomes_model_input() {
+        let outcome = resolve(
+            vec![text_block("/connect")],
+            &[],
+            CommandAvailability::default(),
+            SkillSlashRewrite::default(),
+        )
+        .expect_err("/connect must be consumed by the shell");
+        assert!(matches!(
+            outcome,
+            SlashCommandOutcome::Builtin(BuiltinAction::ConnectBrowse)
+        ));
+    }
+
+    #[test]
     fn always_approve_parses_on_off() {
         for arg in ["", "on", "true", "1", "yes", "enable"] {
             assert!(
@@ -1476,6 +1655,82 @@ mod tests {
             outcome,
             SlashCommandOutcome::Builtin(BuiltinAction::SessionInfo)
         ));
+    }
+
+    #[test]
+    fn control_plane_commands_resolve_to_builtins() {
+        let cases = [
+            "/fast on",
+            "/fast status",
+            "/ultra status",
+            "/graph validate file",
+            "/swarm benchmark --fake",
+        ];
+
+        for input in cases {
+            let outcome = resolve(
+                vec![text_block(input)],
+                &[],
+                all_gated(),
+                SkillSlashRewrite::default(),
+            )
+            .unwrap_err();
+            assert!(
+                matches!(outcome, SlashCommandOutcome::Builtin(_)),
+                "{input} should resolve to a shell builtin"
+            );
+        }
+    }
+
+    #[test]
+    fn control_plane_builtin_args_are_preserved() {
+        let cases: [(&str, fn(SlashCommandOutcome) -> bool); 5] = [
+            ("/fast on", |outcome| {
+                matches!(
+                    outcome,
+                    SlashCommandOutcome::Builtin(BuiltinAction::Fast {
+                        command: FastCommand::On
+                    })
+                )
+            }),
+            ("/fast status", |outcome| {
+                matches!(
+                    outcome,
+                    SlashCommandOutcome::Builtin(BuiltinAction::Fast {
+                        command: FastCommand::Status
+                    })
+                )
+            }),
+            ("/ultra status", |outcome| {
+                matches!(
+                    outcome,
+                    SlashCommandOutcome::Builtin(BuiltinAction::Ultra { args }) if args == "status"
+                )
+            }),
+            ("/graph validate file", |outcome| {
+                matches!(
+                    outcome,
+                    SlashCommandOutcome::Builtin(BuiltinAction::Graph { args }) if args == "validate file"
+                )
+            }),
+            ("/swarm benchmark --fake", |outcome| {
+                matches!(
+                    outcome,
+                    SlashCommandOutcome::Builtin(BuiltinAction::Swarm { args }) if args == "benchmark --fake"
+                )
+            }),
+        ];
+
+        for (input, expected) in cases {
+            let outcome = resolve(
+                vec![text_block(input)],
+                &[],
+                all_gated(),
+                SkillSlashRewrite::default(),
+            )
+            .unwrap_err();
+            assert!(expected(outcome), "{input} should preserve builtin args");
+        }
     }
 
     #[test]

@@ -12,6 +12,7 @@ pub mod cd;
 pub mod compact;
 pub mod compact_mode;
 pub mod config_agents;
+pub mod connect;
 pub mod context;
 pub mod copy;
 pub mod dashboard;
@@ -22,10 +23,12 @@ pub mod effort_levels;
 pub mod exit;
 pub mod expand;
 pub mod export;
+pub mod fast;
 pub mod feedback;
 pub mod find;
 pub mod fork;
 pub mod gboom;
+pub mod graph;
 pub mod help;
 pub mod history;
 pub mod home;
@@ -38,6 +41,7 @@ pub mod logout;
 pub mod loop_cmd;
 pub mod mcps;
 pub mod model;
+pub mod models;
 pub mod multiline;
 pub mod new;
 pub mod personas;
@@ -56,6 +60,7 @@ pub mod scroll_debug;
 pub mod session_info;
 pub mod settings_cmd;
 pub mod share;
+pub mod swarm;
 pub mod tasks;
 pub mod terminal_setup;
 pub mod theme;
@@ -63,12 +68,22 @@ pub mod timeline;
 pub mod timestamps;
 pub mod toggle_mouse_reporting;
 pub mod transcript;
+pub mod ultra;
 pub mod usage;
 pub mod view_plan;
 pub mod vim_mode;
 pub mod voice;
 use super::command::SlashCommand;
 use std::sync::Arc;
+
+pub(super) fn raw_command_text(name: &str, args: &str) -> String {
+    if args.trim().is_empty() {
+        format!("/{name}")
+    } else {
+        format!("/{name} {args}")
+    }
+}
+
 /// All pager-local builtin commands, in display order.
 ///
 /// This is the single source of truth for the builtin command set.
@@ -89,14 +104,20 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(transcript::TranscriptCommand),
         Arc::new(expand::ExpandCommand),
         Arc::new(context::ContextCommand),
+        Arc::new(fast::FastCommand),
+        Arc::new(ultra::UltraCommand),
+        Arc::new(graph::GraphCommand),
+        Arc::new(swarm::SwarmCommand),
         Arc::new(screen_mode_switch::ScreenModeSwitchCommand::minimal()),
         Arc::new(screen_mode_switch::ScreenModeSwitchCommand::fullscreen()),
         Arc::new(model::ModelCommand),
+        Arc::new(models::ModelsCommand),
         Arc::new(effort::EffortCommand),
         Arc::new(always_approve::AlwaysApproveCommand),
         Arc::new(auto::AutoCommand),
         Arc::new(multiline::MultilineCommand),
         Arc::new(compact_mode::CompactModeCommand),
+        Arc::new(connect::ConnectCommand),
         Arc::new(vim_mode::VimModeCommand),
         Arc::new(plugin::HooksCommand),
         Arc::new(plugin::PluginsCommand),
@@ -148,7 +169,7 @@ mod tests {
     use super::*;
     use crate::acp::model_state::ModelState;
     use crate::app::actions::Action;
-    use crate::slash::command::{CommandExecCtx, CommandResult};
+    use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
     use crate::slash::registry::CommandRegistry;
     use agent_client_protocol as acp;
     /// Build a ModelState with two models for testing.
@@ -200,6 +221,10 @@ mod tests {
         assert!(reg.get("model").is_some());
         assert!(reg.get("home").is_some());
         assert!(reg.get("view-plan").is_some());
+        assert!(reg.get("fast").is_some());
+        assert!(reg.get("ultra").is_some());
+        assert!(reg.get("graph").is_some());
+        assert!(reg.get("swarm").is_some());
         reg.set_available_tools(std::collections::HashSet::from([
             "scheduler_create".to_string()
         ]));
@@ -312,6 +337,35 @@ mod tests {
         match result {
             CommandResult::QueueCommand(text) => assert_eq!(text, "/compact"),
             other => panic!("expected QueueCommand, got {other:?}"),
+        }
+    }
+    #[test]
+    fn agent_graph_commands_pass_raw_text_to_shell() {
+        let models = ModelState::default();
+        let mut ctx = make_ctx(&models);
+
+        let cases: [(&dyn SlashCommand, &str, &str); 6] = [
+            (&fast::FastCommand, "on", "/fast on"),
+            (&fast::FastCommand, "status", "/fast status"),
+            (&ultra::UltraCommand, "status", "/ultra status"),
+            (
+                &graph::GraphCommand,
+                "validate file",
+                "/graph validate file",
+            ),
+            (
+                &swarm::SwarmCommand,
+                "benchmark --fake",
+                "/swarm benchmark --fake",
+            ),
+            (&swarm::SwarmCommand, "   ", "/swarm"),
+        ];
+
+        for (cmd, args, expected) in cases {
+            match cmd.run(&mut ctx, args) {
+                CommandResult::PassThrough(text) => assert_eq!(text, expected),
+                other => panic!("expected PassThrough for /{}, got {other:?}", cmd.name()),
+            }
         }
     }
     /// Bare `/model <name>` → `SetDefaultModel` (switch + persist).

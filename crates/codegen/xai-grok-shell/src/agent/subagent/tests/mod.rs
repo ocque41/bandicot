@@ -359,7 +359,14 @@ async fn running_gauge_tracks_pending_and_active() {
     let mut coordinator = SubagentCoordinator::new();
     let gauge = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     coordinator.set_running_gauge(gauge.clone());
+    let root_counts = std::sync::Arc::new(SharedChildCounts::default());
+    let empty_parent_counts = std::sync::Arc::new(SharedChildCounts::default());
+    coordinator.register_child_count_observer(
+        "parent-session".to_string(), root_counts.clone());
+    coordinator.register_child_count_observer(
+        String::new(), empty_parent_counts.clone());
     assert_eq!(gauge.load(Ordering::Relaxed), 0);
+    assert_eq!(root_counts.snapshot(), (0, 0));
     coordinator
         .insert_pending(PendingSubagent {
             subagent_id: "sub-gauge".to_string(),
@@ -375,11 +382,14 @@ async fn running_gauge_tracks_pending_and_active() {
             cancel_token: CancellationToken::new(),
         });
     assert_eq!(gauge.load(Ordering::Relaxed), 1, "pending counts as running");
+    assert_eq!(empty_parent_counts.snapshot(), (0, 1));
     coordinator
         .insert(
             dummy_tracker("sub-gauge", "parent-session", "general-purpose", "gauge task"),
         );
     assert_eq!(gauge.load(Ordering::Relaxed), 1, "active counts as running");
+    assert_eq!(root_counts.snapshot(), (1, 0));
+    assert_eq!(empty_parent_counts.snapshot(), (0, 0));
     coordinator
         .move_to_completed(
             "sub-gauge",
@@ -389,6 +399,7 @@ async fn running_gauge_tracks_pending_and_active() {
             None,
         );
     assert_eq!(gauge.load(Ordering::Relaxed), 0, "completed does not count");
+    assert_eq!(root_counts.snapshot(), (0, 0));
     coordinator
         .insert_pending(PendingSubagent {
             subagent_id: "sub-gauge-2".to_string(),
@@ -1242,6 +1253,10 @@ fn dummy_tracker(
         model_id: acp::ModelId::new("test"),
         reasoning_effort: None,
         yolo_mode: false,
+        ultra_orchestration: Arc::new(parking_lot::Mutex::new(
+            crate::control_plane::agent_graph::UltraOrchestrationConfig::default(),
+        )),
+        ultra_child_counts: Default::default(),
         origin_client: None,
         code_nav_enabled: false,
         ask_user_question_enabled: true,
@@ -1406,6 +1421,83 @@ fn no_role_no_override_returns_none() {
     assert!(resolved.capability_mode.is_none());
     assert!(resolved.reasoning_effort.is_none());
 }
+
+#[test]
+fn runtime_sampling_override_standard_wins_over_parent_fast() {
+    let mut config = ctx_with_toggle(HashMap::new()).sampling_config;
+    config.capabilities.service_tiers.priority = true;
+    config.effective_service_tier =
+        xai_grok_sampler::ResolvedServiceTier::fast(xai_grok_sampler::ServiceTierSource::Session);
+    config.capabilities.hosted_multi_agent = xai_grok_sampler::HostedMultiAgentCapability {
+        supported: true,
+        max_concurrent_subagents: Some(8),
+    };
+    config.hosted_multi_agent = xai_grok_sampling_types::HostedMultiAgentConfig {
+        enabled: true,
+        max_concurrent_subagents: Some(8),
+    };
+
+    let overrides = SubagentRuntimeOverrides {
+        service_tier: Some(xai_tool_types::SubagentServiceTierPreference::Standard),
+        hosted_multi_agent: Some(false),
+        ..Default::default()
+    };
+
+    apply_runtime_sampling_overrides(&mut config, &overrides);
+
+    assert_eq!(
+        config.effective_service_tier.requested,
+        xai_grok_sampler::ServiceTierPreference::Standard
+    );
+    assert_eq!(
+        config.effective_service_tier.effective,
+        xai_grok_sampler::EffectiveServiceTier::Standard
+    );
+    assert!(config.effective_service_tier.supported);
+    assert!(!config.hosted_multi_agent.enabled);
+}
+
+#[test]
+fn default_runtime_sampling_overrides_preserve_parent_sampling_config() {
+    let mut config = ctx_with_toggle(HashMap::new()).sampling_config;
+    config.capabilities.service_tiers.priority = true;
+    config.effective_service_tier =
+        xai_grok_sampler::ResolvedServiceTier::fast(xai_grok_sampler::ServiceTierSource::Session);
+    config.hosted_multi_agent = xai_grok_sampling_types::HostedMultiAgentConfig {
+        enabled: true,
+        max_concurrent_subagents: Some(4),
+    };
+    let before_tier = config.effective_service_tier.clone();
+    let before_hosted = config.hosted_multi_agent;
+
+    apply_runtime_sampling_overrides(&mut config, &SubagentRuntimeOverrides::default());
+
+    assert_eq!(config.effective_service_tier, before_tier);
+    assert_eq!(config.hosted_multi_agent, before_hosted);
+}
+
+#[test]
+fn runtime_sampling_fast_override_uses_child_provider_capability() {
+    let mut config = ctx_with_toggle(HashMap::new()).sampling_config;
+    config.capabilities.service_tiers.priority = false;
+    let overrides = SubagentRuntimeOverrides {
+        service_tier: Some(xai_tool_types::SubagentServiceTierPreference::Fast),
+        ..Default::default()
+    };
+
+    apply_runtime_sampling_overrides(&mut config, &overrides);
+
+    assert_eq!(
+        config.effective_service_tier.requested,
+        xai_grok_sampler::ServiceTierPreference::Fast
+    );
+    assert_eq!(
+        config.effective_service_tier.effective,
+        xai_grok_sampler::EffectiveServiceTier::Standard
+    );
+    assert!(!config.effective_service_tier.supported);
+}
+
 #[test]
 fn partial_override_fills_from_role() {
     let overrides = SubagentRuntimeOverrides {
@@ -2532,6 +2624,34 @@ fn summarize_tool_config_uses_name_override_and_strips_namespace() {
     assert_eq!(summary.tool_names.len(), 2);
 }
 #[test]
+fn ultra_flag_and_existing_depth_limit_both_strip_recursive_task_tool() {
+    use super::handle_request::enforce_depth_one_tool_restriction;
+    use xai_grok_tools::registry::types::{ToolConfig, ToolServerConfig};
+    use xai_grok_tools::types::tool::ToolKind;
+
+    let mut task = ToolConfig::from_id("GrokBuild:task");
+    task.kind = Some(ToolKind::Task);
+    let mut read = ToolConfig::from_id("GrokBuild:read_file");
+    read.kind = Some(ToolKind::Read);
+    let base = ToolServerConfig {
+        tools: vec![task, read],
+        behavior_preset: None,
+    };
+
+    let mut standard = base.clone();
+    assert!(!enforce_depth_one_tool_restriction(&mut standard, false, 0));
+    assert!(standard.tools.iter().any(|tool| tool.kind == Some(ToolKind::Task)));
+
+    let mut ultra = base.clone();
+    assert!(enforce_depth_one_tool_restriction(&mut ultra, true, 0));
+    assert!(!ultra.tools.iter().any(|tool| tool.kind == Some(ToolKind::Task)));
+    assert!(ultra.tools.iter().any(|tool| tool.kind == Some(ToolKind::Read)));
+
+    let mut standard_child = base;
+    assert!(enforce_depth_one_tool_restriction(&mut standard_child, false, 1));
+    assert!(!standard_child.tools.iter().any(|tool| tool.kind == Some(ToolKind::Task)));
+}
+#[test]
 fn describe_subagent_type_unknown_returns_sorted_available() {
     let ctx = ctx_with_toggle(HashMap::new());
     match describe_subagent_type("totally-invented-type", None, &ctx) {
@@ -3463,6 +3583,8 @@ fn test_sampling_config(model_slug: &str) -> xai_grok_sampling_types::SamplingCo
         top_p: None,
         api_backend: Default::default(),
         extra_headers: Default::default(),
+        effective_service_tier: Default::default(),
+        hosted_multi_agent: Default::default(),
         context_window: NonZeroU64::new(256_000).expect("non-zero context window"),
         reasoning_effort: None,
         stream_tool_calls: None,

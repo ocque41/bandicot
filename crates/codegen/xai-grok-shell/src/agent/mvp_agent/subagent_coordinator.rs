@@ -313,6 +313,9 @@ impl MvpAgent {
             parent_cwd,
             yolo_mode,
             parent_depth,
+            ultra_depth_one,
+            ultra_max_children,
+            ultra_child_counts,
             hunk_tracker_handle,
             hunk_tracking_enabled,
             fs,
@@ -333,6 +336,12 @@ impl MvpAgent {
                     .unwrap_or_default(),
                 ps.map(|h| h.yolo_mode).unwrap_or(self.default_yolo_mode),
                 ps.map(|h| h.tool_context.subagent_depth).unwrap_or(0),
+                ps.is_some_and(|h| h.ultra_orchestration.lock().enabled),
+                ps.and_then(|h| {
+                    let config = h.ultra_orchestration.lock();
+                    config.enabled.then_some(config.max_children)
+                }),
+                ps.map(|h| h.ultra_child_counts.clone()),
                 ps.map(|h| h.tool_context.hunk_tracker_handle.clone())
                     .unwrap_or_else(xai_hunk_tracker::HunkTrackerHandle::noop),
                 ps.map(|h| h.tool_context.hunk_tracking_enabled)
@@ -358,6 +367,10 @@ impl MvpAgent {
                 ps.map(|h| h.managed_mcp_proxy_base_url.clone()),
             )
         };
+        let ultra_child_counts = ultra_child_counts?;
+        self.subagent_coordinator
+            .borrow_mut()
+            .register_child_count_observer(parent_session_id.to_string(), ultra_child_counts);
         let (
             parent_workspace_ops,
             parent_terminal_backend,
@@ -454,6 +467,8 @@ impl MvpAgent {
             yolo_mode,
             subagent_event_tx: self.subagent_event_tx.clone(),
             parent_depth,
+            ultra_depth_one,
+            ultra_max_children,
             inference_idle_timeout_secs,
             auto_compact_threshold_tiers:
                 crate::agent::subagent::AutoCompactThresholdTiers::capture(&self.cfg.borrow()),

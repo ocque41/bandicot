@@ -573,6 +573,11 @@ pub enum Action {
     /// Open the settings modal (F2, `/settings`, command palette).
     /// If already open, closes it instead of stacking.
     OpenSettings,
+    /// Open the pager-local provider-account view. Text `/connect`
+    /// subcommands continue through ACP to the shell.
+    OpenConnect,
+    /// Open the pager-local account/model route browser.
+    OpenModels,
     /// Open the command palette (`/help`). The keybinding path (Ctrl+P) opens it
     /// directly in `handle_agent_action`; this lets a slash command reach the
     /// same modal through dispatch.

@@ -20,7 +20,9 @@ use std::sync::Arc;
 
 use educe::Educe;
 use tokio::sync::{mpsc, oneshot};
-use xai_tool_types::{SubagentCapabilityMode, SubagentIsolationMode, WaitMode};
+use xai_tool_types::{
+    SubagentCapabilityMode, SubagentIsolationMode, SubagentServiceTierPreference, WaitMode,
+};
 
 use crate::register_resource;
 
@@ -96,6 +98,12 @@ pub struct SubagentRuntimeOverrides {
     /// Isolation mode for child execution environment.
     /// `None` means "use role/persona default" (which itself defaults to `None`/shared workspace).
     pub isolation: Option<SubagentIsolationMode>,
+    /// Service-tier preference for the child sampler.
+    /// `None` means "use the already-resolved child sampling config".
+    pub service_tier: Option<SubagentServiceTierPreference>,
+    /// Provider-hosted multi-agent toggle for the child sampler.
+    /// `None` means "use the existing child sampling default".
+    pub hosted_multi_agent: Option<bool>,
     /// `/goal`-only harness override: the `agent_type` (e.g. `"cursor"`,
     /// `"grok-build-plan"`) whose `AgentDefinition` decides the child's harness
     /// flavor — system prompt + toolset — applied

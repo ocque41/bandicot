@@ -169,6 +169,12 @@ pub(crate) struct SubagentSpawnContext {
     pub yolo_mode: bool,
     pub subagent_event_tx: mpsc::UnboundedSender<SubagentEvent>,
     pub parent_depth: u32,
+    /// Ultra roots force every spawned child to depth one and remove the task
+    /// tool so children cannot recursively delegate.
+    pub ultra_depth_one: bool,
+    /// Active+pending child ceiling when Ultra is effective. `None` keeps the
+    /// existing Standard-mode spawning behavior.
+    pub ultra_max_children: Option<u32>,
     /// Inference idle timeout (secs), resolved from the parent's model config at spawn-context creation time.
     pub inference_idle_timeout_secs: u64,
     /// Tier inputs for resolving `auto_compact_threshold_percent` at
@@ -548,6 +554,27 @@ struct FailureCompletion<'a> {
 /// `start_subagent_coordinator`).
 pub(crate) type BlockWaitSlot =
     std::rc::Rc<std::cell::RefCell<Option<oneshot::Sender<Option<SubagentSnapshot>>>>>;
+/// Per-root live child counts shared with the session actor for `/ultra status`.
+/// The coordinator remains the source of truth and recomputes both values after
+/// every pending/active lifecycle mutation.
+#[derive(Default)]
+pub(crate) struct SharedChildCounts {
+    packed: std::sync::atomic::AtomicU64,
+}
+impl SharedChildCounts {
+    pub(crate) fn snapshot(&self) -> (usize, usize) {
+        use std::sync::atomic::Ordering;
+        let packed = self.packed.load(Ordering::Acquire);
+        ((packed >> 32) as usize, (packed & u32::MAX as u64) as usize)
+    }
+    fn store(&self, active: usize, pending: usize) {
+        use std::sync::atomic::Ordering;
+        let active = u32::try_from(active).unwrap_or(u32::MAX);
+        let pending = u32::try_from(pending).unwrap_or(u32::MAX);
+        let packed = (u64::from(active) << 32) | u64::from(pending);
+        self.packed.store(packed, Ordering::Release);
+    }
+}
 /// Owns the active-subagent map and completed-result cache.
 /// Stored as a field on `MvpAgent`.
 ///
@@ -578,6 +605,8 @@ pub(crate) struct SubagentCoordinator {
     /// [`crate::agent::activity::AgentActivity::is_busy`] to defer leader
     /// auto-update shutdown while subagents are in flight.
     running_gauge: Arc<std::sync::atomic::AtomicUsize>,
+    /// Root session id → shared live-count observer used by status output.
+    child_count_observers: HashMap<String, std::sync::Weak<SharedChildCounts>>,
     /// subagent_id → live blocking-query reply slots. Registered together
     /// with `block_waited` so the completion handler can verify at decision
     /// time that a waiter is actually able to receive the result (a
@@ -866,6 +895,52 @@ async fn resolve_effective_model_config(
     }
     resolve_subagent_sampling_config(subagent_type, definition_model, ctx).await
 }
+
+fn map_subagent_service_tier_preference(
+    preference: xai_tool_types::SubagentServiceTierPreference,
+) -> xai_grok_sampler::ServiceTierPreference {
+    match preference {
+        xai_tool_types::SubagentServiceTierPreference::Inherit => {
+            xai_grok_sampler::ServiceTierPreference::Inherit
+        }
+        xai_tool_types::SubagentServiceTierPreference::Standard => {
+            xai_grok_sampler::ServiceTierPreference::Standard
+        }
+        xai_tool_types::SubagentServiceTierPreference::Fast => {
+            xai_grok_sampler::ServiceTierPreference::Fast
+        }
+    }
+}
+
+fn apply_runtime_sampling_overrides(
+    config: &mut xai_grok_sampler::SamplerConfig,
+    overrides: &SubagentRuntimeOverrides,
+) {
+    if let Some(preference) = overrides.service_tier {
+        let requested = map_subagent_service_tier_preference(preference);
+        if requested != xai_grok_sampler::ServiceTierPreference::Inherit {
+            config.effective_service_tier = xai_grok_sampling_types::resolve_service_tier(
+                requested,
+                &config.capabilities.service_tiers,
+                xai_grok_sampler::ServiceTierSource::BuiltIn,
+            );
+        }
+    }
+
+    if let Some(enabled) = overrides.hosted_multi_agent {
+        config.hosted_multi_agent = if enabled && config.capabilities.hosted_multi_agent.supported {
+            xai_grok_sampling_types::HostedMultiAgentConfig {
+                enabled: true,
+                max_concurrent_subagents: config
+                    .capabilities
+                    .hosted_multi_agent
+                    .max_concurrent_subagents,
+            }
+        } else {
+            Default::default()
+        };
+    }
+}
 /// Report credential presence without exposing any credential material.
 fn has_credential(key: &Option<String>) -> bool {
     key.as_deref().is_some_and(|value| !value.is_empty())
@@ -923,7 +998,9 @@ async fn read_parent_sampling_config(
                 api_backend: cfg.api_backend,
                 transport: provider_facts.transport,
                 auth_scheme: provider_facts.auth_scheme,
-                capabilities: provider_facts.capabilities,
+                capabilities: provider_facts.capabilities.clone(),
+                effective_service_tier: cfg.effective_service_tier.clone(),
+                hosted_multi_agent: Default::default(),
                 wire_quirks: provider_facts.wire_quirks,
                 extra_headers,
                 context_window: cfg.context_window.get(),

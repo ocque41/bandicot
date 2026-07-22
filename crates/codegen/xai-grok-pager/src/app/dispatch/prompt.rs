@@ -307,6 +307,20 @@ pub(super) fn input_can_trigger_project_picker(text: &str) -> bool {
         && !matches!(t, "exit" | "quit" | ":q" | ":q!" | ":wq" | ":wq!")
 }
 
+/// Remove legacy inline credentials before a command enters local prompt
+/// history. The command itself is still sent unchanged to the shell.
+pub(super) fn sanitize_prompt_history(text: &str) -> String {
+    let mut parts = text.split_whitespace();
+    if matches!(parts.next(), Some("/connect"))
+        && matches!(parts.next(), Some("add"))
+        && let (Some(name), Some(provider), Some(_secret)) =
+            (parts.next(), parts.next(), parts.next())
+    {
+        return format!("/connect add {name} {provider} [REDACTED]");
+    }
+    text.to_owned()
+}
+
 /// Body of [`dispatch_send_prompt`], parameterized over whether to consume
 /// the prompt textarea after the command is processed.
 ///
@@ -821,13 +835,14 @@ pub(super) fn dispatch_send_prompt_inner(
         if !consume_input {
             effects.extend(maybe_drain_queue(agent));
         } else {
-            let trimmed_key = text.trim().to_string();
+            let history_text = sanitize_prompt_history(&text);
+            let trimmed_key = history_text.trim().to_string();
             if !trimmed_key.is_empty() {
                 agent
                     .session
                     .prompt_history
                     .retain(|p| p.trim() != trimmed_key);
-                agent.session.prompt_history.insert(0, text.clone());
+                agent.session.prompt_history.insert(0, history_text);
                 if agent.session.prompt_history.len() > 200 {
                     agent.session.prompt_history.truncate(200);
                 }

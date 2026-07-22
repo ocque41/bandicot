@@ -6,6 +6,7 @@ use crate::session::storage::{CopySessionOptions, SessionUpdate};
 use crate::tools::todo::TodoState;
 use agent_client_protocol as acp;
 use tempfile::TempDir;
+use xai_grok_sampling_types::ServiceTierPreference;
 fn create_test_info() -> Info {
     Info {
         id: acp::SessionId::new("test-session-123"),
@@ -68,6 +69,33 @@ async fn write_compaction_segment_numbers_and_indexes_resume_safely() {
     let index = read("INDEX.md");
     assert_eq!(index.matches("# Compaction Segment Index").count(), 1);
     assert_eq!(index.lines().filter(| l | l.contains("segment_")).count(), 3);
+}
+#[tokio::test]
+async fn update_fast_service_tier_persists_requested_preference() {
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let info = create_test_info();
+    adapter.init_session(&info, default_model_id()).await.unwrap();
+
+    assert_eq!(adapter.read_summary_sync(&info).unwrap().fast_service_tier, None);
+
+    adapter
+        .update_fast_service_tier(&info, Some(ServiceTierPreference::Fast))
+        .await
+        .unwrap();
+    assert_eq!(
+        adapter.read_summary_sync(&info).unwrap().fast_service_tier,
+        Some(ServiceTierPreference::Fast)
+    );
+
+    adapter
+        .update_fast_service_tier(&info, Some(ServiceTierPreference::Standard))
+        .await
+        .unwrap();
+    assert_eq!(
+        adapter.read_summary_sync(&info).unwrap().fast_service_tier,
+        Some(ServiceTierPreference::Standard)
+    );
 }
 #[tokio::test]
 async fn update_current_model_persists_leaves_and_clears_reasoning_effort() {
@@ -1656,6 +1684,33 @@ async fn fork_inherits_sandbox_profile() {
     let tgt_summary = adapter.read_summary_sync(&target).unwrap();
     assert_eq!(tgt_summary.sandbox_profile.as_deref(), Some("workspace"));
 }
+#[tokio::test]
+async fn fork_inherits_fast_service_tier_request() {
+    let tmp = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(tmp.path().to_path_buf());
+    let source = Info {
+        id: acp::SessionId::new("src-fast"),
+        cwd: "/src".to_string(),
+    };
+    let target = Info {
+        id: acp::SessionId::new("tgt-fast"),
+        cwd: "/tgt".to_string(),
+    };
+    adapter.init_session(&source, default_model_id()).await.unwrap();
+    adapter
+        .update_fast_service_tier(&source, Some(ServiceTierPreference::Fast))
+        .await
+        .unwrap();
+    adapter
+        .copy_session_data(&source, &target, CopySessionOptions::default())
+        .await
+        .unwrap();
+    let tgt_summary = adapter.read_summary_sync(&target).unwrap();
+    assert_eq!(
+        tgt_summary.fast_service_tier,
+        Some(ServiceTierPreference::Fast)
+    );
+}
 #[test]
 fn fork_filter_empty_input_produces_empty() {
     let mut items: Vec<ConversationItem> = vec![];
@@ -1794,6 +1849,8 @@ fn write_test_summary(
         agent_name: None,
         sandbox_profile: None,
         reasoning_effort: None,
+        fast_service_tier: None,
+        ultra_orchestration: Default::default(),
     };
     let json = serde_json::to_vec_pretty(&summary).unwrap();
     std::fs::write(session_dir.join("summary.json"), json).unwrap();

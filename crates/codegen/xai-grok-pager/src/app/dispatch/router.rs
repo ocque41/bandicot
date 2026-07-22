@@ -972,6 +972,8 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::PreviewAutoDarkTheme(v) => preview_auto_dark_theme(app, v),
         Action::PreviewAutoLightTheme(v) => preview_auto_light_theme(app, v),
         Action::OpenSettings => dispatch_open_settings(app),
+        Action::OpenConnect => dispatch_open_connect(app),
+        Action::OpenModels => dispatch_open_models(app),
         Action::OpenCommandPalette => dispatch_open_command_palette(app),
         Action::OpenHowtoGuides => dispatch_open_howto_guides(app),
         Action::OpenResetConfirm { key } => dispatch_open_reset_confirm(app, key),
@@ -1317,6 +1319,38 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
     app.reconcile_foreign_resume_launch();
     sync_sleep_inhibitor(app);
     effects
+}
+
+fn dispatch_open_connect(app: &mut AppView) -> Vec<Effect> {
+    if let Some(agent) = get_active_agent_mut(app) {
+        let items = crate::slash::commands::connect::management_items();
+        agent.active_modal = Some(crate::views::modal::ActiveModal::ArgPicker {
+            command: "connect".to_owned(),
+            args_query: String::new(),
+            items: items.clone(),
+            original_items: items,
+            state: crate::views::picker::PickerState::input_active(),
+            previous_palette: None,
+            window: crate::views::modal_window::ModalWindowState::new(),
+        });
+    }
+    vec![]
+}
+
+fn dispatch_open_models(app: &mut AppView) -> Vec<Effect> {
+    if let Some(agent) = get_active_agent_mut(app) {
+        let items = crate::slash::commands::models::route_items().unwrap_or_default();
+        agent.active_modal = Some(crate::views::modal::ActiveModal::ArgPicker {
+            command: "models".to_owned(),
+            args_query: String::new(),
+            items: items.clone(),
+            original_items: items,
+            state: crate::views::picker::PickerState::input_active(),
+            previous_palette: None,
+            window: crate::views::modal_window::ModalWindowState::new(),
+        });
+    }
+    vec![]
 }
 pub(super) fn dispatch_action_result(
     app: &mut AppView,

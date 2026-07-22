@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use std::io::{self, BufRead, BufReader, Seek, SeekFrom};
 use std::path::Path;
 
+use crate::control_plane::agent_graph::UltraOrchestrationConfig;
 use crate::extensions::notification::SessionNotification;
 use crate::sampling::ConversationItem;
 use crate::session::info::Info;
@@ -12,7 +13,7 @@ use crate::session::wire_tags::{
 };
 use crate::tools::todo::TodoState;
 use agent_client_protocol as acp;
-use xai_grok_sampling_types::ReasoningEffort;
+use xai_grok_sampling_types::{ReasoningEffort, ServiceTierPreference};
 use xai_grok_workspace::session::file_state::RewindPoint;
 
 pub mod jsonl;
@@ -577,6 +578,23 @@ pub trait StorageAdapter: Send + Sync {
         model_id: &acp::ModelId,
         agent_name: Option<&str>,
         reasoning_effort: Option<Option<ReasoningEffort>>,
+    ) -> io::Result<()>;
+
+    /// Persist root-session Ultra orchestration state for resume/fork restore.
+    async fn update_ultra_orchestration(
+        &self,
+        info: &Info,
+        config: UltraOrchestrationConfig,
+    ) -> io::Result<()>;
+
+    /// Persist the session-requested Fast service-tier preference.
+    ///
+    /// This stores only the requested preference. The effective service tier and
+    /// support result are recomputed from the active provider/model on restore.
+    async fn update_fast_service_tier(
+        &self,
+        info: &Info,
+        requested: Option<ServiceTierPreference>,
     ) -> io::Result<()>;
 
     /// Update the collection ID for telemetry tracing

@@ -15,6 +15,27 @@ impl SessionActor {
                 self.run_compact(user_context).await?;
                 ok_end_turn(0, None)
             }
+            BuiltinAction::ReloadPrompts => {
+                let snapshot = self
+                    .compaction
+                    .prefire
+                    .force_reload_runtime_prompt()
+                    .map_err(|error| {
+                        acp::Error::invalid_params()
+                            .data(format!("failed to reload compaction prompt: {error}"))
+                    })?;
+                self.send_update(
+                    acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                        acp::ContentBlock::Text(acp::TextContent::new(format!(
+                            "Reloaded compaction prompt (SHA-256 {}).",
+                            snapshot.sha256()
+                        ))),
+                    )),
+                    None,
+                )
+                .await;
+                ok_end_turn(0, None)
+            }
             BuiltinAction::SetYolo { enabled } => {
                 let was = self.permissions.is_yolo_mode();
                 self.permissions.set_yolo_mode(enabled);
@@ -80,6 +101,89 @@ impl SessionActor {
                 ok_end_turn(0, None)
             }
             BuiltinAction::ContextInfo => ok_end_turn(0, None),
+            BuiltinAction::Fast { command } => {
+                let text = self.execute_fast_command(command).await;
+                self.send_slash_command_output(&text).await;
+                ok_end_turn(0, None)
+            }
+            BuiltinAction::Ultra { args } => {
+                let text = self.execute_ultra_command(&args).await;
+                self.send_slash_command_output(&text).await;
+                ok_end_turn(0, None)
+            }
+            BuiltinAction::Graph { args } => {
+                if self.startup_hints.is_subagent {
+                    self.send_slash_command_output(
+                        "AgentGraph commands are restricted to user-facing root sessions.",
+                    )
+                    .await;
+                    return ok_end_turn(0, None);
+                }
+                let cwd = std::path::Path::new(&self.session_info.cwd);
+                let orchestration_config =
+                    crate::agent::config::load_orchestration_config_for_cwd(Some(cwd));
+                if orchestration_config.graph_enabled == Some(false) {
+                    self.send_slash_command_output(
+                        "AgentGraph commands are disabled by orchestration config.",
+                    )
+                    .await;
+                    return ok_end_turn(0, None);
+                }
+                let backend = self.tool_context.subagent_event_tx.clone().map(|event_tx| {
+                    std::sync::Arc::new(
+                        xai_grok_tools::implementations::grok_build::task::backend::ChannelBackend::new(event_tx),
+                    )
+                        as std::sync::Arc<
+                            dyn xai_grok_tools::implementations::grok_build::task::backend::SubagentBackend,
+                        >
+                });
+                let text = crate::control_plane::agent_graph::graph_command_output_with_backend(
+                    &args,
+                    cwd,
+                    Some(self.session_info.id.0.as_ref()),
+                    backend,
+                )
+                .await;
+                self.send_slash_command_output(&text).await;
+                ok_end_turn(0, None)
+            }
+            BuiltinAction::Swarm { args } => {
+                if self.startup_hints.is_subagent {
+                    self.send_slash_command_output(
+                        "Swarm commands are restricted to user-facing root sessions.",
+                    )
+                    .await;
+                    return ok_end_turn(0, None);
+                }
+                let cwd = std::path::Path::new(&self.session_info.cwd);
+                let orchestration_config =
+                    crate::agent::config::load_orchestration_config_for_cwd(Some(cwd));
+                if orchestration_config.swarm_enabled == Some(false) {
+                    self.send_slash_command_output(
+                        "Swarm commands are disabled by orchestration config.",
+                    )
+                    .await;
+                    return ok_end_turn(0, None);
+                }
+                let backend = self.tool_context.subagent_event_tx.clone().map(|event_tx| {
+                    std::sync::Arc::new(
+                        xai_grok_tools::implementations::grok_build::task::backend::ChannelBackend::new(event_tx),
+                    )
+                        as std::sync::Arc<
+                            dyn xai_grok_tools::implementations::grok_build::task::backend::SubagentBackend,
+                        >
+                });
+                let text = crate::control_plane::agent_graph::swarm_command_output_with_backend(
+                    &args,
+                    cwd,
+                    Some(self.session_info.id.0.as_ref()),
+                    backend,
+                    orchestration_config.live_swarm_enabled.unwrap_or(false),
+                )
+                .await;
+                self.send_slash_command_output(&text).await;
+                ok_end_turn(0, None)
+            }
             BuiltinAction::HooksTrust => {
                 let msg = match Self::do_hooks_trust_project(&self.session_info.cwd) {
                     Ok(root) => {
@@ -908,26 +1012,26 @@ impl SessionActor {
                 name,
                 provider,
                 api_key,
+                base_url,
+                models,
             } => {
                 if name.is_empty() || provider.is_empty() || api_key.is_empty() {
                     self.send_slash_command_output(
-                        "Usage: /connect add <name> <provider> <key>\n\n\
+                        "Usage: /connect add <name> <provider> <key> [base-url] [model-a,model-b]\n\n\
                          Providers: opencode_zen, opencode_go, openai, anthropic, ollama\n\
                          Example: /connect add zen-a zen sk-ISEsbS...",
                     )
                     .await;
                     return ok_end_turn(0, None);
                 }
-                let provider_type = crate::accounts::storage::AccountProvider::from_str(&provider)
-                    .unwrap_or(crate::accounts::storage::AccountProvider::Other);
-                match crate::accounts::AccountManager::load().and_then(|mut m| {
-                    m.add(
-                        name.clone(),
-                        provider_type,
-                        api_key,
-                        None,
-                        None,
-                    )
+                let provider_type = crate::accounts::storage::ProviderId::parse(&provider);
+                match crate::accounts::AccountManager::load().and_then(|mut manager| {
+                    let entry =
+                        manager.add(name.clone(), provider_type, api_key, base_url, None)?;
+                    if !models.is_empty() {
+                        manager.update_models(&entry.id, None, Some(models))?;
+                    }
+                    Ok(entry)
                 }) {
                     Ok(entry) => {
                         let msg = format!(
@@ -945,10 +1049,8 @@ impl SessionActor {
             }
             BuiltinAction::ConnectRemove { name } => {
                 if name.is_empty() {
-                    self.send_slash_command_output(
-                        "Usage: /connect remove <name>",
-                    )
-                    .await;
+                    self.send_slash_command_output("Usage: /connect remove <name>")
+                        .await;
                     return ok_end_turn(0, None);
                 }
                 match crate::accounts::AccountManager::load().and_then(|mut m| m.remove(&name)) {
@@ -972,10 +1074,8 @@ impl SessionActor {
             }
             BuiltinAction::ConnectEnable { name } => {
                 if name.is_empty() {
-                    self.send_slash_command_output(
-                        "Usage: /connect enable <name>",
-                    )
-                    .await;
+                    self.send_slash_command_output("Usage: /connect enable <name>")
+                        .await;
                     return ok_end_turn(0, None);
                 }
                 match crate::accounts::AccountManager::load().and_then(|mut m| m.enable(&name)) {
@@ -995,10 +1095,8 @@ impl SessionActor {
             }
             BuiltinAction::ConnectDisable { name } => {
                 if name.is_empty() {
-                    self.send_slash_command_output(
-                        "Usage: /connect disable <name>",
-                    )
-                    .await;
+                    self.send_slash_command_output("Usage: /connect disable <name>")
+                        .await;
                     return ok_end_turn(0, None);
                 }
                 match crate::accounts::AccountManager::load().and_then(|mut m| m.disable(&name)) {
@@ -1018,15 +1116,13 @@ impl SessionActor {
             }
             BuiltinAction::ConnectOrder { name, position } => {
                 if name.is_empty() {
-                    self.send_slash_command_output(
-                        "Usage: /connect order <name> <position>",
-                    )
-                    .await;
+                    self.send_slash_command_output("Usage: /connect order <name> <position>")
+                        .await;
                     return ok_end_turn(0, None);
                 }
-                match crate::accounts::AccountManager::load().and_then(|mut m| {
-                    m.reorder(&name, position)
-                }) {
+                match crate::accounts::AccountManager::load()
+                    .and_then(|mut m| m.reorder(&name, position))
+                {
                     Ok(()) => {
                         let msg = format!("Account '{}' moved to position {}", name, position);
                         self.send_slash_command_output(&msg).await;
@@ -1040,12 +1136,14 @@ impl SessionActor {
             BuiltinAction::ConnectStatus => {
                 let text = match crate::accounts::AccountManager::load() {
                     Ok(manager) => {
-                        if !manager.has_accounts() {
-                            "No accounts configured.\n\nUse `/connect add <name> <provider> <key>` to add an account.".to_string()
-                        } else {
-                            let mut lines = vec!["Account status:".to_string(), String::new()];
+                        let mut lines = vec!["Account status:".to_string(), String::new()];
+                        if manager.has_accounts() {
                             for account in manager.accounts() {
-                                let status = if account.enabled { "✓ enabled" } else { "○ disabled" };
+                                let status = if account.enabled {
+                                    "✓ enabled"
+                                } else {
+                                    "○ disabled"
+                                };
                                 lines.push(format!(
                                     "  {} ({}) - {}",
                                     account.name,
@@ -1053,19 +1151,404 @@ impl SessionActor {
                                     status,
                                 ));
                             }
-                            lines.push(String::new());
-                            lines.push(format!(
-                                "Total: {} accounts, {} enabled",
-                                manager.total_count(),
-                                manager.enabled_count(),
-                            ));
-                            lines.join("\n")
+                        } else {
+                            lines.push("  No accounts configured.".to_owned());
                         }
+                        lines.push(String::new());
+                        lines.push(format!(
+                            "Total: {} accounts, {} enabled",
+                            manager.total_count(),
+                            manager.enabled_count(),
+                        ));
+                        lines.push(format!("Build: Bandicot {}", xai_grok_version::VERSION));
+                        lines.push(format!(
+                            "Source: {}",
+                            option_env!("GIT_COMMIT")
+                                .unwrap_or(include_str!("../../../../../../SOURCE_REV"))
+                                .trim()
+                        ));
+                        lines.push(format!(
+                            "Executable: {}",
+                            std::env::current_exe()
+                                .map(|path| path.display().to_string())
+                                .unwrap_or_else(|_| "unknown".to_string())
+                        ));
+                        lines.push(format!(
+                            "Store: {}",
+                            crate::accounts::storage::accounts_path().display()
+                        ));
+                        lines.join("\n")
                     }
                     Err(e) => format!("Failed to load accounts: {e}"),
                 };
                 self.send_slash_command_output(&text).await;
                 ok_end_turn(0, None)
+            }
+            BuiltinAction::ConnectRefreshModels { name } => {
+                let account = crate::accounts::AccountManager::load().and_then(|manager| {
+                    manager
+                        .get_account(&name)
+                        .cloned()
+                        .ok_or_else(|| anyhow::anyhow!("account '{name}' not found"))
+                });
+                let text = match account {
+                    Ok(account) => {
+                        match crate::accounts::providers::discover_models(&account).await {
+                            Ok(models) => {
+                                let count = models.len();
+                                match crate::accounts::AccountManager::load().and_then(
+                                    |mut manager| {
+                                        manager.update_models(&account.id, Some(models), None)
+                                    },
+                                ) {
+                                    Ok(_) => format!(
+                                        "Refreshed {count} model(s) for '{}'. Open `/models` to browse exact routes.",
+                                        account.name
+                                    ),
+                                    Err(error) => format!("Error saving model catalog: {error}"),
+                                }
+                            }
+                            Err(error) => format!("Provider validation failed: {error}"),
+                        }
+                    }
+                    Err(error) => format!("Error: {error}"),
+                };
+                self.send_slash_command_output(&text).await;
+                ok_end_turn(0, None)
+            }
+            BuiltinAction::ConnectSetModels { name, models } => {
+                let result = crate::accounts::AccountManager::load().and_then(|mut manager| {
+                    let account_id = manager
+                        .get_account(&name)
+                        .map(|account| account.id.clone())
+                        .ok_or_else(|| anyhow::anyhow!("account '{name}' not found"))?;
+                    manager.update_models(&account_id, None, Some(models.clone()))
+                });
+                let text = match result {
+                    Ok(_) if models.is_empty() => {
+                        format!("Account '{name}' now exposes every discovered model.")
+                    }
+                    Ok(_) => format!("Account '{name}' model allowlist: {}", models.join(", ")),
+                    Err(error) => format!("Error: {error}"),
+                };
+                self.send_slash_command_output(&text).await;
+                ok_end_turn(0, None)
+            }
+            BuiltinAction::ConnectFallback {
+                operation,
+                route_id,
+            } => {
+                let result = crate::accounts::AccountManager::load().and_then(|mut manager| {
+                    let mut chain = manager.snapshot().fallback_chain;
+                    match operation.as_str() {
+                        "clear" => chain.clear(),
+                        "add" => {
+                            let route = manager
+                                .all_model_routes()
+                                .into_iter()
+                                .find(|route| route.route_id == route_id)
+                                .ok_or_else(|| {
+                                    anyhow::anyhow!("model route '{route_id}' not found")
+                                })?;
+                            if !chain.iter().any(|item| item.route_id() == route.route_id) {
+                                chain.push(crate::accounts::storage::FallbackRoute {
+                                    account_id: route.account_id,
+                                    model_id: route.model_id,
+                                    enabled: true,
+                                });
+                            }
+                        }
+                        "remove" => chain.retain(|item| item.route_id() != route_id),
+                        "up" | "down" => {
+                            let index = chain
+                                .iter()
+                                .position(|item| item.route_id() == route_id)
+                                .ok_or_else(|| {
+                                anyhow::anyhow!("fallback route '{route_id}' not found")
+                            })?;
+                            let target = if operation == "up" {
+                                index.saturating_sub(1)
+                            } else {
+                                (index + 1).min(chain.len().saturating_sub(1))
+                            };
+                            chain.swap(index, target);
+                        }
+                        _ => anyhow::bail!(
+                            "Usage: /connect fallback <add|remove|up|down|clear> [route-id]"
+                        ),
+                    }
+                    manager.set_fallback_chain(chain)
+                });
+                let text = match result {
+                    Ok(()) => crate::accounts::AccountManager::load()
+                        .map(|manager| manager.format_list())
+                        .unwrap_or_else(|error| {
+                            format!("Fallback updated, but reload failed: {error}")
+                        }),
+                    Err(error) => format!("Error: {error}"),
+                };
+                self.send_slash_command_output(&text).await;
+                ok_end_turn(0, None)
+            }
+            BuiltinAction::ModelsBrowse => {
+                let text = match crate::accounts::AccountManager::load() {
+                    Ok(manager) => manager.format_model_routes(),
+                    Err(error) => format!("Failed to load model routes: {error}"),
+                };
+                self.send_slash_command_output(&text).await;
+                ok_end_turn(0, None)
+            }
+            BuiltinAction::ModelsSelect { route_id } => {
+                let selected = crate::accounts::AccountManager::load().and_then(|manager| {
+                    manager
+                        .all_model_routes()
+                        .into_iter()
+                        .find(|route| route.route_id == route_id)
+                        .ok_or_else(|| anyhow::anyhow!("model route '{route_id}' was not found"))
+                });
+                match selected {
+                    Ok(route) => {
+                        if let Some(mut config) = self.chat_state_handle.get_sampling_config().await
+                        {
+                            let service_tier_request = config.effective_service_tier.requested;
+                            let service_tier_source = config.effective_service_tier.source;
+                            let models = self.models_manager.models();
+                            if let Some(entry) =
+                                crate::accounts::catalog_entry_for_route(&route, &models)
+                            {
+                                config.max_completion_tokens = entry.max_completion_tokens;
+                                config.temperature = entry.temperature;
+                                config.top_p = entry.top_p;
+                                config.api_backend = entry.api_backend.clone();
+                                config.extra_headers = entry.extra_headers.clone();
+                                config.context_window = entry.context_window;
+                                config.reasoning_effort = entry.reasoning_effort;
+                                config.stream_tool_calls = entry.stream_tool_calls;
+                            } else if let Some(context_window) =
+                                route.context_window.and_then(std::num::NonZeroU64::new)
+                            {
+                                config.context_window = context_window;
+                            }
+                            config.base_url.clone_from(&route.base_url);
+                            config.model.clone_from(&route.model_id);
+                            if route.provider.as_str()
+                                == crate::accounts::storage::ProviderId::ANTHROPIC
+                            {
+                                config.api_backend = xai_grok_sampling_types::ApiBackend::Messages;
+                            }
+                            let provider_facts =
+                                crate::agent::config::resolve_model_auth_facts(&config.model);
+                            config.effective_service_tier =
+                                xai_grok_sampling_types::resolve_service_tier(
+                                    service_tier_request,
+                                    &provider_facts.capabilities.service_tiers,
+                                    service_tier_source,
+                                );
+                            config.hosted_multi_agent = Default::default();
+                            self.chat_state_handle.update_sampling_config(config);
+                            let existing = self.chat_state_handle.get_credentials().await;
+                            self.chat_state_handle.update_credentials(
+                                xai_chat_state::Credentials {
+                                    api_key: route.credential.clone(),
+                                    auth_type: xai_chat_state::AuthType::ApiKey,
+                                    alpha_test_key: None,
+                                    client_version: existing.client_version,
+                                },
+                            );
+                            self.model_auth_facts.replace(None);
+                            self.prepare_sampler_for_turn().await;
+                            let _ =
+                                crate::accounts::AccountManager::load().and_then(|mut manager| {
+                                    manager.update_preferences(&route.route_id, None, true)
+                                });
+                            self.send_slash_command_output(&format!(
+                                "Session route changed to {}",
+                                route.display_name()
+                            ))
+                            .await;
+                        } else {
+                            self.send_slash_command_output(
+                                "This session has no sampling configuration.",
+                            )
+                            .await;
+                        }
+                    }
+                    Err(error) => {
+                        self.send_slash_command_output(&format!("Error: {error}"))
+                            .await;
+                    }
+                }
+                ok_end_turn(0, None)
+            }
+            BuiltinAction::ModelsFavorite { route_id, favorite } => {
+                let result = crate::accounts::AccountManager::load().and_then(|mut manager| {
+                    if !manager
+                        .all_model_routes()
+                        .iter()
+                        .any(|route| route.route_id == route_id)
+                    {
+                        anyhow::bail!("model route '{route_id}' was not found");
+                    }
+                    manager.update_preferences(&route_id, Some(favorite), false)
+                });
+                let text = match result {
+                    Ok(_) if favorite => format!("Added '{route_id}' to favorites."),
+                    Ok(_) => format!("Removed '{route_id}' from favorites."),
+                    Err(error) => format!("Error: {error}"),
+                };
+                self.send_slash_command_output(&text).await;
+                ok_end_turn(0, None)
+            }
+        }
+    }
+
+    async fn execute_fast_command(
+        self: &Arc<Self>,
+        command: crate::control_plane::agent_graph::FastCommand,
+    ) -> String {
+        use crate::control_plane::agent_graph::FastCommand;
+        use xai_grok_sampling_types::{
+            ServiceTierPreference, ServiceTierSource, resolve_service_tier,
+        };
+
+        let Some(mut cfg) = self.chat_state_handle.get_sampling_config().await else {
+            return "Fast service tier: unavailable (no sampling config for this session)."
+                .to_string();
+        };
+        let provider_facts = crate::agent::config::resolve_model_auth_facts(&cfg.model);
+
+        match command {
+            FastCommand::On => {
+                let resolved = resolve_service_tier(
+                    ServiceTierPreference::Fast,
+                    &provider_facts.capabilities.service_tiers,
+                    ServiceTierSource::Session,
+                );
+                cfg.effective_service_tier = resolved.clone();
+                self.chat_state_handle.update_sampling_config(cfg);
+                let _ = self.notifications.persistence_tx.send(
+                    crate::session::persistence::PersistenceMsg::FastServiceTier(Some(
+                        ServiceTierPreference::Fast,
+                    )),
+                );
+                if resolved.supported {
+                    "Fast service tier enabled for this session. OpenAI Responses requests will send service_tier=priority when the selected provider advertises priority support.".to_string()
+                } else {
+                    format!(
+                        "Fast service tier requested, but the selected provider/model does not advertise priority support. No priority field will be sent. Reason: {}",
+                        resolved.reason.unwrap_or_else(|| "unsupported".to_string())
+                    )
+                }
+            }
+            FastCommand::Off => {
+                cfg.effective_service_tier = resolve_service_tier(
+                    ServiceTierPreference::Standard,
+                    &provider_facts.capabilities.service_tiers,
+                    ServiceTierSource::Session,
+                );
+                self.chat_state_handle.update_sampling_config(cfg);
+                let _ = self.notifications.persistence_tx.send(
+                    crate::session::persistence::PersistenceMsg::FastServiceTier(Some(
+                        ServiceTierPreference::Standard,
+                    )),
+                );
+                "Fast service tier disabled for this session. Requests use the standard service tier.".to_string()
+            }
+            FastCommand::Status => format_fast_status(&cfg.effective_service_tier),
+            FastCommand::Help => "Usage: /fast [on|off|status]".to_string(),
+        }
+    }
+
+    async fn execute_ultra_command(self: &Arc<Self>, args: &str) -> String {
+        use crate::control_plane::agent_graph::{
+            UltraCommand, UltraOrchestrationConfig, format_ultra_status, parse_ultra_command,
+        };
+
+        if self.startup_hints.is_subagent {
+            let mut state = self.ultra_orchestration.lock();
+            *state = UltraOrchestrationConfig::default();
+            return format_ultra_status(&state, true);
+        }
+
+        match parse_ultra_command(args) {
+            UltraCommand::On { max_children } => {
+                let config = {
+                    let mut state = self.ultra_orchestration.lock();
+                    let same_effective_policy = state.enabled
+                        && state.max_children
+                            == crate::control_plane::agent_graph::clamp_ultra_children(
+                                max_children,
+                            );
+                    let config = UltraOrchestrationConfig {
+                        enabled: true,
+                        max_children,
+                        policy_injected: same_effective_policy && state.policy_injected,
+                        setting_source:
+                            crate::control_plane::agent_graph::UltraSettingSource::Session,
+                    }
+                    .normalized();
+                    *state = config;
+                    config
+                };
+                let _ = self
+                    .notifications
+                    .persistence_tx
+                    .send(crate::session::persistence::PersistenceMsg::UltraOrchestration(config));
+                format!(
+                    "Ultra orchestration enabled for this root session.\nMax child agents: {}",
+                    config.max_children
+                )
+            }
+            UltraCommand::Off => {
+                // Mark the standard-mode policy pending. The next user turn
+                // receives one explicit non-proactive block so a previously
+                // injected Ultra instruction cannot remain effective. This
+                // changes no child lifecycle state, so active children keep
+                // running.
+                let config = {
+                    let mut state = self.ultra_orchestration.lock();
+                    let config = UltraOrchestrationConfig {
+                        enabled: false,
+                        max_children: crate::control_plane::agent_graph::ULTRA_MAX_CHILDREN,
+                        policy_injected: !state.enabled && state.policy_injected,
+                        setting_source:
+                            crate::control_plane::agent_graph::UltraSettingSource::Session,
+                    };
+                    *state = config;
+                    config
+                };
+                let _ = self
+                    .notifications
+                    .persistence_tx
+                    .send(crate::session::persistence::PersistenceMsg::UltraOrchestration(config));
+                "Ultra orchestration disabled for this session.".to_string()
+            }
+            UltraCommand::Status => {
+                let state = *self.ultra_orchestration.lock();
+                let (active_children, pending_children) = self.ultra_child_counts.snapshot();
+                let fast_state = self
+                    .chat_state_handle
+                    .get_sampling_config()
+                    .await
+                    .map(|cfg| format_fast_status(&cfg.effective_service_tier))
+                    .unwrap_or_else(|| "Fast service tier: unavailable".to_string());
+                let graph_state = crate::control_plane::agent_graph::AgentGraphControlPlane::new(
+                    std::path::Path::new(&self.session_info.cwd),
+                    Some(self.session_info.id.0.as_ref()),
+                )
+                .status("Active graph run");
+                let usage = if args.trim().is_empty() {
+                    "\nUsage: /ultra [on [--max-children <1-6>]|off|status]"
+                } else {
+                    ""
+                };
+                format!(
+                    "{}\nActive children: {active_children}\nPending children: {pending_children}\n{fast_state}\n{graph_state}{usage}",
+                    format_ultra_status(&state, false),
+                )
+            }
+            UltraCommand::Help => {
+                "Usage: /ultra [on [--max-children <1-6>]|off|status]".to_string()
             }
         }
     }
@@ -1124,4 +1607,22 @@ impl SessionActor {
 
         ok_end_turn(0, None)
     }
+}
+
+fn format_fast_status(resolved: &xai_grok_sampling_types::ResolvedServiceTier) -> String {
+    let wire = resolved.responses_wire_value().unwrap_or("<standard>");
+    let support = if resolved.supported {
+        "supported"
+    } else {
+        "unsupported"
+    };
+    let reason = resolved
+        .reason
+        .as_ref()
+        .map(|reason| format!("\nReason: {reason}"))
+        .unwrap_or_default();
+    format!(
+        "Fast service tier status:\nRequested: {:?}\nEffective wire value: {wire}\nSupport: {support}\nSource: {:?}{reason}",
+        resolved.requested, resolved.source
+    )
 }

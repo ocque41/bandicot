@@ -673,6 +673,28 @@ impl SessionActor {
             .send(PersistenceMsg::ContentChunk(PersistenceContentChunk::new(
                 prompt_blocks.to_vec(),
             )));
+        // Ultra is a root-session orchestration policy, not a wire/model mode.
+        // Inject its structured policy only on a real user turn. Internal and
+        // child sessions never receive it, and the durable `policy_injected`
+        // bit makes this exactly-once across resume and fork.
+        if matches!(origin, super::super::PromptOrigin::User) && !self.startup_hints.is_subagent {
+            let policy_update = {
+                let mut config = self.ultra_orchestration.lock();
+                let policy = crate::control_plane::agent_graph::take_ultra_policy_for_root(
+                    &mut config,
+                    false,
+                );
+                policy.map(|policy| (policy, *config))
+            };
+            if let Some((policy, config)) = policy_update {
+                self.chat_state_handle
+                    .push_user_message(ConversationItem::system_reminder(policy));
+                let _ = self
+                    .notifications
+                    .persistence_tx
+                    .send(PersistenceMsg::UltraOrchestration(config));
+            }
+        }
         let model_id = self
             .chat_state_handle
             .get_sampling_config()
@@ -2149,6 +2171,7 @@ impl SessionActor {
                     }
                 }
             }
+            self.record_compaction_model_sample(!tool_calls.is_empty());
             if let Some(text) = fallback_text {
                 tracing::warn!(
                     text_len = text.len(),
@@ -2331,6 +2354,11 @@ impl SessionActor {
                 )
                 .await;
             let execute_tool_calls_result = self.execute_tool_calls(tool_call_responses).await;
+            if let Some(trigger_info) = self.check_compact_after_tool_batch().await
+                && let Err(error) = self.run_compact_only(trigger_info).await
+            {
+                tracing::error!(%error, "safe-boundary compaction failed after tool batch");
+            }
             match execute_tool_calls_result {
                 Ok(ToolLoop::PermissionReject { tool_name, reason }) => {
                     return Ok(TurnOutcome::Cancelled {

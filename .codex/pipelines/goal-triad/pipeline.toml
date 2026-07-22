@@ -1,0 +1,54 @@
+name = "goal-triad"
+description = "Audit, solidify, implement, and verify the Bandicot Fast, Ultra, AgentGraph, and Swarm control plane."
+project_root = "/Users/miguel/Documents/bandicot"
+output_root = "/Users/miguel/Documents/bandicot/out/goal-triad"
+assigned_packages = ["sure-polish"]
+hard_gates = [
+  "source_truth_verified",
+  "gap_scan_written",
+  "solidification_ideas_written",
+  "sure_polish_verification_report_written",
+  "stage_manifests_written_before_final_ready",
+]
+validation_commands = [
+  "python3 /Users/miguel/.codex/skills/agent-pipeline/scripts/validate_pipeline_toml.py /Users/miguel/Documents/bandicot/.codex/pipelines/goal-triad/pipeline.toml",
+]
+
+[[source_truth]]
+name = "active-goal"
+path = "/Users/miguel/.codex/attachments/27a8a857-af32-4137-bc21-345c476d8df5/pasted-text.txt"
+truth_type = "goal_contract"
+required = true
+
+[[source_truth]]
+name = "implementation-ledger"
+path = "/Users/miguel/Documents/bandicot/docs/changes/2026-07-21-control-plane-implementation.md"
+truth_type = "progress_claims"
+required = true
+
+[[stages]]
+name = "gap-scan"
+file = "stages/01-gap-scan.toml"
+required = true
+
+[[stages]]
+name = "strategist-solidify"
+file = "stages/02-strategist-solidify.toml"
+required = true
+
+[[stages]]
+name = "sure-polish"
+file = "stages/03-sure-polish.toml"
+required = true
+
+[run_state]
+status = "planned"
+current_stage = "gap-scan"
+latest_output = ""
+saved_session = ""
+blockers = []
+
+[latest_stage_manifest_summary]
+path = "/Users/miguel/Documents/bandicot/out/goal-triad/stage_manifests/stage_manifest_summary.json"
+status = "not_started"
+updated_at = ""

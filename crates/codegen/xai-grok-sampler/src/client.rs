@@ -20,14 +20,16 @@ use reqwest::header::{
     ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, USER_AGENT,
 };
 use serde::Serialize;
+use serde_json::Value;
 
 use xai_grok_sampling_types::error::{parse_error_bytes, try_parse_stream_error};
 use xai_grok_sampling_types::{
     CANONICAL_REASONING_EFFORT_METADATA_KEY, ChatCompletionChunk, ChatCompletionRequest,
     ChatCompletionResponse, ConversationRequest, ConversationResponse, CreateResponseWrapper,
-    DOOM_LOOP_CHECK_HEADER, InferenceTransport, MessagesRequestWrapper, ReasoningEffort,
-    ResponseModelMetadata, Result, SamplingError, build_messages_request, is_check_event, messages,
-    rs,
+    DOOM_LOOP_CHECK_HEADER, InferenceTransport, MessagesRequestWrapper,
+    OPENAI_PRIORITY_SERVICE_TIER, OPENAI_RESPONSES_MULTI_AGENT_BETA, ReasoningEffort,
+    ResolvedServiceTier, ResponseModelMetadata, Result, SamplingError, build_messages_request,
+    is_check_event, messages, rs,
 };
 
 use crate::config::{
@@ -67,6 +69,60 @@ fn is_first_party_xai_url(url: &str) -> bool {
 
     let path = parsed.path().trim_end_matches('/');
     host == "cli-chat-proxy.grok.com" && (path == "/v1" || path.starts_with("/v1/"))
+}
+
+fn hosted_multi_agent_limit(requested: Option<u32>, provider_max: Option<u32>) -> Option<u32> {
+    match (requested, provider_max) {
+        (Some(requested), Some(provider_max)) => Some(requested.min(provider_max)),
+        (Some(requested), None) => Some(requested),
+        (None, _) => None,
+    }
+}
+
+fn request_uses_priority_service_tier(request_body: &Value) -> bool {
+    request_body.get("service_tier").and_then(Value::as_str) == Some(OPENAI_PRIORITY_SERVICE_TIER)
+}
+
+fn remove_service_tier(request_body: &mut Value) {
+    if let Some(body) = request_body.as_object_mut() {
+        body.remove("service_tier");
+    }
+}
+
+fn response_error_targets_service_tier(error: &Value) -> bool {
+    if error.get("param").and_then(Value::as_str) == Some("service_tier") {
+        return true;
+    }
+
+    error
+        .get("code")
+        .and_then(Value::as_str)
+        .is_some_and(|code| code.to_ascii_lowercase().contains("service_tier"))
+}
+
+fn is_service_tier_rejection(status: reqwest::StatusCode, bytes: &[u8]) -> bool {
+    if !matches!(
+        status,
+        reqwest::StatusCode::BAD_REQUEST | reqwest::StatusCode::UNPROCESSABLE_ENTITY
+    ) {
+        return false;
+    }
+
+    let Ok(body) = serde_json::from_slice::<Value>(bytes) else {
+        return false;
+    };
+
+    body.get("error")
+        .is_some_and(response_error_targets_service_tier)
+        || response_error_targets_service_tier(&body)
+}
+
+fn should_retry_without_priority_service_tier(
+    status: reqwest::StatusCode,
+    bytes: &[u8],
+    request_body: &Value,
+) -> bool {
+    request_uses_priority_service_tier(request_body) && is_service_tier_rejection(status, bytes)
 }
 
 fn is_xai_only_header(name: &str) -> bool {
@@ -555,6 +611,8 @@ struct ClientDefaults {
     transport: InferenceTransport,
     auth_scheme: AuthScheme,
     capabilities: ProviderCapabilities,
+    effective_service_tier: ResolvedServiceTier,
+    hosted_multi_agent: xai_grok_sampling_types::HostedMultiAgentConfig,
     wire_quirks: WireQuirks,
     reasoning_effort: Option<ReasoningEffort>,
     stream_tool_calls: bool,
@@ -694,6 +752,16 @@ impl SamplingClient {
             headers.insert(header_name, header_value);
         }
 
+        if matches!(config.api_backend, ApiBackend::Responses)
+            && config.capabilities.hosted_multi_agent.supported
+            && config.hosted_multi_agent.enabled
+        {
+            headers.append(
+                HeaderName::from_static("openai-beta"),
+                HeaderValue::from_static(OPENAI_RESPONSES_MULTI_AGENT_BETA),
+            );
+        }
+
         if xai_wire_extensions {
             // xAI proxy/client identity headers never leave first-party hosts.
             if let Some(client_version) = config.client_version.as_ref()
@@ -778,6 +846,8 @@ impl SamplingClient {
             transport: config.transport,
             auth_scheme: config.auth_scheme,
             capabilities: config.capabilities,
+            effective_service_tier: config.effective_service_tier,
+            hosted_multi_agent: config.hosted_multi_agent,
             wire_quirks: config.wire_quirks,
             reasoning_effort: config.reasoning_effort,
             stream_tool_calls: config.stream_tool_calls,
@@ -1529,6 +1599,17 @@ impl SamplingClient {
         streaming: bool,
         extra_raw_tools: Vec<serde_json::Value>,
     ) {
+        self.apply_provider_request_extensions(request_body, streaming, extra_raw_tools);
+        xai_grok_sampling_types::patch_reasoning_text_types(request_body);
+        Self::patch_response_reasoning_effort(request_body, reasoning_effort);
+    }
+
+    fn apply_provider_request_extensions(
+        &self,
+        request_body: &mut serde_json::Value,
+        streaming: bool,
+        extra_raw_tools: Vec<serde_json::Value>,
+    ) {
         if streaming && self.xai_wire_extensions && self.defaults.stream_tool_calls {
             request_body["stream_tool_calls"] = serde_json::json!(true);
         }
@@ -1542,8 +1623,40 @@ impl SamplingClient {
                 request_body["tools"] = serde_json::Value::Array(extra_raw_tools);
             }
         }
-        xai_grok_sampling_types::patch_reasoning_text_types(request_body);
-        Self::patch_response_reasoning_effort(request_body, reasoning_effort);
+        if matches!(self.defaults.api_backend, ApiBackend::Responses)
+            && self.defaults.capabilities.service_tiers.priority
+            && self.defaults.effective_service_tier.responses_wire_value()
+                == Some(OPENAI_PRIORITY_SERVICE_TIER)
+        {
+            request_body["service_tier"] = serde_json::json!(OPENAI_PRIORITY_SERVICE_TIER);
+        }
+        if matches!(self.defaults.api_backend, ApiBackend::Responses)
+            && self.defaults.capabilities.hosted_multi_agent.supported
+            && self.defaults.hosted_multi_agent.enabled
+        {
+            let mut multi_agent = serde_json::json!({ "enabled": true });
+            if let Some(max) = hosted_multi_agent_limit(
+                self.defaults.hosted_multi_agent.max_concurrent_subagents,
+                self.defaults
+                    .capabilities
+                    .hosted_multi_agent
+                    .max_concurrent_subagents,
+            ) {
+                multi_agent["max_concurrent_subagents"] = serde_json::json!(max);
+            }
+            request_body["multi_agent"] = multi_agent;
+        }
+        if matches!(self.defaults.api_backend, ApiBackend::Responses)
+            && self.defaults.capabilities.prompt_cache
+        {
+            use std::hash::{Hash as _, Hasher as _};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            "bandicot-prompt-cache-v1".hash(&mut hasher);
+            self.base_url.hash(&mut hasher);
+            self.defaults.model.hash(&mut hasher);
+            request_body["prompt_cache_key"] =
+                serde_json::json!(format!("bandicot-v1-{:016x}", hasher.finish()));
+        }
     }
 
     /// Create a response using the Responses API (non-streaming).
@@ -1595,23 +1708,48 @@ impl SamplingClient {
             false,
             Vec::new(),
         );
-        let http_request = grok_headers
-            .apply(
-                self.post(self.endpoint("responses")),
-                self.xai_wire_extensions,
-            )
-            .json(&request_body);
+        let mut retried_without_priority_service_tier = false;
+        let (status, model_metadata, retry_after_secs, should_retry, bytes) = loop {
+            let http_request = grok_headers
+                .apply(
+                    self.post(self.endpoint("responses")),
+                    self.xai_wire_extensions,
+                )
+                .json(&request_body);
 
-        let response = http_request.send().await.map_err(|e| {
-            tracing::debug!("HTTP request failed: {}", e);
-            e
-        })?;
+            let response = http_request.send().await.map_err(|e| {
+                tracing::debug!("HTTP request failed: {}", e);
+                e
+            })?;
 
-        let status = response.status();
-        let model_metadata = extract_model_metadata(response.headers(), self.xai_wire_extensions);
-        let retry_after_secs = extract_retry_after(response.headers());
-        let should_retry = extract_should_retry(response.headers());
-        let bytes = response.bytes().await?;
+            let status = response.status();
+            let model_metadata =
+                extract_model_metadata(response.headers(), self.xai_wire_extensions);
+            let retry_after_secs = extract_retry_after(response.headers());
+            let should_retry = extract_should_retry(response.headers());
+            let bytes = response.bytes().await?;
+
+            if !retried_without_priority_service_tier
+                && should_retry_without_priority_service_tier(status, bytes.as_ref(), &request_body)
+            {
+                remove_service_tier(&mut request_body);
+                retried_without_priority_service_tier = true;
+                tracing::warn!(
+                    status = %status,
+                    model_id = %model_id,
+                    "Responses API rejected priority service_tier; retrying once without service_tier"
+                );
+                continue;
+            }
+
+            break (
+                status,
+                model_metadata,
+                retry_after_secs,
+                should_retry,
+                bytes,
+            );
+        };
 
         if !status.is_success() {
             if status == reqwest::StatusCode::UNAUTHORIZED {
@@ -1736,51 +1874,56 @@ impl SamplingClient {
             true,
             extra_raw_tools,
         );
-        // Fresh per attempt so signals never leak across retries; `None`
-        // (check disabled) sends no header and does no peek work per event.
-        let doom_loop = self
-            .xai_wire_extensions
-            .then(|| {
-                self.defaults
-                    .doom_loop_recovery
-                    .map(crate::doom_loop::DoomLoopSignalCollector::new)
-            })
-            .flatten();
-        let mut http_request = grok_headers
-            .apply(
-                self.post(self.endpoint("responses")),
-                self.xai_wire_extensions,
-            )
-            .header(ACCEPT, HeaderValue::from_static("text/event-stream"));
-        if doom_loop.is_some() {
-            // Presence opts in; the server ignores the value.
-            http_request = http_request.header(DOOM_LOOP_CHECK_HEADER, "true");
-        }
-        let http_request = http_request.json(&request_body);
-
-        let built_request = http_request.build().map_err(|e| {
-            tracing::error!("Failed to build HTTP request: {}", e);
-            SamplingError::Http(e)
-        })?;
-
-        tracing::debug!(
-            url = %built_request.url(),
-            method = %built_request.method(),
-            "Sending responses API stream request"
-        );
-        Self::log_request_headers(&built_request, "responses");
-
-        let response = self.http.execute(built_request).await.map_err(|e| {
-            tracing::debug!("HTTP request failed: {}", e);
-            record_stream_request_failure(&e);
-            e
-        })?;
-
-        let status = response.status();
         let span = tracing::Span::current();
-        span.record("status_code", status.as_u16() as i64);
-        span.record("success", status.is_success());
-        if !status.is_success() {
+        let mut retried_without_priority_service_tier = false;
+        let (response, doom_loop) = loop {
+            // Fresh per attempt so signals never leak across retries; `None`
+            // (check disabled) sends no header and does no peek work per event.
+            let doom_loop = self
+                .xai_wire_extensions
+                .then(|| {
+                    self.defaults
+                        .doom_loop_recovery
+                        .map(crate::doom_loop::DoomLoopSignalCollector::new)
+                })
+                .flatten();
+            let mut http_request = grok_headers
+                .apply(
+                    self.post(self.endpoint("responses")),
+                    self.xai_wire_extensions,
+                )
+                .header(ACCEPT, HeaderValue::from_static("text/event-stream"));
+            if doom_loop.is_some() {
+                // Presence opts in; the server ignores the value.
+                http_request = http_request.header(DOOM_LOOP_CHECK_HEADER, "true");
+            }
+            let http_request = http_request.json(&request_body);
+
+            let built_request = http_request.build().map_err(|e| {
+                tracing::error!("Failed to build HTTP request: {}", e);
+                SamplingError::Http(e)
+            })?;
+
+            tracing::debug!(
+                url = %built_request.url(),
+                method = %built_request.method(),
+                "Sending responses API stream request"
+            );
+            Self::log_request_headers(&built_request, "responses");
+
+            let response = self.http.execute(built_request).await.map_err(|e| {
+                tracing::debug!("HTTP request failed: {}", e);
+                record_stream_request_failure(&e);
+                e
+            })?;
+
+            let status = response.status();
+            span.record("status_code", status.as_u16() as i64);
+            span.record("success", status.is_success());
+            if status.is_success() {
+                break (response, doom_loop);
+            }
+
             if status == reqwest::StatusCode::UNAUTHORIZED {
                 span.record("error", "unauthorized (401)");
                 self.record_401_attribution(crate::attribution::SamplingConsumer::ResponsesStream);
@@ -1791,6 +1934,7 @@ impl SamplingClient {
                     "Unauthorized (401) from {endpoint}: {server_message}"
                 )));
             }
+
             let model_metadata =
                 extract_model_metadata(response.headers(), self.xai_wire_extensions);
             let retry_after_secs = extract_retry_after(response.headers());
@@ -1800,6 +1944,19 @@ impl SamplingClient {
             let resp_headers = Self::format_response_headers(&response);
             let bytes = response.bytes().await?;
             let server_message = parse_error_bytes(bytes.as_ref());
+
+            if !retried_without_priority_service_tier
+                && should_retry_without_priority_service_tier(status, bytes.as_ref(), &request_body)
+            {
+                remove_service_tier(&mut request_body);
+                retried_without_priority_service_tier = true;
+                tracing::warn!(
+                    status = %status,
+                    model_id = %model_id,
+                    "Responses API stream rejected priority service_tier; retrying once without service_tier"
+                );
+                continue;
+            }
 
             let message = self.build_api_error_message(
                 status,
@@ -1823,7 +1980,7 @@ impl SamplingClient {
                 retry_after_secs,
                 should_retry,
             });
-        }
+        };
 
         let model_metadata = extract_model_metadata(response.headers(), self.xai_wire_extensions);
 
@@ -2548,6 +2705,8 @@ mod tests {
             transport: InferenceTransport::Http,
             auth_scheme: AuthScheme::Bearer,
             capabilities: ProviderCapabilities::default(),
+            effective_service_tier: ResolvedServiceTier::default(),
+            hosted_multi_agent: Default::default(),
             wire_quirks: WireQuirks::default(),
             extra_headers: IndexMap::new(),
             context_window: 8192,

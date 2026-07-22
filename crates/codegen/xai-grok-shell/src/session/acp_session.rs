@@ -633,6 +633,12 @@ pub(crate) struct SessionActor {
     /// budget-spent accept happened, tightest trigger label). Accumulated by
     /// the event drainer, taken at turn end for the per-turn analytics event.
     pub(crate) doom_loop_turn_tally: parking_lot::Mutex<crate::session::signals::DoomLoopTurnTally>,
+    /// Root-only Ultra orchestration state. Subagent sessions are seeded with
+    /// the default off state even when their parent has Ultra enabled.
+    pub(crate) ultra_orchestration: std::sync::Arc<
+        parking_lot::Mutex<crate::control_plane::agent_graph::UltraOrchestrationConfig>,
+    >,
+    pub(crate) ultra_child_counts: std::sync::Arc<crate::agent::subagent::SharedChildCounts>,
     /// File state tracker for rewind functionality
     pub(crate) file_state_tracker: Arc<FileStateTracker>,
     /// Last prompt text before the most recent rewind.
@@ -1166,7 +1172,8 @@ impl SessionActor {
             .iter()
             .any(|n| n == MEMORY_SEARCH_TOOL_NAME || n == MEMORY_GET_TOOL_NAME);
         let goal = self.sync_goal_harness_from_tools(tool_names);
-        let accounts = crate::accounts::storage::accounts_path().exists();
+        // Always enable the /connect command so users can add accounts even if none exist yet.
+        let accounts = true;
         slash_commands::CommandAvailability {
             feedback: self.feedback_manager.is_enabled(),
             memory: self.memory.is_enabled() && memory_read_registered,
@@ -1346,6 +1353,9 @@ fn load_prompt_context_from_dir(
 #[cfg(test)]
 #[path = "acp_session_tests/client_hooks_tests.rs"]
 mod client_hooks_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/connect_command_tests.rs"]
+mod connect_command_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/replace_system_prompt_tests.rs"]
 mod replace_system_prompt_tests;

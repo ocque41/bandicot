@@ -14,9 +14,10 @@ use xai_grok_sampler::{
     AuthScheme, InferenceTransport, ProviderCapabilities, SamplerConfig, WireQuirks,
 };
 use xai_grok_sampling_types::{
-    CompactionAtTokens, CompactionsRemaining, REASONING_EFFORT_META_KEY,
-    REASONING_EFFORTS_META_KEY, ReasoningEffort, ReasoningEffortOption,
-    reasoning_effort_meta_value, reasoning_efforts_meta_value,
+    CompactionAtTokens, CompactionsRemaining, HostedMultiAgentCapability, HostedMultiAgentConfig,
+    REASONING_EFFORT_META_KEY, REASONING_EFFORTS_META_KEY, ReasoningEffort, ReasoningEffortOption,
+    ResolvedServiceTier, ServiceTierCapabilities, ServiceTierPreference, ServiceTierSource,
+    reasoning_effort_meta_value, reasoning_efforts_meta_value, resolve_service_tier,
 };
 use xai_grok_tools::types::compat::{
     COMPAT_CELLS, CompatConfig, CompatConfigToml, CompatRemoteKey, CompatSurface, CompatVendor,
@@ -1281,6 +1282,10 @@ pub struct Config {
     /// `[auto_mode]` section: Auto permission-mode configuration. See [`AutoModeConfig`].
     #[serde(default)]
     pub auto_mode: AutoModeConfig,
+    /// `[orchestration]` section: startup defaults for Fast, Ultra, Graph, Swarm,
+    /// and provider-hosted multi-agent behavior.
+    #[serde(default)]
+    pub orchestration: OrchestrationConfig,
     /// `[model.*]` overrides from config.toml. Resolve via `resolve_model_list()`.
     #[serde(skip)]
     pub config_models: IndexMap<String, ConfigModelOverride>,
@@ -1675,6 +1680,136 @@ pub struct SessionConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub load_envrc: Option<bool>,
 }
+/// Startup defaults for orchestration-related features.
+///
+/// Session slash commands (`/fast`, `/ultra`) still override these values for
+/// the active session. Project config is merged by
+/// [`load_orchestration_config_for_cwd`], then requirements are re-applied so
+/// managed policy can still pin these fields.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct OrchestrationConfig {
+    /// Requested Fast service tier at session startup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fast_service_tier: Option<ServiceTierPreference>,
+    /// Whether to send the provider-hosted multi-agent beta header when the
+    /// selected provider/model advertises support.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hosted_multi_agent: Option<bool>,
+    /// Optional session-wide hosted multi-agent concurrency hint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hosted_multi_agent_max_concurrent_subagents: Option<u32>,
+    /// Ultra root-session proactive delegation default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ultra_enabled: Option<bool>,
+    /// Ultra root-session child-agent limit. Clamped to the compiled ceiling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ultra_max_children: Option<u32>,
+    /// Feature gate recorded for the AgentGraph command surface.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph_enabled: Option<bool>,
+    /// Feature gate recorded for the Swarm command surface.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub swarm_enabled: Option<bool>,
+    /// Separate high-risk gate for provider-backed Swarm execution. This is
+    /// deliberately off unless the user or managed configuration opts in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_swarm_enabled: Option<bool>,
+    /// Host ceiling for concurrently active provider-backed Swarm workers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub swarm_max_active_model_workers: Option<u32>,
+    /// Optional retention window for completed graph artifacts. `None` keeps
+    /// artifacts until an explicit cleanup operation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph_artifact_retention_days: Option<u32>,
+    /// Default worker policy for submitted graphs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disable_provider_multi_agent_for_workers: Option<bool>,
+    /// Optional external Codex app-server worker adapter. Disabled by default;
+    /// core AgentGraph execution never depends on this executable.
+    #[serde(default)]
+    pub codex_app_server: crate::control_plane::agent_graph::CodexAppServerConfig,
+}
+
+impl OrchestrationConfig {
+    pub fn resolve_service_tier(
+        &self,
+        capabilities: &ServiceTierCapabilities,
+    ) -> ResolvedServiceTier {
+        let requested = self
+            .fast_service_tier
+            .unwrap_or(ServiceTierPreference::Inherit);
+        let source = if self.fast_service_tier.is_some() {
+            ServiceTierSource::Config
+        } else {
+            ServiceTierSource::Default
+        };
+        resolve_service_tier(requested, capabilities, source)
+    }
+
+    pub fn resolve_hosted_multi_agent(
+        &self,
+        _capability: HostedMultiAgentCapability,
+    ) -> HostedMultiAgentConfig {
+        HostedMultiAgentConfig {
+            enabled: self.hosted_multi_agent.unwrap_or(false),
+            max_concurrent_subagents: self.hosted_multi_agent_max_concurrent_subagents,
+        }
+    }
+
+    pub fn resolve_ultra_orchestration_config(
+        &self,
+    ) -> crate::control_plane::agent_graph::UltraOrchestrationConfig {
+        let enabled = self.ultra_enabled.unwrap_or(false);
+        let configured = self.ultra_enabled.is_some() || self.ultra_max_children.is_some();
+        crate::control_plane::agent_graph::UltraOrchestrationConfig {
+            enabled,
+            max_children: self
+                .ultra_max_children
+                .unwrap_or(crate::control_plane::agent_graph::ULTRA_MAX_CHILDREN),
+            policy_injected: !enabled,
+            setting_source: if configured {
+                crate::control_plane::agent_graph::UltraSettingSource::Config
+            } else {
+                crate::control_plane::agent_graph::UltraSettingSource::Default
+            },
+        }
+        .normalized()
+    }
+}
+
+fn overlay_project_orchestration_config(raw: &mut toml::Value, cwd: &std::path::Path) {
+    for config_path in crate::config::find_project_configs(cwd) {
+        let Ok(project) = crate::config::load_config_file(&config_path) else {
+            continue;
+        };
+        let Some(orchestration) = project.get("orchestration").cloned() else {
+            continue;
+        };
+        let mut overlay = toml::map::Map::new();
+        overlay.insert("orchestration".to_string(), orchestration);
+        crate::config::deep_merge_toml(raw, &toml::Value::Table(overlay));
+    }
+}
+
+/// Load orchestration startup defaults with project config support.
+///
+/// Precedence, high to low: requirements/managed policy, nearest project
+/// config, user config, managed config, system managed config, built-in
+/// defaults. Model/provider capabilities are applied by the resolver methods.
+pub fn load_orchestration_config_for_cwd(cwd: Option<&std::path::Path>) -> OrchestrationConfig {
+    let mut raw = crate::config::load_effective_config()
+        .unwrap_or_else(|_| toml::Value::Table(toml::map::Map::new()));
+    if let Some(cwd) = cwd {
+        overlay_project_orchestration_config(&mut raw, cwd);
+    }
+    if let Some(requirements) = crate::config::load_merged_requirements() {
+        crate::config::deep_merge_toml(&mut raw, &requirements);
+    }
+    raw.get("orchestration")
+        .and_then(|value| value.clone().try_into().ok())
+        .unwrap_or_default()
+}
 /// Configuration for change-archive deduplication.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -1715,6 +1850,7 @@ impl Default for Config {
             goal: GoalConfig::default(),
             doom_loop_recovery: crate::util::config::DoomLoopRecoverySettings::default(),
             auto_mode: AutoModeConfig::default(),
+            orchestration: OrchestrationConfig::default(),
             config_models: IndexMap::new(),
             model_override_warnings: Vec::new(),
             grok_com_config: GrokComConfig::default(),
@@ -3691,8 +3827,8 @@ impl ConfigModelOverride {
         if let Some(v) = self.auth_scheme {
             entry.info.auth_scheme = v;
         }
-        if let Some(v) = self.capabilities {
-            entry.info.capabilities = v;
+        if let Some(v) = &self.capabilities {
+            entry.info.capabilities = v.clone();
         }
         if let Some(v) = self.wire_quirks {
             entry.info.wire_quirks = v;
@@ -3892,7 +4028,7 @@ impl ModelInfo {
             api_backend: entry.api_backend.clone(),
             transport: entry.transport,
             auth_scheme: entry.auth_scheme.unwrap_or_default(),
-            capabilities: entry.capabilities,
+            capabilities: entry.capabilities.clone(),
             wire_quirks: entry.wire_quirks,
             extra_headers: entry.extra_headers.clone(),
             context_window: entry.context_window,
@@ -4514,7 +4650,7 @@ pub fn try_resolve_model_credentials(
 }
 /// Per-model auth facts (BYOK status + auth scheme) from one effective-config
 /// load, memoized by the session actor.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct ModelAuthFacts {
     pub byok: ModelByok,
     pub auth_scheme: AuthScheme,
@@ -4545,7 +4681,7 @@ pub fn resolve_model_auth_facts(model_id: &str) -> ModelAuthFacts {
             _ => AuthScheme::default(),
         },
         capabilities: match lookup {
-            ModelLookup::Loaded(Some(e)) => e.info().capabilities,
+            ModelLookup::Loaded(Some(e)) => e.info().capabilities.clone(),
             _ => ProviderCapabilities::default(),
         },
         wire_quirks: match lookup {
@@ -4794,7 +4930,9 @@ pub fn sampling_config_for_model(
         api_backend,
         transport: info.transport,
         auth_scheme: credentials.auth_scheme,
-        capabilities: info.capabilities,
+        capabilities: info.capabilities.clone(),
+        effective_service_tier: Default::default(),
+        hosted_multi_agent: Default::default(),
         wire_quirks: info.wire_quirks,
         extra_headers,
         context_window: info.context_window.get(),
@@ -5076,6 +5214,83 @@ mod tests {
     use super::*;
     use serial_test::serial;
     use xai_grok_test_support::EnvGuard;
+
+    #[test]
+    fn orchestration_config_resolves_fast_against_model_capabilities() {
+        let cfg: OrchestrationConfig =
+            toml::from_str(r#"fast_service_tier = "fast""#).expect("orchestration parses");
+
+        let unsupported = cfg.resolve_service_tier(&ServiceTierCapabilities::default());
+        assert_eq!(unsupported.requested, ServiceTierPreference::Fast);
+        assert!(!unsupported.supported);
+        assert_eq!(unsupported.source, ServiceTierSource::Config);
+        assert_eq!(
+            unsupported.effective,
+            xai_grok_sampling_types::EffectiveServiceTier::Standard
+        );
+
+        let supported = cfg.resolve_service_tier(&ServiceTierCapabilities {
+            priority: true,
+            default_service_tier: None,
+        });
+        assert!(supported.supported);
+        assert_eq!(
+            supported.effective,
+            xai_grok_sampling_types::EffectiveServiceTier::Priority
+        );
+        assert_eq!(supported.source, ServiceTierSource::Config);
+    }
+
+    #[test]
+    fn orchestration_config_defaults_hosted_multi_agent_off() {
+        let cfg = OrchestrationConfig::default();
+        let resolved = cfg.resolve_hosted_multi_agent(HostedMultiAgentCapability::default());
+
+        assert!(!resolved.enabled);
+        assert_eq!(resolved.max_concurrent_subagents, None);
+        assert!(!cfg.codex_app_server.enabled);
+    }
+
+    #[test]
+    fn orchestration_config_can_enable_codex_app_server_explicitly() {
+        let cfg: OrchestrationConfig = toml::from_str(
+            r#"
+            [codex_app_server]
+            enabled = true
+            executable = "/opt/codex"
+            args = ["app-server"]
+            "#,
+        )
+        .expect("Codex app-server config parses");
+
+        assert!(cfg.codex_app_server.enabled);
+        assert_eq!(cfg.codex_app_server.executable, PathBuf::from("/opt/codex"));
+        assert_eq!(cfg.codex_app_server.args, ["app-server"]);
+    }
+
+    #[test]
+    fn orchestration_config_resolves_ultra_source_and_limits() {
+        let cfg: OrchestrationConfig = toml::from_str(
+            r#"
+            ultra_enabled = true
+            ultra_max_children = 99
+            "#,
+        )
+        .expect("orchestration parses");
+
+        let resolved = cfg.resolve_ultra_orchestration_config();
+        assert!(resolved.enabled);
+        assert_eq!(
+            resolved.max_children,
+            crate::control_plane::agent_graph::ULTRA_MAX_CHILDREN
+        );
+        assert!(!resolved.policy_injected);
+        assert_eq!(
+            resolved.setting_source,
+            crate::control_plane::agent_graph::UltraSettingSource::Config
+        );
+    }
+
     #[derive(Debug)]
     struct StaticTestBearer;
     impl xai_grok_sampler::BearerResolver for StaticTestBearer {

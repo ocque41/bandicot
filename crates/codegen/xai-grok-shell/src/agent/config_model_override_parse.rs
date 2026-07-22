@@ -519,6 +519,9 @@ mod tests {
             capabilities: Some(ProviderCapabilities {
                 tools: true,
                 image_input: false,
+                service_tiers: Default::default(),
+                hosted_multi_agent: Default::default(),
+                prompt_cache: false,
             }),
             wire_quirks: Some(WireQuirks {
                 chat_max_tokens_field: ChatMaxTokensField::MaxCompletionTokens,

@@ -91,6 +91,8 @@ mod tests {
             transport: Default::default(),
             auth_scheme: Default::default(),
             capabilities: Default::default(),
+            effective_service_tier: Default::default(),
+            hosted_multi_agent: Default::default(),
             wire_quirks: Default::default(),
             extra_headers: IndexMap::new(),
             context_window: 8192,

@@ -1,0 +1,10 @@
+name = "sure-polish"
+description = "Implementation and verification agent for the Bandicot control-plane goal."
+agents = ["sure-polish"]
+required_skills = [
+  "/Users/miguel/.codex/skills/auto-mode-trust",
+  "/Users/miguel/.codex/skills/smooth-software",
+]
+
+[agent_paths]
+"sure-polish" = "/Users/miguel/.codex/agents/sure-polish.toml"

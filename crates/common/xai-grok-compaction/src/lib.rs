@@ -62,8 +62,10 @@ pub use intra_compaction::DEFAULT_COMPACTION_MODEL_NAME;
 pub use code_compaction::{
     CompactedHistoryParts, DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT, FailureKind,
     FullReplaceAttemptOutcome, FullReplaceConfig, FullReplaceContext, FullReplaceError,
-    FullReplaceObserver, FullReplaceOutput, FullReplaceSummary, MIN_SUMMARY_SEED_CHARS,
-    SELF_SUMMARIZATION_PROMPT, SummaryPromptKind, apply_full_replace_compaction,
+    FullReplaceObserver, FullReplaceOutput, FullReplaceSummary, IMMUTABLE_COMPACTION_GUARD,
+    MAX_RUNTIME_PROMPT_BYTES, MIN_SUMMARY_SEED_CHARS, RuntimePromptError, RuntimePromptSnapshot,
+    RuntimePromptSource, RuntimePromptStore, RuntimeSessionKind, SELF_SUMMARIZATION_PROMPT,
+    SummaryPromptBindings, SummaryPromptKind, apply_full_replace_compaction,
     assemble_compacted_history, build_summary_prompt, build_summary_prompt_kind,
     classify_http_status, classify_stream_event_error, format_compact_summary,
     format_compact_summary_content, is_context_length_error, is_degenerate_summary,

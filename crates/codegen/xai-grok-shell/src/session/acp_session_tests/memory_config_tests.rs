@@ -103,6 +103,8 @@ async fn create_test_actor_with_memory(
             top_p: None,
             api_backend: Default::default(),
             extra_headers: Default::default(),
+            effective_service_tier: Default::default(),
+            hosted_multi_agent: Default::default(),
             context_window: std::num::NonZeroU64::new(context_window)
                 .expect("test context_window must be non-zero"),
             reasoning_effort: None,
@@ -148,6 +150,10 @@ async fn create_test_actor_with_memory(
         compaction_at_tokens: std::cell::Cell::new(None),
         doom_loop_recovery: None,
         doom_loop_turn_tally: Default::default(),
+        ultra_orchestration: std::sync::Arc::new(parking_lot::Mutex::new(
+            crate::control_plane::agent_graph::UltraOrchestrationConfig::default(),
+        )),
+        ultra_child_counts: Default::default(),
         file_state_tracker: Arc::new(FileStateTracker::new()),
         rewind_pending_prompt: std::sync::Mutex::new(None),
         startup_hints: StartupHints::default(),

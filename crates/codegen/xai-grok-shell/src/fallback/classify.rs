@@ -74,13 +74,10 @@ pub fn classify_error_info(
     if xai_grok_sampling_types::is_context_length_error(&info.message) {
         return None;
     }
-    if is_quota_exhausted_message(&info.message)
-        || info.status_code == Some(402)
-    {
+    if is_quota_exhausted_message(&info.message) || info.status_code == Some(402) {
         return Some(FailoverReason::QuotaExhausted);
     }
-    if matches!(info.kind, SamplingErrorKind::RateLimited) || info.status_code == Some(429)
-    {
+    if matches!(info.kind, SamplingErrorKind::RateLimited) || info.status_code == Some(429) {
         // Prefer quota language over bare rate limit when both apply.
         if is_quota_exhausted_message(&info.message) {
             return Some(FailoverReason::QuotaExhausted);
@@ -98,6 +95,17 @@ pub fn classify_error_info(
         }
     }
     None
+}
+
+/// Runtime account routing is intentionally narrower than diagnostics: only
+/// confirmed throttling or exhausted quota may advance to another provider.
+pub fn runtime_failover_reason(info: &SamplingErrorInfo) -> Option<FailoverReason> {
+    classify_error_info(info, false).filter(|reason| {
+        matches!(
+            reason,
+            FailoverReason::RateLimited | FailoverReason::QuotaExhausted
+        )
+    })
 }
 
 #[cfg(test)]
@@ -138,10 +146,7 @@ mod tests {
 
     #[test]
     fn context_length_does_not_failover() {
-        let err = api(
-            StatusCode::BAD_REQUEST,
-            "maximum context length exceeded",
-        );
+        let err = api(StatusCode::BAD_REQUEST, "maximum context length exceeded");
         assert_eq!(classify_sampling_error(&err, false), None);
     }
 
@@ -152,6 +157,60 @@ mod tests {
         assert_eq!(
             classify_sampling_error(&err, true),
             Some(FailoverReason::ServerError)
+        );
+    }
+
+    fn info(kind: SamplingErrorKind, status_code: Option<u16>, message: &str) -> SamplingErrorInfo {
+        SamplingErrorInfo {
+            kind,
+            status_code,
+            message: message.to_owned(),
+            is_retryable: false,
+            retry_after_secs: None,
+            model_metadata: None,
+            empty_response_context: None,
+            doom_loop_triggers: None,
+            doom_loop_aborted_at_chunk: None,
+        }
+    }
+
+    #[test]
+    fn runtime_advances_only_for_rate_limit_or_quota_by_default() {
+        assert_eq!(
+            runtime_failover_reason(&info(
+                SamplingErrorKind::RateLimited,
+                Some(429),
+                "slow down",
+            )),
+            Some(FailoverReason::RateLimited)
+        );
+        assert_eq!(
+            runtime_failover_reason(&info(
+                SamplingErrorKind::Api,
+                Some(429),
+                "insufficient_quota",
+            )),
+            Some(FailoverReason::QuotaExhausted)
+        );
+        assert_eq!(
+            runtime_failover_reason(&info(SamplingErrorKind::Auth, Some(401), "unauthorized",)),
+            None
+        );
+        assert_eq!(
+            runtime_failover_reason(&info(SamplingErrorKind::Api, Some(500), "server error",)),
+            None
+        );
+        assert_eq!(
+            runtime_failover_reason(&info(SamplingErrorKind::Http, None, "network error")),
+            None
+        );
+        assert_eq!(
+            runtime_failover_reason(&info(
+                SamplingErrorKind::Api,
+                Some(400),
+                "maximum context length exceeded",
+            )),
+            None
         );
     }
 }

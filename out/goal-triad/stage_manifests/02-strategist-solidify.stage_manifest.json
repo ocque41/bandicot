@@ -1,0 +1,78 @@
+{
+  "schema": "agent-pipeline.stage_manifest.v1",
+  "stage": "strategist-solidify",
+  "order": 2,
+  "agent": "strategist-solidify",
+  "generated_at": "2026-07-22T00:05:27+02:00",
+  "status": "complete",
+  "verdict": "REQUEST CHANGES",
+  "inputs": [
+    {
+      "name": "active-goal",
+      "path": "/Users/miguel/.codex/attachments/27a8a857-af32-4137-bc21-345c476d8df5/pasted-text.txt",
+      "read": true
+    },
+    {
+      "name": "gap-scan-report",
+      "path": "/Users/miguel/Documents/bandicot/out/goal-triad/gap_scan.md",
+      "read": true
+    },
+    {
+      "name": "implementation-ledger",
+      "path": "/Users/miguel/Documents/bandicot/docs/changes/2026-07-21-control-plane-implementation.md",
+      "read": true
+    },
+    {
+      "name": "stage-contract",
+      "path": "/Users/miguel/Documents/bandicot/.codex/pipelines/goal-triad/stages/02-strategist-solidify.toml",
+      "read": true
+    },
+    {
+      "name": "current-adrs",
+      "path": "/Users/miguel/Documents/bandicot/docs/decisions",
+      "read": true
+    }
+  ],
+  "outputs": [
+    {
+      "name": "architecture-solidification-ideas",
+      "path": "/Users/miguel/Documents/bandicot/out/goal-triad/architecture_solidification_ideas.md",
+      "written": true
+    },
+    {
+      "name": "stage-manifest",
+      "path": "/Users/miguel/Documents/bandicot/out/goal-triad/stage_manifests/02-strategist-solidify.stage_manifest.json",
+      "written": true
+    }
+  ],
+  "acceptance_gates": {
+    "gap_scan_read_or_absence_labeled": true,
+    "architecture_ideas_are_goal_safe": true,
+    "ideas_have_file_or_test_targets": true,
+    "non_goals_preserved": true
+  },
+  "reliability_blockers": [
+    "Phase 1 service-tier and provider capability contracts are missing.",
+    "Responses request bodies cannot yet prove Fast Mode because service_tier is always absent.",
+    "AgentGraph core, durable store, scheduler, and explicit worker authority are missing."
+  ],
+  "suggested_next_stage": "sure-polish",
+  "suggested_first_slice": "Implement shared service-tier types, provider capability resolution, SamplerConfig effective service-tier state, and a common Responses request-extension helper with wire tests.",
+  "assumptions": [
+    "Prompt-provided AGENTS instructions are the active project instructions because no tracked AGENTS.md was present.",
+    "The two pipeline output files are allowed stage artifacts; no product source was edited."
+  ],
+  "non_goals_preserved": [
+    "No live 100-worker provider test.",
+    "No use of xai-codebase-graph as orchestration graph.",
+    "No ScheduledTask DAG representation.",
+    "No recursive model-agent fan-out.",
+    "No automatic Fast through Ultra or Swarm.",
+    "No direct generated root Cargo.toml edit."
+  ],
+  "verification": {
+    "cargo_metadata_no_deps": "passed during scan; 79 packages",
+    "git_diff_check": "passed during scan",
+    "full_tests": "not run; this stage is an architecture scan and required implementation slices are absent"
+  }
+}

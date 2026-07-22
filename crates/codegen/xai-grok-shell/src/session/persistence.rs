@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::config::StorageMode;
+use crate::control_plane::agent_graph::UltraOrchestrationConfig;
 
 use crate::remote::RemoteSync;
 
@@ -18,7 +19,7 @@ use crate::tools::todo::TodoState;
 use crate::util::grok_home::grok_home;
 use agent_client_protocol as acp;
 use xai_acp_lib::AcpAgentGatewaySender as GatewaySender;
-use xai_grok_sampling_types::ReasoningEffort;
+use xai_grok_sampling_types::{ReasoningEffort, ServiceTierPreference};
 
 use crate::session::info::Info;
 use tokio::sync::mpsc;
@@ -322,6 +323,8 @@ pub enum PersistenceMsg {
         agent_name: Option<String>,
         reasoning_effort: Option<Option<ReasoningEffort>>,
     },
+    UltraOrchestration(UltraOrchestrationConfig),
+    FastServiceTier(Option<ServiceTierPreference>),
     PlanState(TodoState),
     /// Plan mode lifecycle state to persist
     PlanModeState(crate::session::plan_mode::PlanModeSnapshot),
@@ -363,6 +366,14 @@ pub enum PersistenceMsg {
     },
     /// Persist a compaction checkpoint file to `compaction_checkpoints/{id}.json`.
     CompactionCheckpoint(crate::extensions::notification::CompactionCheckpointFile),
+    /// Persist both the checkpoint payload and its replay marker before
+    /// acknowledging the caller. Compaction must not replace live history until
+    /// this acknowledgement succeeds.
+    CompactionCheckpointDurablyAndAck {
+        checkpoint: crate::extensions::notification::CompactionCheckpointFile,
+        update: crate::session::storage::SessionUpdate,
+        respond_to: tokio::sync::oneshot::Sender<io::Result<()>>,
+    },
     /// Persist a compaction request+response artifact to
     /// `compaction_requests/{request_id}.json`. Used for offline prompt
     /// iteration — captures the exact ConversationItem list sent to the
@@ -894,6 +905,10 @@ pub struct Summary {
     pub sandbox_profile: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<ReasoningEffort>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fast_service_tier: Option<ServiceTierPreference>,
+    #[serde(default, skip_serializing_if = "UltraOrchestrationConfig::is_default")]
+    pub ultra_orchestration: UltraOrchestrationConfig,
 }
 
 /// Current `grok_home` as a UTF-8 string, or `None` if the path isn't valid UTF-8.
@@ -946,6 +961,8 @@ impl Summary {
             agent_name: None,
             sandbox_profile: None,
             reasoning_effort: None,
+            fast_service_tier: None,
+            ultra_orchestration: UltraOrchestrationConfig::default(),
         })
     }
 
@@ -1031,6 +1048,27 @@ mod is_hidden_tests {
         let json = serde_json::to_string(&s).unwrap();
         let back: Summary = serde_json::from_str(&json).unwrap();
         assert_eq!(back.reasoning_effort, Some(ReasoningEffort::Xhigh));
+    }
+
+    #[test]
+    fn summary_round_trips_fast_requested_preference_only() {
+        let mut summary = summary_with_kind(None);
+        let json = serde_json::to_value(&summary).unwrap();
+        assert!(json.get("fast_service_tier").is_none());
+        let back: Summary = serde_json::from_value(json).unwrap();
+        assert_eq!(back.fast_service_tier, None);
+
+        summary.fast_service_tier = Some(ServiceTierPreference::Fast);
+        let json = serde_json::to_value(&summary).unwrap();
+        assert_eq!(
+            json.get("fast_service_tier"),
+            Some(&serde_json::json!("fast"))
+        );
+        assert!(json.get("effective_service_tier").is_none());
+        assert!(json.get("supported").is_none());
+
+        let back: Summary = serde_json::from_value(json).unwrap();
+        assert_eq!(back.fast_service_tier, Some(ServiceTierPreference::Fast));
     }
 
     #[test]
@@ -1680,6 +1718,24 @@ impl SessionPersistence {
                         sync.set_model_id(model_id.0.to_string());
                     }
                 }
+                PersistenceMsg::UltraOrchestration(config) => {
+                    if let Err(e) = self
+                        .storage
+                        .update_ultra_orchestration(&self.info, config)
+                        .await
+                    {
+                        tracing::warn!(?e, "failed to update ultra orchestration state");
+                    }
+                }
+                PersistenceMsg::FastServiceTier(requested) => {
+                    if let Err(e) = self
+                        .storage
+                        .update_fast_service_tier(&self.info, requested)
+                        .await
+                    {
+                        tracing::warn!(?e, "failed to update fast service tier state");
+                    }
+                }
                 PersistenceMsg::PlanState(state) => {
                     if let Err(e) = self.storage.write_plan_state(&self.info, &state).await {
                         tracing::warn!(?e, "failed to write plan state");
@@ -1857,6 +1913,24 @@ impl SessionPersistence {
                     {
                         tracing::warn!(?e, "failed to write compaction checkpoint file");
                     }
+                }
+                PersistenceMsg::CompactionCheckpointDurablyAndAck {
+                    checkpoint,
+                    update,
+                    respond_to,
+                } => {
+                    let result = async {
+                        self.drain_pending().await?;
+                        self.storage
+                            .write_compaction_checkpoint(&self.info, &checkpoint)
+                            .await?;
+                        self.storage
+                            .append_update_durable(&self.info, &update)
+                            .await?;
+                        Ok(())
+                    }
+                    .await;
+                    let _ = respond_to.send(result);
                 }
                 PersistenceMsg::CompactionRequest(request) => {
                     if let Err(e) = self

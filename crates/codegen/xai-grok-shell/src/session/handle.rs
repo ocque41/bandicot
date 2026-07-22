@@ -110,6 +110,12 @@ pub struct SessionHandle {
     /// Per-session tracking prevents cross-client contamination in leader mode
     /// where one client enabling YOLO could affect another client's sessions.
     pub yolo_mode: bool,
+    /// Shared Ultra state used by subagent spawning to enforce depth one only
+    /// while Ultra is effective for this parent session.
+    pub(crate) ultra_orchestration: std::sync::Arc<
+        parking_lot::Mutex<crate::control_plane::agent_graph::UltraOrchestrationConfig>,
+    >,
+    pub(crate) ultra_child_counts: std::sync::Arc<crate::agent::subagent::SharedChildCounts>,
     /// Explicit origin client metadata captured when the session was created.
     /// Used for per-session User-Agent rendering and for scoping leader-mode
     /// client behaviors like yolo broadcasts.

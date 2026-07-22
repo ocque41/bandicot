@@ -568,6 +568,7 @@ impl MvpAgent {
     ) -> crate::session::slash_commands::CommandAvailability {
         crate::session::slash_commands::CommandAvailability {
             goal: self.cfg.borrow().resolve_goal().value,
+            accounts: true,
             ..crate::session::slash_commands::CommandAvailability::default()
         }
     }

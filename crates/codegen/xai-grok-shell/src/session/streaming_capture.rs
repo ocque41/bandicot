@@ -138,6 +138,19 @@ pub(crate) struct StreamingTurnCapture {
 }
 
 impl StreamingTurnCapture {
+    /// Whether retrying on another provider could duplicate user-visible text
+    /// or tool activity from the failed attempt.
+    pub(crate) fn has_visible_activity(&self) -> bool {
+        !self.response_text.is_empty()
+            || !self.reasoning_text.is_empty()
+            || self.phase == CapturePhase::ToolCall
+            || self.segments.iter().any(|segment| {
+                !segment.response_text.is_empty()
+                    || !segment.reasoning_text.is_empty()
+                    || segment.phase == CapturePhase::ToolCall
+            })
+    }
+
     /// Empty means nothing worth uploading. A terminal reasoning-only empty
     /// response stamps the token magnitude (`reasoning_tokens` / `empty_reason`
     /// / ...) even when no reasoning text was streamed to the shell, so those
@@ -353,6 +366,17 @@ mod streaming_turn_capture_tests {
     use super::{
         CapturePhase, DoomLoopSegmentStamp, STREAMING_CAPTURE_MAX_BYTES, StreamingTurnCapture,
     };
+
+    #[test]
+    fn visible_activity_blocks_cross_provider_retry() {
+        let mut capture = StreamingTurnCapture::default();
+        assert!(!capture.has_visible_activity());
+        capture.reasoning_text = "thinking".into();
+        assert!(capture.has_visible_activity());
+        capture.reasoning_text.clear();
+        capture.phase = CapturePhase::ToolCall;
+        assert!(capture.has_visible_activity());
+    }
 
     /// A doom stamp on a TEXTLESS slot (mid-stream abort before any delta
     /// reached the shell) must still fold on the resample's `start_stream` —

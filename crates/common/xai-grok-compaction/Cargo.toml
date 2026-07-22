@@ -9,6 +9,7 @@ description = "Shared, transport-agnostic compaction engine for Grok chat and Gr
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
+sha2 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["time", "macros"] }
 tracing = { workspace = true }

@@ -3,6 +3,8 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use std::num::NonZeroU64;
 
+use crate::service_tier::{HostedMultiAgentConfig, ResolvedServiceTier};
+
 // ============================================================================
 // TraceContext — cloneable, type-erased context for request tracing
 // ============================================================================
@@ -555,6 +557,8 @@ pub struct PromptTokensDetails {
     #[serde(default)]
     pub cached_tokens: u32,
     #[serde(default)]
+    pub cache_write_tokens: u32,
+    #[serde(default)]
     pub audio_tokens: u32,
 }
 
@@ -1071,6 +1075,12 @@ pub struct SamplingConfig {
     /// Extra headers to send with requests (e.g., for BYOK scenarios).
     #[serde(default, skip_serializing_if = "indexmap::IndexMap::is_empty")]
     pub extra_headers: indexmap::IndexMap<String, String>,
+    /// Requested/effective service tier for provider requests.
+    #[serde(default)]
+    pub effective_service_tier: ResolvedServiceTier,
+    /// Explicit hosted-provider multi-agent request settings.
+    #[serde(default)]
+    pub hosted_multi_agent: HostedMultiAgentConfig,
     /// Total context window size in tokens. Used for auto-compact thresholds.
     pub context_window: NonZeroU64,
     /// Reasoning effort level for reasoning models.

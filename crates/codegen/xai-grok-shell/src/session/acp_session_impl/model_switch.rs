@@ -45,6 +45,21 @@ impl SessionActor {
                 }
             )),
         );
+        let current_sampling = self.chat_state_handle.get_sampling_config().await;
+        let effective_service_tier = current_sampling
+            .as_ref()
+            .map(|cfg| {
+                xai_grok_sampling_types::resolve_service_tier(
+                    cfg.effective_service_tier.requested,
+                    &sampling_config.capabilities.service_tiers,
+                    cfg.effective_service_tier.source,
+                )
+            })
+            .unwrap_or_default();
+        let hosted_multi_agent = current_sampling
+            .as_ref()
+            .map(|cfg| cfg.hosted_multi_agent)
+            .unwrap_or_default();
         self.chat_state_handle
             .update_sampling_config(xai_grok_sampling_types::SamplingConfig {
                 base_url: sampling_config.base_url.clone(),
@@ -54,6 +69,8 @@ impl SessionActor {
                 top_p: sampling_config.top_p,
                 api_backend: sampling_config.api_backend.clone(),
                 extra_headers: sampling_config.extra_headers.clone(),
+                effective_service_tier,
+                hosted_multi_agent,
                 context_window: new_context_window,
                 reasoning_effort: sampling_config.reasoning_effort,
                 stream_tool_calls: Some(sampling_config.stream_tool_calls),

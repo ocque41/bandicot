@@ -1163,6 +1163,10 @@ fn make_test_handle(
         model_id: acp::ModelId::new(model),
         reasoning_effort: None,
         yolo_mode: yolo,
+        ultra_orchestration: Arc::new(parking_lot::Mutex::new(
+            crate::control_plane::agent_graph::UltraOrchestrationConfig::default(),
+        )),
+        ultra_child_counts: Default::default(),
         origin_client: client_id.map(|s| crate::http::OriginClientInfo {
             product: s.to_string(),
             version: None,

@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -329,9 +329,7 @@ impl ApiKeyProvider for FallbackApiKeyProvider {
         self.get_current_key()
     }
 
-    fn current_api_key_async(
-        &self,
-    ) -> Pin<Box<dyn Future<Output = Option<String>> + Send + '_>> {
+    fn current_api_key_async(&self) -> Pin<Box<dyn Future<Output = Option<String>> + Send + '_>> {
         Box::pin(self.resolve_next_key())
     }
 }
@@ -428,10 +426,10 @@ mod tests {
             max_failures: 2,
         };
         let provider = FallbackApiKeyProvider::with_config(config);
-        
+
         provider.record_failure(false, false); // First failure
         assert_eq!(provider.current_index(), 0); // Still on same provider
-        
+
         provider.record_failure(false, false); // Second failure - should open circuit
         assert_eq!(provider.current_index(), 1); // Moved to next
     }
@@ -446,7 +444,7 @@ mod tests {
             "recovery_interval_secs": 600,
             "max_failures": 5
         }"#;
-        
+
         let provider = FallbackApiKeyProvider::from_json(json).unwrap();
         assert_eq!(provider.provider_count(), 2);
         assert_eq!(provider.recovery_interval, Duration::from_secs(600));
@@ -460,7 +458,7 @@ mod tests {
                 {"name": "a", "api_key": "sk-a"}
             ]
         }"#;
-        
+
         let provider = FallbackApiKeyProvider::from_json(json).unwrap();
         assert_eq!(provider.recovery_interval, Duration::from_secs(300));
         assert_eq!(provider.max_failures, 3);
@@ -477,7 +475,7 @@ mod tests {
     async fn test_resolve_next_key_skips_unhealthy() {
         let provider = FallbackApiKeyProvider::new(test_providers());
         provider.record_failure(true, false); // Mark primary as unhealthy
-        
+
         let key = provider.resolve_next_key().await;
         assert_eq!(key, Some("sk-fallback-1".to_string()));
     }
@@ -485,12 +483,12 @@ mod tests {
     #[tokio::test]
     async fn test_resolve_next_key_all_unhealthy_returns_current() {
         let provider = FallbackApiKeyProvider::new(test_providers());
-        
+
         // Mark all providers as unhealthy
         for _ in 0..3 {
             provider.record_failure(true, false);
         }
-        
+
         // Should still return a key (the current one)
         let key = provider.resolve_next_key().await;
         assert!(key.is_some());
@@ -501,7 +499,7 @@ mod tests {
         let scheme = AuthScheme::Bearer;
         let json = serde_json::to_string(&scheme).unwrap();
         assert_eq!(json, "\"bearer\"");
-        
+
         let scheme = AuthScheme::XApiKey;
         let json = serde_json::to_string(&scheme).unwrap();
         assert_eq!(json, "\"x_api_key\"");
@@ -515,7 +513,7 @@ mod tests {
             base_url: Some("https://api.example.com".to_string()),
             auth_scheme: AuthScheme::Bearer,
         };
-        
+
         let json = serde_json::to_string(&entry).unwrap();
         assert!(json.contains("\"name\":\"test\""));
         assert!(json.contains("\"api_key\":\"sk-test\""));

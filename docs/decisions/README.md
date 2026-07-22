@@ -7,3 +7,6 @@ compatibility, persistence, or multiple subsystems.
 - [0002: Host-owned workflows](0002-host-owned-workflows.md)
 - [0003: Provider transport boundary](0003-provider-transport.md)
 - [0004: Apple Foundation Models stdio bridge](0004-apple-foundation-models-stdio.md)
+- [0005: AgentGraph is the host-owned orchestration control plane](0005-agentgraph-control-plane.md)
+- [0006: Orchestration policies and service tiers are orthogonal](0006-orchestration-and-service-tiers.md)
+- [0007: Worker authority and graph resources are explicitly isolated](0007-worker-authority-and-resource-isolation.md)

@@ -12,6 +12,8 @@ mod state;
 pub use chain::{
     FallbackChainHop, FallbackConfig, FallbackMapEntry, FallbackProvider, parse_fallback_config,
 };
-pub use classify::{FailoverReason, classify_error_info, classify_sampling_error};
+pub use classify::{
+    FailoverReason, classify_error_info, classify_sampling_error, runtime_failover_reason,
+};
 pub use router::{FallbackPlan, HopAttempt, plan_hops, resolve_hop_catalog_id};
 pub use state::FallbackState;

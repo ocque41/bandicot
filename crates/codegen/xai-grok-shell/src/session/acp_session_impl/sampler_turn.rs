@@ -165,18 +165,18 @@ impl SessionActor {
             && cached_id == model_id
             && facts.byok != ModelByok::Unknown
         {
-            return *facts;
+            return facts.clone();
         }
         let fresh = crate::agent::config::resolve_model_auth_facts(model_id);
         if fresh.byok == ModelByok::Unknown {
             if let Some((cached_id, facts)) = self.model_auth_facts.borrow().as_ref()
                 && cached_id == model_id
             {
-                return *facts;
+                return facts.clone();
             }
             return fresh;
         }
-        *self.model_auth_facts.borrow_mut() = Some((model_id.to_string(), fresh));
+        *self.model_auth_facts.borrow_mut() = Some((model_id.to_string(), fresh.clone()));
         fresh
     }
     /// Gate inputs for `model_id` routed to `base_url`. See
@@ -265,6 +265,8 @@ impl SessionActor {
                 top_p: None,
                 api_backend: Default::default(),
                 extra_headers: Default::default(),
+                effective_service_tier: Default::default(),
+                hosted_multi_agent: Default::default(),
                 context_window: std::num::NonZeroU64::new(256_000).unwrap(),
                 reasoning_effort: None,
                 stream_tool_calls: None,
@@ -274,9 +276,23 @@ impl SessionActor {
         let auth_method = self.auth_method_id.load();
         let gate =
             SessionTokenAuthGate::new(auth_method.as_deref(), model_facts.byok, &cfg.base_url);
-        let use_bearer_resolver = gate.active();
+        let account_route = crate::accounts::AccountManager::load()
+            .ok()
+            .and_then(|manager| manager.find_enabled_route(&cfg.base_url, &cfg.model));
+        let use_bearer_resolver = account_route.is_none() && gate.active();
         self.log_auth_gate_unknown("reconstruct_full_config", gate, &cfg.base_url);
-        let auth_scheme = model_facts.auth_scheme;
+        let auth_scheme = account_route
+            .as_ref()
+            .map(|route| {
+                if route.provider.as_str() == crate::accounts::storage::ProviderId::ANTHROPIC {
+                    xai_grok_sampler::AuthScheme::XApiKey
+                } else if route.credential.is_some() {
+                    xai_grok_sampler::AuthScheme::Bearer
+                } else {
+                    xai_grok_sampler::AuthScheme::None
+                }
+            })
+            .unwrap_or(model_facts.auth_scheme);
         let mut extra_headers = cfg.extra_headers;
         crate::agent::config::inject_url_derived_headers(
             &mut extra_headers,
@@ -285,7 +301,9 @@ impl SessionActor {
         );
         let compaction_at_tokens = self.compaction_at_tokens.get();
         let compactions_remaining = self.compactions_remaining.get();
-        if compactions_remaining.is_some() || compaction_at_tokens.is_some() {
+        if std::env::var("BANDICOT_PROVIDER_NATIVE_COMPACTION").as_deref() == Ok("1")
+            && (compactions_remaining.is_some() || compaction_at_tokens.is_some())
+        {
             let has_compaction_summary = self
                 .chat_state_handle
                 .get_last_compaction_prompt_index()
@@ -307,17 +325,43 @@ impl SessionActor {
                 extra_headers.insert("x-compaction-at".to_string(), value.to_string());
             }
         }
+        let context_policy = crate::session::compaction_config::ContextPolicy::default();
+        let session_kind = if self.startup_hints.is_subagent {
+            crate::session::compaction_config::ContextSessionKind::Subagent
+        } else {
+            crate::session::compaction_config::ContextSessionKind::Main
+        };
+        let effective_window = context_policy
+            .band(session_kind)
+            .effective_window_tokens(cfg.context_window.get(), None);
+        let rendered_input = self.chat_state_handle.get_estimated_total_tokens().await;
+        let available_output = effective_window
+            .saturating_sub(rendered_input)
+            .saturating_sub(context_policy.hard_safety_margin_tokens);
+        let configured_output = cfg
+            .max_completion_tokens
+            .map(u64::from)
+            .unwrap_or(context_policy.normal_max_output_tokens);
+        let max_completion_tokens = u32::try_from(
+            configured_output
+                .min(context_policy.normal_max_output_tokens)
+                .min(available_output)
+                .max(1),
+        )
+        .expect("dynamic output cap fits u32");
         SamplingConfig {
             api_key: creds.api_key,
             base_url: cfg.base_url,
             model: cfg.model,
-            max_completion_tokens: cfg.max_completion_tokens,
+            max_completion_tokens: Some(max_completion_tokens),
             temperature: cfg.temperature,
             top_p: cfg.top_p,
             api_backend: cfg.api_backend,
             transport: model_facts.transport,
             auth_scheme,
             capabilities: model_facts.capabilities,
+            effective_service_tier: cfg.effective_service_tier.clone(),
+            hosted_multi_agent: cfg.hosted_multi_agent,
             wire_quirks: model_facts.wire_quirks,
             extra_headers,
             context_window: cfg.context_window.get(),
@@ -582,8 +626,16 @@ impl SessionActor {
         self: &Arc<Self>,
         error: xai_grok_sampler::SamplingErrorInfo,
     ) -> Result<SamplerFailureRecovery, acp::Error> {
+        self.handle_sampling_failure_with_policy(error, true).await
+    }
+
+    async fn handle_sampling_failure_with_policy(
+        self: &Arc<Self>,
+        error: xai_grok_sampler::SamplingErrorInfo,
+        allow_context_compaction: bool,
+    ) -> Result<SamplerFailureRecovery, acp::Error> {
         use xai_grok_sampler::SamplingErrorKind;
-        if self.should_compact_on_error(&error).await {
+        if allow_context_compaction && self.should_compact_on_error(&error).await {
             let cw = error
                 .model_metadata
                 .as_ref()
@@ -865,52 +917,162 @@ impl SessionActor {
         request: ConversationRequest,
     ) -> Result<SamplerTurnOutcome, acp::Error> {
         self.prepare_sampler_for_turn().await;
-        let stream_drained_rx = {
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            *self.turn_stream_drained.lock() = Some(tx);
-            rx
-        };
-        let request_id = xai_grok_sampler::RequestId::random();
-        let request_id_str = request_id.as_str().to_string();
-        match self
-            .sampler_handle
-            .submit_and_collect(request_id, request)
-            .await
-        {
-            Ok((response, metrics)) => {
-                let span = tracing::Span::current();
-                span.record("request_id", request_id_str.as_str());
-                if let Some(ttft) = metrics.time_to_first_token_ms {
-                    span.record("ttft_ms", ttft as i64);
+        let primary_config = self.reconstruct_full_config().await;
+        let fallback_routes = crate::accounts::AccountManager::load()
+            .map(|manager| manager.fallback_routes())
+            .unwrap_or_default();
+        let mut fallback_index = 0usize;
+        let mut next_route: Option<crate::accounts::ResolvedRoute> = None;
+        let mut attempted_routes = std::collections::HashSet::new();
+
+        loop {
+            let mut attempt_request = request.clone();
+            if let Some(route) = next_route.as_ref() {
+                let mut config = self.reconstruct_full_config().await;
+                let models = self.models_manager.models();
+                let mut catalog_backend = false;
+                if let Some(entry) = crate::accounts::catalog_entry_for_route(route, &models) {
+                    config.max_completion_tokens = entry.max_completion_tokens;
+                    config.temperature = entry.temperature;
+                    config.top_p = entry.top_p;
+                    config.api_backend = entry.api_backend.clone();
+                    config.capabilities = entry.capabilities.clone();
+                    config.wire_quirks = entry.wire_quirks;
+                    config.context_window = entry.context_window.get();
+                    config.reasoning_effort = entry.reasoning_effort;
+                    config.stream_tool_calls = entry.stream_tool_calls.unwrap_or(false);
+                    config.supports_backend_search = entry.supports_backend_search;
+                    config.compactions_remaining = entry.compactions_remaining;
+                    config.compaction_at_tokens = entry.compaction_at_tokens;
+                    config.extra_headers = entry.extra_headers.clone();
+                    catalog_backend = true;
+                } else if let Some(context_window) = route.context_window {
+                    config.context_window = context_window;
                 }
-                if metrics.attempts > 0 {
-                    span.record("attempt", i64::from(metrics.attempts));
+                config.base_url.clone_from(&route.base_url);
+                config.model.clone_from(&route.model_id);
+                config.api_key.clone_from(&route.credential);
+                config.bearer_resolver = None;
+                config.attribution_callback = None;
+                config.effective_service_tier = Default::default();
+                config.hosted_multi_agent = Default::default();
+                config.transport = xai_grok_sampling_types::InferenceTransport::Http;
+                if route.provider.as_str() == crate::accounts::storage::ProviderId::ANTHROPIC {
+                    config.api_backend = xai_grok_sampling_types::ApiBackend::Messages;
+                    config.auth_scheme = xai_grok_sampler::AuthScheme::XApiKey;
+                } else {
+                    if !catalog_backend {
+                        config.api_backend = xai_grok_sampling_types::ApiBackend::ChatCompletions;
+                    }
+                    config.auth_scheme = if route.credential.is_some() {
+                        xai_grok_sampler::AuthScheme::Bearer
+                    } else {
+                        xai_grok_sampler::AuthScheme::None
+                    };
                 }
-                if tokio::time::timeout(std::time::Duration::from_secs(5), stream_drained_rx)
-                    .await
-                    .is_err()
-                {
-                    self.turn_stream_drained.lock().take();
-                    tracing::warn!(
-                        "stream-drain barrier timed out; proceeding to emit tool \
-                         calls (eventId ordering may be imperfect this turn)"
-                    );
-                }
-                Ok(SamplerTurnOutcome::Response(
-                    Box::new(response),
-                    Box::new(metrics),
-                ))
+                config.idle_timeout_secs = Some(self.inference_idle_timeout.as_secs());
+                self.sampler_handle.update_config(config);
+                attempt_request.model = Some(route.model_id.clone());
             }
-            Err(rich_err) => {
-                self.turn_stream_drained.lock().take();
-                let info = xai_grok_sampler::SamplingErrorInfo::from(&rich_err);
-                match self.handle_sampling_failure(info).await? {
-                    SamplerFailureRecovery::CompactAndResubmit => {
-                        Ok(SamplerTurnOutcome::CompactAndResubmit)
+
+            let stream_drained_rx = {
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                *self.turn_stream_drained.lock() = Some(tx);
+                rx
+            };
+            let request_id = xai_grok_sampler::RequestId::random();
+            let request_id_str = request_id.as_str().to_string();
+            match self
+                .sampler_handle
+                .submit_and_collect(request_id, attempt_request)
+                .await
+            {
+                Ok((response, metrics)) => {
+                    let span = tracing::Span::current();
+                    span.record("request_id", request_id_str.as_str());
+                    if let Some(ttft) = metrics.time_to_first_token_ms {
+                        span.record("ttft_ms", ttft as i64);
                     }
-                    SamplerFailureRecovery::RefreshAuthAndResubmit => {
-                        Ok(SamplerTurnOutcome::RefreshAuthAndResubmit)
+                    if metrics.attempts > 0 {
+                        span.record("attempt", i64::from(metrics.attempts));
                     }
+                    if tokio::time::timeout(std::time::Duration::from_secs(5), stream_drained_rx)
+                        .await
+                        .is_err()
+                    {
+                        self.turn_stream_drained.lock().take();
+                        tracing::warn!(
+                            "stream-drain barrier timed out; proceeding to emit tool \
+                         calls (eventId ordering may be imperfect this turn)"
+                        );
+                    }
+                    return Ok(SamplerTurnOutcome::Response(
+                        Box::new(response),
+                        Box::new(metrics),
+                    ));
+                }
+                Err(rich_err) => {
+                    self.turn_stream_drained.lock().take();
+                    let info = xai_grok_sampler::SamplingErrorInfo::from(&rich_err);
+                    let failover_reason = crate::fallback::runtime_failover_reason(&info);
+                    if let (Some(route), Some(reason)) = (next_route.as_ref(), failover_reason) {
+                        crate::accounts::mark_route_cooldown(
+                            &route.route_id,
+                            reason.as_str(),
+                            info.retry_after_secs,
+                        );
+                    }
+                    let may_advance = failover_reason.is_some()
+                        && !self.streaming_turn_capture.lock().has_visible_activity();
+                    if may_advance {
+                        let mut advanced = false;
+                        while let Some(route) = fallback_routes.get(fallback_index).cloned() {
+                            fallback_index += 1;
+                            let duplicates_primary = route.base_url.trim_end_matches('/')
+                                == primary_config.base_url.trim_end_matches('/')
+                                && route.model_id == primary_config.model
+                                && route.credential == primary_config.api_key;
+                            if duplicates_primary
+                                || !crate::accounts::route_is_available(&route.route_id)
+                            {
+                                continue;
+                            }
+                            if !attempted_routes.insert(route.route_id.clone()) {
+                                continue;
+                            }
+                            let reason = failover_reason
+                                .map(|reason| reason.as_str())
+                                .unwrap_or("rate_limited");
+                            self.send_xai_notification(XaiSessionUpdate::RetryState(
+                                crate::extensions::notification::RetryState::Retrying {
+                                    attempt: fallback_index as u32,
+                                    max_retries: fallback_routes.len() as u32,
+                                    reason: format!(
+                                        "Switching to fallback {} ({reason})",
+                                        route.display_name()
+                                    ),
+                                },
+                            ))
+                            .await;
+                            next_route = Some(route);
+                            advanced = true;
+                            break;
+                        }
+                        if advanced {
+                            continue;
+                        }
+                    }
+                    return match self
+                        .handle_sampling_failure_with_policy(info, next_route.is_none())
+                        .await?
+                    {
+                        SamplerFailureRecovery::CompactAndResubmit => {
+                            Ok(SamplerTurnOutcome::CompactAndResubmit)
+                        }
+                        SamplerFailureRecovery::RefreshAuthAndResubmit => {
+                            Ok(SamplerTurnOutcome::RefreshAuthAndResubmit)
+                        }
+                    };
                 }
             }
         }

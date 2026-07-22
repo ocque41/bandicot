@@ -10,9 +10,9 @@
 //! ```bash
 //! export GROK_FALLBACK_KEYS='{
 //!   "providers": [
-//!     {"name": "zen-a", "api_key": "sk-ISEsbSXmYwZ9rDIS8P54kRytRM6vpj7BZOsGS70Op2d97HY69nKCaxl096qQIYTm"},
-//!     {"name": "go-a", "api_key": "sk-sDr7nCQvE7XQTMF5GgXlVEnuDpeYguuFT6QlqBGwX9bPSouUIHbrylAMwiaV42i0"},
-//!     {"name": "zen-b", "api_key": "sk-V21Ai45B4NFCTelCl5hAJEYMjWyrxn64rbre54wMbVf3WNMBGY2qbZAkjOlBi4v9"}
+//!     {"name": "zen-a", "api_key": "sk-FAKE-BANDICOT-EXAMPLE-KEY"},
+//!     {"name": "go-a", "api_key": "sk-FAKE-BANDICOT-EXAMPLE-KEY"},
+//!     {"name": "zen-b", "api_key": "sk-FAKE-BANDICOT-EXAMPLE-KEY"}
 //!   ],
 //!   "recovery_interval_secs": 300,
 //!   "max_failures": 3
@@ -50,22 +50,19 @@ fn example_create_fallback_provider() {
     let providers = vec![
         ProviderEntry {
             name: "zen-account-a".to_string(),
-            api_key: "sk-ISEsbSXmYwZ9rDIS8P54kRytRM6vpj7BZOsGS70Op2d97HY69nKCaxl096qQIYTm"
-                .to_string(),
+            api_key: "sk-FAKE-BANDICOT-EXAMPLE-KEY".to_string(),
             base_url: None,
             auth_scheme: AuthScheme::Bearer,
         },
         ProviderEntry {
             name: "go-account-a".to_string(),
-            api_key: "sk-sDr7nCQvE7XQTMF5GgXlVEnuDpeYguuFT6QlqBGwX9bPSouUIHbrylAMwiaV42i0"
-                .to_string(),
+            api_key: "sk-FAKE-BANDICOT-EXAMPLE-KEY".to_string(),
             base_url: None,
             auth_scheme: AuthScheme::Bearer,
         },
         ProviderEntry {
             name: "zen-account-b".to_string(),
-            api_key: "sk-V21Ai45B4NFCTelCl5hAJEYMjWyrxn64rbre54wMbVf3WNMBGY2qbZAkjOlBi4v9"
-                .to_string(),
+            api_key: "sk-FAKE-BANDICOT-EXAMPLE-KEY".to_string(),
             base_url: None,
             auth_scheme: AuthScheme::Bearer,
         },
@@ -80,7 +77,10 @@ fn example_create_fallback_provider() {
     let provider = FallbackApiKeyProvider::with_config(config);
     let wrapper = FallbackWrapper::new(provider);
 
-    println!("Created fallback provider with {} providers", wrapper.provider().provider_count());
+    println!(
+        "Created fallback provider with {} providers",
+        wrapper.provider().provider_count()
+    );
     println!("Current provider: {:?}", wrapper.current_provider_name());
 }
 
@@ -121,11 +121,17 @@ fn example_health_tracking() {
 
     // Simulate rate limit failure - should switch to fallback
     wrapper.record_failure(true, false);
-    println!("After rate limit: current provider = {:?}", wrapper.current_provider_name());
+    println!(
+        "After rate limit: current provider = {:?}",
+        wrapper.current_provider_name()
+    );
 
     // Simulate auth error - should switch back to primary (after recovery)
     wrapper.record_failure(false, true);
-    println!("After auth error: current provider = {:?}", wrapper.current_provider_name());
+    println!(
+        "After auth error: current provider = {:?}",
+        wrapper.current_provider_name()
+    );
 }
 
 /// Example: Create from JSON configuration.

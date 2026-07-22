@@ -201,6 +201,30 @@ impl SubagentIsolationMode {
     }
 }
 
+/// Service-tier preference for subagent runtime overrides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum SubagentServiceTierPreference {
+    #[default]
+    #[serde(alias = "Inherit")]
+    Inherit,
+    #[serde(alias = "Standard")]
+    Standard,
+    #[serde(alias = "Fast")]
+    Fast,
+}
+
+impl SubagentServiceTierPreference {
+    /// Canonical wire string (matches the serde `kebab-case` representation).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Inherit => "inherit",
+            Self::Standard => "standard",
+            Self::Fast => "fast",
+        }
+    }
+}
+
 // ───────────────────────────────────────────────────────────────────────────
 // `task` (spawn) tool — Output
 // ───────────────────────────────────────────────────────────────────────────

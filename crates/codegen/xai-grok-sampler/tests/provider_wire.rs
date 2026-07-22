@@ -6,12 +6,15 @@ use std::time::Duration;
 
 use xai_grok_sampler::{
     ApiBackend, AuthScheme, ChatMaxTokensField, ProviderCapabilities, ReasoningResponseField,
-    RequestId, SamplerConfig, SamplingClient, WireQuirks, collect_response,
-    stream_chat_completions,
+    RequestId, ResolvedServiceTier, SamplerConfig, SamplingClient, ServiceTierCapabilities,
+    ServiceTierPreference, ServiceTierSource, WireQuirks, collect_response,
+    stream_chat_completions, stream_responses,
 };
 use xai_grok_sampling_types::{
     ConversationItem, ConversationRequest, ConversationResponse, ConversationToolChoice,
-    DoomLoopRecoveryPolicy, HostedTool, ToolSpec,
+    DoomLoopRecoveryPolicy, HostedMultiAgentCapability, HostedMultiAgentConfig, HostedTool,
+    OPENAI_RESPONSES_MULTI_AGENT_BETA, ReasoningEffort, SamplingError, ToolSpec,
+    resolve_service_tier,
 };
 use xai_grok_test_support::{MockInferenceServer, MockModelEntry, ScriptedResponse, SseEvent};
 
@@ -32,6 +35,576 @@ async fn sample_chat(
     .await
     .expect("stream completes")
     .0
+}
+
+fn provider_wire_responses_config(
+    base_url: String,
+    effective_service_tier: ResolvedServiceTier,
+    priority_supported: bool,
+) -> SamplerConfig {
+    SamplerConfig {
+        api_key: Some("openai-test-key".to_owned()),
+        base_url,
+        model: "gpt-test".to_owned(),
+        max_completion_tokens: Some(2048),
+        temperature: Some(0.2),
+        top_p: Some(0.9),
+        api_backend: ApiBackend::Responses,
+        auth_scheme: AuthScheme::Bearer,
+        capabilities: ProviderCapabilities {
+            service_tiers: ServiceTierCapabilities {
+                priority: priority_supported,
+                default_service_tier: None,
+            },
+            ..ProviderCapabilities::default()
+        },
+        effective_service_tier,
+        reasoning_effort: Some(ReasoningEffort::High),
+        ..SamplerConfig::default()
+    }
+}
+
+fn rich_responses_request() -> ConversationRequest {
+    let mut request = ConversationRequest::from_items(vec![ConversationItem::user("hello")]);
+    request.tools.push(ToolSpec {
+        name: "lookup".to_owned(),
+        description: Some("Look up provider-neutral context".to_owned()),
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "query": { "type": "string" }
+            },
+            "required": ["query"],
+        }),
+    });
+    request.tool_choice = Some(ConversationToolChoice::Auto);
+    request.max_output_tokens = Some(1234);
+    request.temperature = Some(0.4);
+    request.top_p = Some(0.8);
+    request.reasoning_effort = Some(ReasoningEffort::High);
+    request
+}
+
+fn captured_responses_bodies(server: &MockInferenceServer) -> Vec<serde_json::Value> {
+    server
+        .requests()
+        .into_iter()
+        .filter(|request| request.path == "/v1/responses")
+        .map(|request| request.body.expect("responses JSON body captured"))
+        .collect()
+}
+
+fn without_service_tier(mut value: serde_json::Value) -> serde_json::Value {
+    value
+        .as_object_mut()
+        .expect("request body is an object")
+        .remove("service_tier");
+    value
+}
+
+fn fast_responses_config(base_url: String) -> SamplerConfig {
+    provider_wire_responses_config(
+        base_url,
+        resolve_service_tier(
+            ServiceTierPreference::Fast,
+            &ServiceTierCapabilities {
+                priority: true,
+                default_service_tier: None,
+            },
+            ServiceTierSource::Session,
+        ),
+        true,
+    )
+}
+
+fn service_tier_rejection_response() -> ScriptedResponse {
+    ScriptedResponse::json(
+        400,
+        serde_json::json!({
+            "error": {
+                "message": "Unsupported value: 'priority'.",
+                "type": "invalid_request_error",
+                "param": "service_tier",
+                "code": "unsupported_value"
+            }
+        }),
+    )
+}
+
+fn generic_validation_error_response() -> ScriptedResponse {
+    ScriptedResponse::json(
+        400,
+        serde_json::json!({
+            "error": {
+                "message": "Invalid model.",
+                "type": "invalid_request_error",
+                "param": "model",
+                "code": "invalid_value"
+            }
+        }),
+    )
+}
+
+fn minimal_responses_success(text: &str) -> serde_json::Value {
+    serde_json::json!({
+        "id": "resp_test",
+        "object": "response",
+        "created_at": 1234567890,
+        "model": "gpt-test",
+        "status": "completed",
+        "output": [{
+            "type": "message",
+            "id": "msg_test",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{
+                "type": "output_text",
+                "text": text,
+                "annotations": []
+            }]
+        }],
+        "usage": {
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "total_tokens": 15,
+            "input_tokens_details": { "cached_tokens": 0 },
+            "output_tokens_details": { "reasoning_tokens": 0 }
+        }
+    })
+}
+
+fn provider_wire_responses_multi_agent_config(
+    base_url: String,
+    supported: bool,
+    enabled: bool,
+    provider_max: Option<u32>,
+    requested_max: Option<u32>,
+) -> SamplerConfig {
+    let mut config =
+        provider_wire_responses_config(base_url, ResolvedServiceTier::default(), false);
+    config.capabilities.hosted_multi_agent = HostedMultiAgentCapability {
+        supported,
+        max_concurrent_subagents: provider_max,
+    };
+    config.hosted_multi_agent = HostedMultiAgentConfig {
+        enabled,
+        max_concurrent_subagents: requested_max,
+    };
+    config
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responses_fast_service_tier_is_sent_for_non_streaming_and_streaming() {
+    let server = MockInferenceServer::start_with_required_auth(
+        vec![MockModelEntry::new("gpt-test")],
+        "openai-test-key",
+    )
+    .await
+    .expect("mock server starts");
+    let config = provider_wire_responses_config(
+        server.url(),
+        resolve_service_tier(
+            ServiceTierPreference::Fast,
+            &ServiceTierCapabilities {
+                priority: true,
+                default_service_tier: None,
+            },
+            ServiceTierSource::Session,
+        ),
+        true,
+    );
+    let client = SamplingClient::new(config).expect("sampling client builds");
+
+    let _ = client
+        .conversation_responses(rich_responses_request())
+        .await;
+    let (_stream, _metadata, _doom_loop) = client
+        .conversation_stream_responses(rich_responses_request())
+        .await
+        .expect("mock accepts streaming Responses request");
+
+    let bodies = captured_responses_bodies(&server);
+    assert_eq!(bodies.len(), 2);
+    assert_eq!(bodies[0]["service_tier"], "priority");
+    assert_eq!(bodies[1]["service_tier"], "priority");
+    assert_eq!(
+        bodies[0].get("stream").and_then(|value| value.as_bool()),
+        None
+    );
+    assert_eq!(
+        bodies[1].get("stream").and_then(|value| value.as_bool()),
+        Some(true)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responses_standard_and_unsupported_fast_omit_priority_tier() {
+    let server = MockInferenceServer::start_with_required_auth(
+        vec![MockModelEntry::new("gpt-test")],
+        "openai-test-key",
+    )
+    .await
+    .expect("mock server starts");
+    let capabilities = ServiceTierCapabilities {
+        priority: true,
+        default_service_tier: None,
+    };
+    let standard_client = SamplingClient::new(provider_wire_responses_config(
+        server.url(),
+        resolve_service_tier(
+            ServiceTierPreference::Standard,
+            &capabilities,
+            ServiceTierSource::Session,
+        ),
+        true,
+    ))
+    .expect("standard client builds");
+    let unsupported = resolve_service_tier(
+        ServiceTierPreference::Fast,
+        &ServiceTierCapabilities::default(),
+        ServiceTierSource::Session,
+    );
+    assert_eq!(unsupported.requested, ServiceTierPreference::Fast);
+    assert!(!unsupported.supported);
+    let unsupported_client = SamplingClient::new(provider_wire_responses_config(
+        server.url(),
+        unsupported,
+        false,
+    ))
+    .expect("unsupported client builds");
+
+    let _ = standard_client
+        .conversation_stream_responses(rich_responses_request())
+        .await;
+    let _ = unsupported_client
+        .conversation_stream_responses(rich_responses_request())
+        .await;
+
+    let bodies = captured_responses_bodies(&server);
+    assert_eq!(bodies.len(), 2);
+    assert!(bodies[0].get("service_tier").is_none());
+    assert!(bodies[1].get("service_tier").is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responses_fast_only_changes_service_tier_field() {
+    let server = MockInferenceServer::start_with_required_auth(
+        vec![MockModelEntry::new("gpt-test")],
+        "openai-test-key",
+    )
+    .await
+    .expect("mock server starts");
+    let capabilities = ServiceTierCapabilities {
+        priority: true,
+        default_service_tier: None,
+    };
+    let standard_client = SamplingClient::new(provider_wire_responses_config(
+        server.url(),
+        resolve_service_tier(
+            ServiceTierPreference::Standard,
+            &capabilities,
+            ServiceTierSource::Session,
+        ),
+        true,
+    ))
+    .expect("standard client builds");
+    let fast_client = SamplingClient::new(provider_wire_responses_config(
+        server.url(),
+        resolve_service_tier(
+            ServiceTierPreference::Fast,
+            &capabilities,
+            ServiceTierSource::Session,
+        ),
+        true,
+    ))
+    .expect("fast client builds");
+
+    let _ = standard_client
+        .conversation_stream_responses(rich_responses_request())
+        .await;
+    let _ = fast_client
+        .conversation_stream_responses(rich_responses_request())
+        .await;
+
+    let bodies = captured_responses_bodies(&server);
+    assert_eq!(bodies.len(), 2);
+    assert!(bodies[0].get("service_tier").is_none());
+    assert_eq!(bodies[1]["service_tier"], "priority");
+    assert_eq!(
+        bodies[0].pointer("/reasoning/effort"),
+        bodies[1].pointer("/reasoning/effort")
+    );
+    assert_eq!(
+        without_service_tier(bodies[0].clone()),
+        without_service_tier(bodies[1].clone())
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responses_fast_retries_once_without_service_tier_on_typed_rejection() {
+    let server = MockInferenceServer::start_with_required_auth(
+        vec![MockModelEntry::new("gpt-test")],
+        "openai-test-key",
+    )
+    .await
+    .expect("mock server starts");
+    server.enqueue_response("/v1/responses", service_tier_rejection_response());
+    server.enqueue_response(
+        "/v1/responses",
+        ScriptedResponse::json(200, minimal_responses_success("STANDARD_OK")),
+    );
+    let client =
+        SamplingClient::new(fast_responses_config(server.url())).expect("fast client builds");
+
+    client
+        .conversation_responses(rich_responses_request())
+        .await
+        .expect("typed service_tier rejection falls back to standard request");
+
+    let bodies = captured_responses_bodies(&server);
+    assert_eq!(bodies.len(), 2);
+    assert_eq!(bodies[0]["service_tier"], "priority");
+    assert!(bodies[1].get("service_tier").is_none());
+    assert_eq!(without_service_tier(bodies[0].clone()), bodies[1]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responses_fast_stream_retries_once_without_service_tier_on_typed_rejection() {
+    let server = MockInferenceServer::start_with_required_auth(
+        vec![MockModelEntry::new("gpt-test")],
+        "openai-test-key",
+    )
+    .await
+    .expect("mock server starts");
+    server.enqueue_response("/v1/responses", service_tier_rejection_response());
+    server.enqueue_response(
+        "/v1/responses",
+        ScriptedResponse::sse(
+            xai_grok_test_support::sse::responses_api_reasoning_and_text_events(
+                "fallback",
+                "STANDARD_STREAM_OK",
+                "gpt-test",
+            ),
+        ),
+    );
+    let client =
+        SamplingClient::new(fast_responses_config(server.url())).expect("fast client builds");
+
+    let (raw, metadata, doom_loop) = client
+        .conversation_stream_responses(rich_responses_request())
+        .await
+        .expect("typed service_tier rejection falls back to standard stream");
+    let (response, _metrics) = collect_response(stream_responses(
+        raw,
+        metadata,
+        RequestId::from("provider-wire"),
+        Duration::from_secs(5),
+        doom_loop,
+    ))
+    .await
+    .expect("fallback stream completes");
+    assert_eq!(
+        response
+            .assistant()
+            .expect("assistant response")
+            .content
+            .as_ref(),
+        "STANDARD_STREAM_OK"
+    );
+
+    let bodies = captured_responses_bodies(&server);
+    assert_eq!(bodies.len(), 2);
+    assert_eq!(bodies[0]["service_tier"], "priority");
+    assert!(bodies[1].get("service_tier").is_none());
+    assert_eq!(without_service_tier(bodies[0].clone()), bodies[1]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responses_fast_does_not_retry_generic_validation_errors() {
+    let server = MockInferenceServer::start_with_required_auth(
+        vec![MockModelEntry::new("gpt-test")],
+        "openai-test-key",
+    )
+    .await
+    .expect("mock server starts");
+    server.enqueue_response("/v1/responses", generic_validation_error_response());
+    server.enqueue_response(
+        "/v1/responses",
+        ScriptedResponse::json(200, minimal_responses_success("UNUSED")),
+    );
+    let client =
+        SamplingClient::new(fast_responses_config(server.url())).expect("fast client builds");
+
+    let err = client
+        .conversation_responses(rich_responses_request())
+        .await
+        .expect_err("generic validation errors are not retried");
+    assert!(matches!(
+        err,
+        SamplingError::Api {
+            status: reqwest::StatusCode::BAD_REQUEST,
+            ..
+        }
+    ));
+
+    let bodies = captured_responses_bodies(&server);
+    assert_eq!(bodies.len(), 1);
+    assert_eq!(bodies[0]["service_tier"], "priority");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responses_fast_does_not_retry_auth_errors() {
+    let server = MockInferenceServer::start_with_required_auth(
+        vec![MockModelEntry::new("gpt-test")],
+        "openai-test-key",
+    )
+    .await
+    .expect("mock server starts");
+    server.enqueue_response(
+        "/v1/responses",
+        ScriptedResponse::json(
+            401,
+            serde_json::json!({
+                "error": {
+                    "message": "Unauthorized",
+                    "type": "invalid_request_error",
+                    "param": "service_tier",
+                    "code": "unauthorized"
+                }
+            }),
+        ),
+    );
+    server.enqueue_response(
+        "/v1/responses",
+        ScriptedResponse::json(200, minimal_responses_success("UNUSED")),
+    );
+    let client =
+        SamplingClient::new(fast_responses_config(server.url())).expect("fast client builds");
+
+    let err = client
+        .conversation_responses(rich_responses_request())
+        .await
+        .expect_err("401 errors are not retried");
+    assert!(matches!(err, SamplingError::Auth(_)));
+
+    let bodies = captured_responses_bodies(&server);
+    assert_eq!(bodies.len(), 1);
+    assert_eq!(bodies[0]["service_tier"], "priority");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responses_hosted_multi_agent_enable_sends_beta_header_and_body() {
+    let server = MockInferenceServer::start_with_required_auth(
+        vec![MockModelEntry::new("gpt-test")],
+        "openai-test-key",
+    )
+    .await
+    .expect("mock server starts");
+    let client = SamplingClient::new(provider_wire_responses_multi_agent_config(
+        server.url(),
+        true,
+        true,
+        Some(4),
+        Some(8),
+    ))
+    .expect("hosted multi-agent client builds");
+
+    let _ = client
+        .conversation_responses(rich_responses_request())
+        .await;
+
+    let requests = server
+        .requests()
+        .into_iter()
+        .filter(|request| request.path == "/v1/responses")
+        .collect::<Vec<_>>();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].header("openai-beta"),
+        Some(OPENAI_RESPONSES_MULTI_AGENT_BETA)
+    );
+    let body = requests[0]
+        .body
+        .as_ref()
+        .expect("responses JSON body captured");
+    assert_eq!(body["multi_agent"]["enabled"], true);
+    assert_eq!(body["multi_agent"]["max_concurrent_subagents"], 4);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responses_hosted_multi_agent_is_omitted_without_support_or_enable() {
+    let server = MockInferenceServer::start_with_required_auth(
+        vec![MockModelEntry::new("gpt-test")],
+        "openai-test-key",
+    )
+    .await
+    .expect("mock server starts");
+    let unsupported_client = SamplingClient::new(provider_wire_responses_multi_agent_config(
+        server.url(),
+        false,
+        true,
+        None,
+        Some(3),
+    ))
+    .expect("unsupported hosted multi-agent client builds");
+    let disabled_client = SamplingClient::new(provider_wire_responses_multi_agent_config(
+        server.url(),
+        true,
+        false,
+        Some(3),
+        Some(3),
+    ))
+    .expect("disabled hosted multi-agent client builds");
+
+    let _ = unsupported_client
+        .conversation_responses(rich_responses_request())
+        .await;
+    let _ = disabled_client
+        .conversation_responses(rich_responses_request())
+        .await;
+
+    let requests = server
+        .requests()
+        .into_iter()
+        .filter(|request| request.path == "/v1/responses")
+        .collect::<Vec<_>>();
+    assert_eq!(requests.len(), 2);
+    for request in &requests {
+        assert!(request.header("openai-beta").is_none());
+        let body = request.body.as_ref().expect("responses JSON body captured");
+        assert!(body.get("multi_agent").is_none());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responses_prompt_cache_key_is_capability_gated_and_content_free() {
+    let server = MockInferenceServer::start_with_required_auth(
+        vec![MockModelEntry::new("gpt-test")],
+        "openai-test-key",
+    )
+    .await
+    .expect("mock server starts");
+    let mut supported = fast_responses_config(server.url());
+    supported.capabilities.prompt_cache = true;
+    let supported = SamplingClient::new(supported).expect("cache client builds");
+    let unsupported =
+        SamplingClient::new(fast_responses_config(server.url())).expect("non-cache client builds");
+
+    let _ = supported
+        .conversation_responses(rich_responses_request())
+        .await;
+    let _ = unsupported
+        .conversation_responses(rich_responses_request())
+        .await;
+
+    let bodies = captured_responses_bodies(&server);
+    assert_eq!(bodies.len(), 2);
+    let key = bodies[0]["prompt_cache_key"]
+        .as_str()
+        .expect("cache key emitted");
+    assert!(key.starts_with("bandicot-v1-"));
+    assert!(!key.contains("Review the repository"));
+    assert!(bodies[1].get("prompt_cache_key").is_none());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -239,6 +812,7 @@ async fn cerebras_chat_uses_declared_wire_quirks_and_streams_text() {
         capabilities: ProviderCapabilities {
             tools: true,
             image_input: false,
+            ..ProviderCapabilities::default()
         },
         wire_quirks: WireQuirks {
             chat_max_tokens_field: ChatMaxTokensField::MaxCompletionTokens,
@@ -305,6 +879,7 @@ async fn ollama_no_auth_tool_call_result_continuation_omits_tool_choice() {
         capabilities: ProviderCapabilities {
             tools: true,
             image_input: false,
+            ..ProviderCapabilities::default()
         },
         wire_quirks: WireQuirks {
             send_tool_choice: false,
@@ -418,9 +993,7 @@ async fn opencode_go_cost_extension_events_do_not_break_the_stream() {
                 .to_string(),
             ),
             SseEvent::data("[DONE]"),
-            SseEvent::data(
-                serde_json::json!({"choices":[],"cost":"0"}).to_string(),
-            ),
+            SseEvent::data(serde_json::json!({"choices":[],"cost":"0"}).to_string()),
         ]),
     );
     let client = SamplingClient::new(SamplerConfig {

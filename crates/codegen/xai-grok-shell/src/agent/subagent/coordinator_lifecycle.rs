@@ -36,6 +36,7 @@ impl SubagentCoordinator {
             is_turn_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             synthetic_trace_tx: None,
             running_gauge: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            child_count_observers: HashMap::new(),
             block_wait_slots: HashMap::new(),
             subagent_usage_not_applied_prompts: std::collections::HashSet::new(),
         }
@@ -75,6 +76,20 @@ impl SubagentCoordinator {
                 self.pending.len() + self.active.len(),
                 std::sync::atomic::Ordering::Relaxed,
             );
+        for (parent_session_id, observer) in &self.child_count_observers {
+            let Some(observer) = observer.upgrade() else { continue };
+            let (active, pending) = self.child_counts_for_parent(parent_session_id);
+            observer.store(active, pending);
+        }
+    }
+    pub(crate) fn register_child_count_observer(
+        &mut self,
+        parent_session_id: String,
+        observer: Arc<SharedChildCounts>,
+    ) {
+        self.child_count_observers
+            .insert(parent_session_id, Arc::downgrade(&observer));
+        self.sync_running_gauge();
     }
     /// Returns a handle to the completion [`Notify`].
     #[cfg_attr(

@@ -3173,6 +3173,14 @@ impl acp::Agent for MvpAgent {
         let mut backend_no_bridge_err: Option<acp::Error> = None;
         let method = args.method.clone();
         let result = match method.as_ref() {
+            "x.ai/accounts/snapshot" | "x.ai/accounts/add" | "x.ai/accounts/edit"
+            | "x.ai/accounts/remove" | "x.ai/accounts/enable" | "x.ai/accounts/disable"
+            | "x.ai/accounts/validate" | "x.ai/accounts/refresh_models"
+            | "x.ai/accounts/update_allowlist" | "x.ai/accounts/fallback/get"
+            | "x.ai/accounts/fallback/replace" | "x.ai/accounts/preferences/get"
+            | "x.ai/accounts/preferences/update" => {
+                crate::extensions::accounts::handle(&args).await
+            }
             "x.ai/getApiKey" | "x.ai/setApiKey" => {
                 crate::extensions::auth::handle(self, &args).await
             }

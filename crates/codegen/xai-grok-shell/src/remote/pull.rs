@@ -114,6 +114,23 @@ pub(crate) mod hydrate {
             .and_then(|v| v.as_str())
             .map(String::from);
 
+        // Preserve orchestration state when a newer remote registry includes
+        // it. Older registries omit the field, which must hydrate safely as
+        // Standard/off rather than enabling proactive delegation implicitly.
+        let ultra_orchestration = meta
+            .and_then(|m| {
+                m.get("ultraOrchestration")
+                    .or_else(|| m.get("ultra_orchestration"))
+            })
+            .and_then(|value| serde_json::from_value(value.clone()).ok())
+            .unwrap_or_default();
+        let fast_service_tier = meta
+            .and_then(|m| {
+                m.get("fastServiceTier")
+                    .or_else(|| m.get("fast_service_tier"))
+            })
+            .and_then(|value| serde_json::from_value(value.clone()).ok());
+
         let summary = Summary {
             info: info.clone(),
             session_summary: remote.title.clone().unwrap_or_default(),
@@ -150,6 +167,8 @@ pub(crate) mod hydrate {
             // Hydrated locally — record the profile this process runs under.
             sandbox_profile: xai_grok_sandbox::configured_profile_name().map(String::from),
             reasoning_effort: None,
+            fast_service_tier,
+            ultra_orchestration,
         };
 
         let json = serde_json::to_string_pretty(&summary)?;

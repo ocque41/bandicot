@@ -1,0 +1,53 @@
+name = "sure-polish"
+order = 3
+assigned_agents = ["sure-polish"]
+assigned_packages = ["sure-polish"]
+required_skills = ["auto-mode-trust", "smooth-software"]
+acceptance_gates = ["gap_scan_request_changes_resolved_or_blocked", "strategy_blockers_resolved_or_deferred_with_reason", "required_validation_commands_run", "final_report_written", "non_goals_preserved"]
+
+[assigned_agent_paths]
+"sure-polish" = "/Users/miguel/.codex/agents/sure-polish.toml"
+
+[[inputs]]
+name = "gap-scan-report"
+path = "/Users/miguel/Documents/bandicot/out/goal-triad/gap_scan.md"
+required = true
+truth_type = "stage_output"
+
+[[inputs]]
+name = "architecture-solidification-ideas"
+path = "/Users/miguel/Documents/bandicot/out/goal-triad/architecture_solidification_ideas.md"
+required = true
+truth_type = "stage_output"
+
+[[inputs]]
+name = "active-goal"
+path = "/Users/miguel/.codex/attachments/27a8a857-af32-4137-bc21-345c476d8df5/pasted-text.txt"
+required = true
+truth_type = "goal_contract"
+
+[[outputs]]
+name = "completion-report"
+path = "/Users/miguel/Documents/bandicot/out/goal-triad/completion_report.md"
+required = true
+
+[[outputs]]
+name = "verification-log"
+path = "/Users/miguel/Documents/bandicot/out/goal-triad/verification_log.md"
+required = true
+
+[stage_manifest]
+path = "/Users/miguel/Documents/bandicot/out/goal-triad/stage_manifests/03-sure-polish.stage_manifest.json"
+format = "json"
+schema = "agent-pipeline.stage_manifest.v1"
+required_for_final_ready = true
+
+[blocker_policy]
+on_missing_input = "stop"
+on_failed_gate = "stop"
+on_agent_unavailable = "fallback_to_prompt_contract"
+
+[handoff_contract]
+summary = "Deliver implementation, validation evidence, limitations, and pickup notes."
+next_stage = ""
+required_evidence = ["completion_report.md", "verification_log.md", "03-sure-polish.stage_manifest.json"]

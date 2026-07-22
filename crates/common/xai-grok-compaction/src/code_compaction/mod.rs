@@ -46,7 +46,10 @@ pub use failure::{
 };
 pub use observer::{FullReplaceAttemptOutcome, FullReplaceObserver};
 pub use prompt::{
-    SELF_SUMMARIZATION_PROMPT, SummaryPromptKind, build_summary_prompt, build_summary_prompt_kind,
+    IMMUTABLE_COMPACTION_GUARD, MAX_RUNTIME_PROMPT_BYTES, RuntimePromptError,
+    RuntimePromptSnapshot, RuntimePromptSource, RuntimePromptStore, RuntimeSessionKind,
+    SELF_SUMMARIZATION_PROMPT, SummaryPromptBindings, SummaryPromptKind, build_summary_prompt,
+    build_summary_prompt_kind,
 };
 pub use sample::{SampleRetryError, SampledSummary, sample_summary_with_retries};
 pub use summary::{

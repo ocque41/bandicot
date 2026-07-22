@@ -53,9 +53,9 @@ Each provider has its own health tracking:
 ```bash
 export GROK_FALLBACK_KEYS='{
   "providers": [
-    {"name": "zen-a", "api_key": "sk-ISEsbSXmYwZ9rDIS8P54kRytRM6vpj7BZOsGS70Op2d97HY69nKCaxl096qQIYTm"},
-    {"name": "go-a", "api_key": "sk-sDr7nCQvE7XQTMF5GgXlVEnuDpeYguuFT6QlqBGwX9bPSouUIHbrylAMwiaV42i0"},
-    {"name": "zen-b", "api_key": "sk-V21Ai45B4NFCTelCl5hAJEYMjWyrxn64rbre54wMbVf3WNMBGY2qbZAkjOlBi4v9"}
+    {"name": "zen-a", "api_key": "sk-FAKE-BANDICOT-EXAMPLE-KEY-A"},
+    {"name": "go-a", "api_key": "sk-FAKE-BANDICOT-EXAMPLE-KEY-B"},
+    {"name": "zen-b", "api_key": "sk-FAKE-BANDICOT-EXAMPLE-KEY-C"}
   ],
   "recovery_interval_secs": 300,
   "max_failures": 3

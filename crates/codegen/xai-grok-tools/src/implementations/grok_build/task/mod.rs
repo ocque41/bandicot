@@ -309,6 +309,8 @@ impl xai_tool_runtime::Tool for TaskTool {
                 persona: None,
                 capability_mode: input.capability_mode,
                 isolation: input.isolation,
+                service_tier: None,
+                hosted_multi_agent: None,
                 // Model-issued `task` spawns never override the harness; the
                 // parent agent decides the flavor (the `/goal` harness override
                 // is set only by the harness-internal role spawners).
@@ -1184,6 +1186,9 @@ mod tests {
         assert!(overrides.reasoning_effort.is_none());
         assert!(overrides.persona.is_none());
         assert!(overrides.capability_mode.is_none());
+        assert!(overrides.isolation.is_none());
+        assert!(overrides.service_tier.is_none());
+        assert!(overrides.hosted_multi_agent.is_none());
     }
 
     #[test]

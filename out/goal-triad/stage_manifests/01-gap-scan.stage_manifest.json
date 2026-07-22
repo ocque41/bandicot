@@ -1,0 +1,57 @@
+{
+  "schema": "agent-pipeline.stage_manifest.v1",
+  "stage": "gap-scan",
+  "order": 1,
+  "agent": "gap-scanner",
+  "generated_at": "2026-07-21T23:58:10+02:00",
+  "status": "request_changes",
+  "verdict": "REQUEST CHANGES",
+  "inputs": [
+    {
+      "name": "active-goal",
+      "path": "/Users/miguel/.codex/attachments/27a8a857-af32-4137-bc21-345c476d8df5/pasted-text.txt",
+      "read": true
+    },
+    {
+      "name": "implementation-ledger",
+      "path": "/Users/miguel/Documents/bandicot/docs/changes/2026-07-21-control-plane-implementation.md",
+      "read": true
+    },
+    {
+      "name": "stage-contract",
+      "path": "/Users/miguel/Documents/bandicot/.codex/pipelines/goal-triad/stages/01-gap-scan.toml",
+      "read": true
+    }
+  ],
+  "outputs": [
+    {
+      "name": "gap-scan-report",
+      "path": "/Users/miguel/Documents/bandicot/out/goal-triad/gap_scan.md",
+      "written": true
+    },
+    {
+      "name": "stage-manifest",
+      "path": "/Users/miguel/Documents/bandicot/out/goal-triad/stage_manifests/01-gap-scan.stage_manifest.json",
+      "written": true
+    }
+  ],
+  "acceptance_gates": {
+    "source_truth_read": true,
+    "source_truth_verified": true,
+    "next_highest_value_gap_identified": true,
+    "request_changes_or_approve_report_written": true
+  },
+  "next_highest_value_gap": "Implement Phase 1 shared service-tier/provider capability types and the common Responses request-extension seam.",
+  "summary": "Current source truth is before the first functional control-plane slice. ADRs now exist but need a numbering/index cleanup. Fast service-tier plumbing, AgentGraph core, durable store, scheduler, Ultra, Swarm, commands, and required tests are missing.",
+  "non_goals_preserved": [
+    "No live 100-agent provider test was run.",
+    "No product source was edited.",
+    "No generated Cargo workspace file was edited.",
+    "No recursive agent fan-out was enabled."
+  ],
+  "verification": {
+    "cargo_metadata_no_deps": "passed; 79 packages",
+    "git_diff_check": "passed",
+    "full_tests": "not run because required implementation slices are absent"
+  }
+}

@@ -306,9 +306,7 @@ impl SamplingError {
                 status, message, ..
             } => is_quota_exhausted_status_and_message(status.as_u16(), message),
             SamplingError::StreamError { message, .. }
-            | SamplingError::NativeTransport { message, .. } => {
-                is_quota_exhausted_message(message)
-            }
+            | SamplingError::NativeTransport { message, .. } => is_quota_exhausted_message(message),
             _ => false,
         }
     }
@@ -943,5 +941,4 @@ mod tests {
         assert!(!err.is_account_failover_candidate());
         assert!(!err.is_quota_exhausted());
     }
-
 }

@@ -477,28 +477,39 @@ impl SessionActor {
                 tracing::warn!(
                     current_context_window = current_config.context_window.get(),
                     header_context_window = new_cw.get(),
-                    "Ignoring context_window downgrade from response header"
-                );
-            } else {
-                tracing::info!(
-                    old_context_window = current_config.context_window.get(),
-                    new_context_window = new_cw.get(),
-                    "Model context_window upgraded via response header"
+                    "Applying lower provider context_window safety cap"
                 );
                 new_context_window = new_cw;
                 config_changed = true;
+            } else {
+                tracing::warn!(
+                    configured_context_window = current_config.context_window.get(),
+                    header_context_window = new_cw.get(),
+                    "Ignoring unverified context_window expansion from response header"
+                );
             }
         }
         if let Some(new_mct) = metadata.max_completion_tokens
             && current_config.max_completion_tokens != Some(new_mct)
         {
-            tracing::info!(
-                old_max_completion_tokens = current_config.max_completion_tokens,
-                new_max_completion_tokens = new_mct,
-                "Model max_completion_tokens changed via response header"
-            );
-            new_max_completion_tokens = Some(new_mct);
-            config_changed = true;
+            if current_config
+                .max_completion_tokens
+                .is_none_or(|current| new_mct < current)
+            {
+                tracing::info!(
+                    old_max_completion_tokens = current_config.max_completion_tokens,
+                    new_max_completion_tokens = new_mct,
+                    "Applying lower provider max_completion_tokens safety cap"
+                );
+                new_max_completion_tokens = Some(new_mct);
+                config_changed = true;
+            } else {
+                tracing::warn!(
+                    configured_max_completion_tokens = current_config.max_completion_tokens,
+                    header_max_completion_tokens = new_mct,
+                    "Ignoring unverified max_completion_tokens expansion from response header"
+                );
+            }
         }
         if !config_changed {
             return;

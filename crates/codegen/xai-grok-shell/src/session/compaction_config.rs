@@ -8,6 +8,388 @@ use std::sync::atomic::AtomicU8;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
+/// Whether a context policy is being applied to the root session or to an
+/// isolated subagent session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContextSessionKind {
+    Main,
+    Subagent,
+}
+
+/// Token limits and retention controls for one class of session.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ContextBand {
+    pub logical_window_tokens: u64,
+    pub soft_trigger_ratio: f64,
+    pub summary_max_output_tokens: u64,
+    pub post_compaction_target_tokens: u64,
+    pub keep_recent_completed_tool_batches: usize,
+    pub max_inline_tool_result_tokens: u64,
+    pub max_inline_tool_result_bytes: u64,
+}
+
+impl ContextBand {
+    /// Apply the harness ceiling to verified provider and optional gateway
+    /// limits. Capability discovery must supply the verified native limit;
+    /// callers must not guess one here.
+    pub fn effective_window_tokens(
+        &self,
+        verified_native_window_tokens: u64,
+        gateway_or_session_cap_tokens: Option<u64>,
+    ) -> u64 {
+        gateway_or_session_cap_tokens.map_or_else(
+            || {
+                self.logical_window_tokens
+                    .min(verified_native_window_tokens)
+            },
+            |gateway_cap| {
+                self.logical_window_tokens
+                    .min(verified_native_window_tokens)
+                    .min(gateway_cap)
+            },
+        )
+    }
+
+    /// Floor the configured ratio against the effective window. Invalid ratios
+    /// fail closed to an immediate trigger instead of silently granting more
+    /// context than the policy allows.
+    pub fn soft_trigger_tokens(&self, effective_window_tokens: u64) -> u64 {
+        if !self.soft_trigger_ratio.is_finite() || self.soft_trigger_ratio <= 0.0 {
+            return 0;
+        }
+        if self.soft_trigger_ratio >= 1.0 {
+            return effective_window_tokens;
+        }
+        (effective_window_tokens as f64 * self.soft_trigger_ratio).floor() as u64
+    }
+}
+
+/// Provider-neutral context policy. Provider adapters still own verified model
+/// capabilities and rendered token measurement.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ContextPolicy {
+    pub main: ContextBand,
+    pub subagent: ContextBand,
+    pub normal_max_output_tokens: u64,
+    pub minimum_output_reserve_tokens: u64,
+    pub hard_safety_margin_tokens: u64,
+    pub max_pending_model_calls: u8,
+}
+
+impl Default for ContextPolicy {
+    fn default() -> Self {
+        Self {
+            main: ContextBand {
+                logical_window_tokens: 258_000,
+                soft_trigger_ratio: 0.50,
+                summary_max_output_tokens: 8_192,
+                post_compaction_target_tokens: 48_000,
+                keep_recent_completed_tool_batches: 3,
+                max_inline_tool_result_tokens: 16_384,
+                max_inline_tool_result_bytes: 65_536,
+            },
+            subagent: ContextBand {
+                logical_window_tokens: 128_000,
+                soft_trigger_ratio: 0.50,
+                summary_max_output_tokens: 4_096,
+                post_compaction_target_tokens: 24_000,
+                keep_recent_completed_tool_batches: 2,
+                max_inline_tool_result_tokens: 8_192,
+                max_inline_tool_result_bytes: 32_768,
+            },
+            normal_max_output_tokens: 32_768,
+            minimum_output_reserve_tokens: 8_192,
+            hard_safety_margin_tokens: 8_192,
+            max_pending_model_calls: 1,
+        }
+    }
+}
+
+impl ContextPolicy {
+    pub fn band(&self, kind: ContextSessionKind) -> &ContextBand {
+        match kind {
+            ContextSessionKind::Main => &self.main,
+            ContextSessionKind::Subagent => &self.subagent,
+        }
+    }
+
+    pub fn pressure(
+        &self,
+        kind: ContextSessionKind,
+        rendered_input_tokens: u64,
+        verified_native_window_tokens: u64,
+        gateway_or_session_cap_tokens: Option<u64>,
+    ) -> ContextPressure {
+        let band = self.band(kind);
+        let effective_window_tokens = band
+            .effective_window_tokens(verified_native_window_tokens, gateway_or_session_cap_tokens);
+        let soft_trigger_tokens = band.soft_trigger_tokens(effective_window_tokens);
+        let hard_guard = rendered_input_tokens
+            .saturating_add(self.minimum_output_reserve_tokens)
+            .saturating_add(self.hard_safety_margin_tokens)
+            >= effective_window_tokens;
+        ContextPressure {
+            rendered_input_tokens,
+            effective_window_tokens,
+            soft_trigger_tokens,
+            at_soft_trigger: rendered_input_tokens >= soft_trigger_tokens,
+            hard_guard,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ContextPressure {
+    pub rendered_input_tokens: u64,
+    pub effective_window_tokens: u64,
+    pub soft_trigger_tokens: u64,
+    pub at_soft_trigger: bool,
+    pub hard_guard: bool,
+}
+
+/// Safe-boundary state kept separately from the existing failure-suppression
+/// atomics until the session actor is migrated to this universal policy.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CompactionBoundaryState {
+    #[default]
+    Healthy,
+    Pending {
+        crossed_at_tokens: u64,
+        model_calls_since_crossing: u8,
+    },
+    Compacting,
+    Suppressed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompactionPreflightAction {
+    Proceed,
+    CompactNow,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CompactionBoundaryTransition {
+    pub state: CompactionBoundaryState,
+    pub action: CompactionPreflightAction,
+}
+
+/// Pure preflight transition. Crossing the soft trigger marks the session
+/// pending but permits one model sample. The hard guard always wins, including
+/// over suppression.
+pub fn transition_before_model_request(
+    state: CompactionBoundaryState,
+    pressure: ContextPressure,
+    max_pending_model_calls: u8,
+) -> CompactionBoundaryTransition {
+    if pressure.hard_guard {
+        return CompactionBoundaryTransition {
+            state: CompactionBoundaryState::Compacting,
+            action: CompactionPreflightAction::CompactNow,
+        };
+    }
+    match state {
+        CompactionBoundaryState::Healthy if pressure.at_soft_trigger => {
+            CompactionBoundaryTransition {
+                state: CompactionBoundaryState::Pending {
+                    crossed_at_tokens: pressure.rendered_input_tokens,
+                    model_calls_since_crossing: 0,
+                },
+                action: CompactionPreflightAction::Proceed,
+            }
+        }
+        CompactionBoundaryState::Pending {
+            model_calls_since_crossing,
+            ..
+        } if model_calls_since_crossing >= max_pending_model_calls => {
+            CompactionBoundaryTransition {
+                state: CompactionBoundaryState::Compacting,
+                action: CompactionPreflightAction::CompactNow,
+            }
+        }
+        _ => CompactionBoundaryTransition {
+            state,
+            action: CompactionPreflightAction::Proceed,
+        },
+    }
+}
+
+/// Record completion of a model sample while pending. Tool-producing samples
+/// remain pending until their entire result batch is committed. A chat-only
+/// sample advances the fallback counter checked by the next preflight.
+pub fn transition_after_model_sample(
+    state: CompactionBoundaryState,
+    emitted_tool_calls: bool,
+) -> CompactionBoundaryState {
+    match state {
+        CompactionBoundaryState::Pending {
+            crossed_at_tokens,
+            model_calls_since_crossing,
+        } if !emitted_tool_calls => CompactionBoundaryState::Pending {
+            crossed_at_tokens,
+            model_calls_since_crossing: model_calls_since_crossing.saturating_add(1),
+        },
+        _ => state,
+    }
+}
+
+/// Compact only after every member of the next tool batch has reached a
+/// terminal state and its result has been committed.
+pub fn transition_after_tool_batch_committed(
+    state: CompactionBoundaryState,
+    all_results_terminal_and_committed: bool,
+) -> CompactionBoundaryTransition {
+    if all_results_terminal_and_committed
+        && matches!(state, CompactionBoundaryState::Pending { .. })
+    {
+        CompactionBoundaryTransition {
+            state: CompactionBoundaryState::Compacting,
+            action: CompactionPreflightAction::CompactNow,
+        }
+    } else {
+        CompactionBoundaryTransition {
+            state,
+            action: CompactionPreflightAction::Proceed,
+        }
+    }
+}
+
+#[cfg(test)]
+mod context_policy_tests {
+    use super::*;
+
+    #[test]
+    fn defaults_match_universal_context_policy() {
+        let policy = ContextPolicy::default();
+        assert_eq!(policy.main.logical_window_tokens, 258_000);
+        assert_eq!(policy.main.soft_trigger_tokens(258_000), 129_000);
+        assert_eq!(policy.main.summary_max_output_tokens, 8_192);
+        assert_eq!(policy.main.post_compaction_target_tokens, 48_000);
+        assert_eq!(policy.main.keep_recent_completed_tool_batches, 3);
+        assert_eq!(policy.main.max_inline_tool_result_tokens, 16_384);
+        assert_eq!(policy.main.max_inline_tool_result_bytes, 65_536);
+
+        assert_eq!(policy.subagent.logical_window_tokens, 128_000);
+        assert_eq!(policy.subagent.soft_trigger_tokens(128_000), 64_000);
+        assert_eq!(policy.subagent.summary_max_output_tokens, 4_096);
+        assert_eq!(policy.subagent.post_compaction_target_tokens, 24_000);
+        assert_eq!(policy.subagent.keep_recent_completed_tool_batches, 2);
+        assert_eq!(policy.subagent.max_inline_tool_result_tokens, 8_192);
+        assert_eq!(policy.subagent.max_inline_tool_result_bytes, 32_768);
+
+        assert_eq!(policy.normal_max_output_tokens, 32_768);
+        assert_eq!(policy.minimum_output_reserve_tokens, 8_192);
+        assert_eq!(policy.hard_safety_margin_tokens, 8_192);
+        assert_eq!(policy.max_pending_model_calls, 1);
+    }
+
+    #[test]
+    fn exact_main_and_subagent_soft_boundaries() {
+        let policy = ContextPolicy::default();
+        let main_below = policy.pressure(ContextSessionKind::Main, 128_999, 300_000, None);
+        let main_at = policy.pressure(ContextSessionKind::Main, 129_000, 300_000, None);
+        assert!(!main_below.at_soft_trigger);
+        assert!(main_at.at_soft_trigger);
+
+        let sub_below = policy.pressure(ContextSessionKind::Subagent, 63_999, 300_000, None);
+        let sub_at = policy.pressure(ContextSessionKind::Subagent, 64_000, 300_000, None);
+        assert!(!sub_below.at_soft_trigger);
+        assert!(sub_at.at_soft_trigger);
+    }
+
+    #[test]
+    fn lower_native_and_gateway_caps_reduce_effective_window_and_trigger() {
+        let policy = ContextPolicy::default();
+        let native_limited = policy.pressure(ContextSessionKind::Main, 99_999, 200_000, None);
+        assert_eq!(native_limited.effective_window_tokens, 200_000);
+        assert_eq!(native_limited.soft_trigger_tokens, 100_000);
+        assert!(!native_limited.at_soft_trigger);
+
+        let gateway_limited =
+            policy.pressure(ContextSessionKind::Main, 64_000, 300_000, Some(128_000));
+        assert_eq!(gateway_limited.effective_window_tokens, 128_000);
+        assert_eq!(gateway_limited.soft_trigger_tokens, 64_000);
+        assert!(gateway_limited.at_soft_trigger);
+    }
+
+    #[test]
+    fn hard_guard_reserves_output_and_margin() {
+        let policy = ContextPolicy::default();
+        let below = policy.pressure(ContextSessionKind::Subagent, 111_615, 128_000, None);
+        let at = policy.pressure(ContextSessionKind::Subagent, 111_616, 128_000, None);
+        assert!(!below.hard_guard);
+        assert!(at.hard_guard);
+    }
+
+    #[test]
+    fn soft_crossing_waits_for_complete_tool_batch() {
+        let policy = ContextPolicy::default();
+        let pressure = policy.pressure(ContextSessionKind::Main, 129_000, 300_000, None);
+        let crossed = transition_before_model_request(
+            CompactionBoundaryState::Healthy,
+            pressure,
+            policy.max_pending_model_calls,
+        );
+        assert_eq!(crossed.action, CompactionPreflightAction::Proceed);
+        assert_eq!(
+            crossed.state,
+            CompactionBoundaryState::Pending {
+                crossed_at_tokens: 129_000,
+                model_calls_since_crossing: 0,
+            }
+        );
+
+        let incomplete = transition_after_tool_batch_committed(crossed.state, false);
+        assert_eq!(incomplete.action, CompactionPreflightAction::Proceed);
+        assert_eq!(incomplete.state, crossed.state);
+
+        let complete = transition_after_tool_batch_committed(crossed.state, true);
+        assert_eq!(complete.action, CompactionPreflightAction::CompactNow);
+        assert_eq!(complete.state, CompactionBoundaryState::Compacting);
+    }
+
+    #[test]
+    fn chat_only_pending_path_allows_one_sample_then_compacts() {
+        let policy = ContextPolicy::default();
+        let pressure = policy.pressure(ContextSessionKind::Main, 129_000, 300_000, None);
+        let crossed = transition_before_model_request(
+            CompactionBoundaryState::Healthy,
+            pressure,
+            policy.max_pending_model_calls,
+        );
+        let after_sample = transition_after_model_sample(crossed.state, false);
+        assert_eq!(
+            after_sample,
+            CompactionBoundaryState::Pending {
+                crossed_at_tokens: 129_000,
+                model_calls_since_crossing: 1,
+            }
+        );
+        let next =
+            transition_before_model_request(after_sample, pressure, policy.max_pending_model_calls);
+        assert_eq!(next.action, CompactionPreflightAction::CompactNow);
+        assert_eq!(next.state, CompactionBoundaryState::Compacting);
+    }
+
+    #[test]
+    fn hard_guard_overrides_pending_and_suppressed_states() {
+        let policy = ContextPolicy::default();
+        let pressure = policy.pressure(ContextSessionKind::Subagent, 120_000, 128_000, None);
+        assert!(pressure.hard_guard);
+        for state in [
+            CompactionBoundaryState::Pending {
+                crossed_at_tokens: 64_000,
+                model_calls_since_crossing: 0,
+            },
+            CompactionBoundaryState::Suppressed,
+        ] {
+            let transition =
+                transition_before_model_request(state, pressure, policy.max_pending_model_calls);
+            assert_eq!(transition.action, CompactionPreflightAction::CompactNow);
+            assert_eq!(transition.state, CompactionBoundaryState::Compacting);
+        }
+    }
+}
+
 /// Auto-compaction is gated whenever `auto_compact_suppressed` is not [`SUPPRESS_NONE`].
 pub(crate) const SUPPRESS_NONE: u8 = 0;
 /// Resolvable failure (`other`): suppressed for the current turn, then
@@ -72,6 +454,13 @@ pub struct PrefireState {
     /// compaction fires before prefire finished, so a still-running pass-1 is
     /// used rather than discarded for a full single-pass.
     handle: RefCell<Option<tokio::task::JoinHandle<()>>>,
+    /// Provider-neutral safe-boundary state. Kept in this existing runtime
+    /// container so older `CompactionConfig` construction sites remain source
+    /// compatible while the policy is rolled out.
+    boundary_state: Cell<CompactionBoundaryState>,
+    /// Lazily initialized runtime prompt store. A failed reload retains the
+    /// store's last-known-good snapshot.
+    prompt_store: RefCell<Option<xai_grok_compaction::RuntimePromptStore>>,
 }
 
 impl PrefireState {
@@ -122,6 +511,42 @@ impl PrefireState {
 
     pub fn has_cache(&self) -> bool {
         self.cache.borrow().is_some()
+    }
+
+    pub fn boundary_state(&self) -> CompactionBoundaryState {
+        self.boundary_state.get()
+    }
+
+    pub fn set_boundary_state(&self, state: CompactionBoundaryState) {
+        self.boundary_state.set(state);
+    }
+
+    pub fn runtime_prompt_snapshot(
+        &self,
+    ) -> Result<xai_grok_compaction::RuntimePromptSnapshot, xai_grok_compaction::RuntimePromptError>
+    {
+        let mut store = self.prompt_store.borrow_mut();
+        if store.is_none() {
+            *store = Some(xai_grok_compaction::RuntimePromptStore::new(None)?);
+        }
+        let store = store.as_mut().expect("runtime prompt store initialized");
+        if let Err(error) = store.reload_if_changed() {
+            tracing::warn!(%error, "runtime compaction prompt reload rejected; retaining last-known-good prompt");
+        }
+        Ok(store.snapshot())
+    }
+
+    pub fn force_reload_runtime_prompt(
+        &self,
+    ) -> Result<xai_grok_compaction::RuntimePromptSnapshot, xai_grok_compaction::RuntimePromptError>
+    {
+        let mut store = self.prompt_store.borrow_mut();
+        if store.is_none() {
+            *store = Some(xai_grok_compaction::RuntimePromptStore::new(None)?);
+        }
+        let store = store.as_mut().expect("runtime prompt store initialized");
+        store.force_reload()?;
+        Ok(store.snapshot())
     }
 }
 

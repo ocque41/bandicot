@@ -26,6 +26,21 @@ use xai_grok_tools::implementations::grok_build::task::types::*;
 use xai_grok_workspace::file_system::AsyncFileSystem;
 use xai_hunk_tracker::HunkTrackerHandle;
 use super::*;
+pub(super) fn enforce_depth_one_tool_restriction(
+    config: &mut xai_grok_tools::registry::types::ToolServerConfig,
+    ultra_depth_one: bool,
+    child_depth: u32,
+) -> bool {
+    use xai_grok_tools::implementations::grok_build::task::MAX_SUBAGENT_DEPTH;
+    use xai_grok_tools::types::tool::ToolKind;
+    if !ultra_depth_one && child_depth < MAX_SUBAGENT_DEPTH {
+        return false;
+    }
+    let before = config.tools.len();
+    config.tools.retain(|tool| tool.kind != Some(ToolKind::Task));
+    prune_orphaned_background_task_tools(config);
+    config.tools.len() < before
+}
 pub(super) fn task_model_override_error(
     requested: Option<&str>,
     provenance: ModelOverrideProvenance,
@@ -92,6 +107,18 @@ pub(crate) async fn handle_subagent_request(
             return;
         }
         _ => {}
+    }
+    if let Some(limit) = ctx.ultra_max_children {
+        let (active, pending) = coordinator
+            .borrow()
+            .child_counts_for_parent(&ctx.parent_session_id);
+        if !crate::control_plane::agent_graph::ultra_has_child_capacity(limit, active, pending) {
+            let msg = format!(
+                "Ultra child capacity reached ({active} active + {pending} pending, maximum {limit})"
+            );
+            send_pre_spawn_failure(request, &msg, coordinator, &ctx, gateway);
+            return;
+        }
     }
     let run_in_background = request.run_in_background
         || definition.background.unwrap_or(false);
@@ -404,18 +431,17 @@ pub(crate) async fn handle_subagent_request(
     }
     {
         use xai_grok_tools::implementations::grok_build::task::MAX_SUBAGENT_DEPTH;
-        use xai_grok_tools::types::tool::ToolKind;
         let child_depth = ctx.parent_depth + 1;
-        if child_depth >= MAX_SUBAGENT_DEPTH {
-            let before = definition.tool_config.tools.len();
-            definition.tool_config.tools.retain(|tc| tc.kind != Some(ToolKind::Task));
-            if definition.tool_config.tools.len() < before {
-                tracing::info!(
-                    subagent_id = % request.id, child_depth, max_depth =
-                    MAX_SUBAGENT_DEPTH, "Stripped task tool from child at max depth"
-                );
-            }
-            prune_orphaned_background_task_tools(&mut definition.tool_config);
+        if enforce_depth_one_tool_restriction(
+            &mut definition.tool_config,
+            ctx.ultra_depth_one,
+            child_depth,
+        ) {
+            tracing::info!(
+                subagent_id = % request.id, child_depth, max_depth =
+                MAX_SUBAGENT_DEPTH, ultra_depth_one = ctx.ultra_depth_one,
+                "Stripped task tool from child to enforce delegation depth"
+            );
         }
     }
     if request.fork_context {
@@ -469,6 +495,12 @@ pub(crate) async fn handle_subagent_request(
             send_failure(request, &msg);
             return;
         }
+    }
+    apply_runtime_sampling_overrides(&mut effective_sampling_config, &request.runtime_overrides);
+    if ctx.ultra_depth_one {
+        // Ultra is host-directed. A child must not start another delegation
+        // tree through the provider-hosted multi-agent beta.
+        effective_sampling_config.hosted_multi_agent = Default::default();
     }
     if let Some(raw) = effective_runtime.reasoning_effort.as_deref()
         && ctx

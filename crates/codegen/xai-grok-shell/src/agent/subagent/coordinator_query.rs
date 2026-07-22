@@ -371,4 +371,20 @@ impl SubagentCoordinator {
             })
             .collect()
     }
+
+    /// Return `(active, pending)` child counts without exposing coordinator
+    /// internals to the session command layer.
+    pub(crate) fn child_counts_for_parent(&self, parent_session_id: &str) -> (usize, usize) {
+        let active = self
+            .active
+            .values()
+            .filter(|child| child.parent_session_id == parent_session_id)
+            .count();
+        let pending = self
+            .pending
+            .values()
+            .filter(|child| child.parent_session_id == parent_session_id)
+            .count();
+        (active, pending)
+    }
 }

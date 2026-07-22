@@ -1,0 +1,99 @@
+{
+  "schema": "agent-pipeline.stage_manifest.v1",
+  "stage": "sure-polish",
+  "order": 3,
+  "agent": "sure-polish",
+  "generated_at": "2026-07-22T05:48:50+02:00",
+  "status": "incomplete",
+  "verdict": "FOCUSED_VERIFICATION_PASSED_WITH_DECLARED_GAPS",
+  "inputs": [
+    {
+      "name": "active-goal",
+      "path": "/Users/miguel/.codex/attachments/27a8a857-af32-4137-bc21-345c476d8df5/pasted-text.txt",
+      "read": true
+    },
+    {
+      "name": "gap-scan-report",
+      "path": "/Users/miguel/Documents/bandicot/out/goal-triad/gap_scan.md",
+      "read": true
+    },
+    {
+      "name": "architecture-solidification-ideas",
+      "path": "/Users/miguel/Documents/bandicot/out/goal-triad/architecture_solidification_ideas.md",
+      "read": true
+    },
+    {
+      "name": "stage-contract",
+      "path": "/Users/miguel/Documents/bandicot/.codex/pipelines/goal-triad/stages/03-sure-polish.toml",
+      "read": true
+    }
+  ],
+  "outputs": [
+    {
+      "name": "completion-report",
+      "path": "/Users/miguel/Documents/bandicot/out/goal-triad/completion_report.md",
+      "written": true
+    },
+    {
+      "name": "verification-log",
+      "path": "/Users/miguel/Documents/bandicot/out/goal-triad/verification_log.md",
+      "written": true
+    },
+    {
+      "name": "stage-manifest",
+      "path": "/Users/miguel/Documents/bandicot/out/goal-triad/stage_manifests/03-sure-polish.stage_manifest.json",
+      "written": true
+    }
+  ],
+  "acceptance_gates": {
+    "gap_scan_request_changes_resolved_or_blocked": true,
+    "strategy_blockers_resolved_or_deferred_with_reason": true,
+    "required_validation_commands_run": false,
+    "final_report_written": true,
+    "non_goals_preserved": true
+  },
+  "safety_corrections": [
+    "Real /graph run no longer uses FakeWorkerBackend.",
+    "Fake execution is limited to /swarm run --fake, /swarm benchmark --fake, and tests.",
+    "Active graph runs are attached by session_id and repo root instead of a global cwd pointer.",
+    "[orchestration] startup defaults are parsed and applied with requirements re-applied above project config.",
+    "Fast service-tier rejection fallback retries once only for typed service_tier 400/422 errors.",
+    "Fast requested preference is persisted in summary.json and effective support is recomputed on resume, fork, and provider/model changes."
+  ],
+  "verification": {
+    "rustfmt_targeted": "passed for owned service-tier, sampler, AgentGraph, Ultra, slash-command, persistence, and worker-isolation files",
+    "static_fake_backend_gate_scan": "passed",
+    "static_session_scoping_scan": "passed",
+    "static_fast_fallback_scan": "passed",
+    "static_fast_persistence_scan": "passed",
+    "static_orchestration_config_scan": "passed",
+    "git_diff_check": "passed",
+    "sampling_types": "passed: 284 tests, 0 failed; doctests passed with one ignored",
+    "provider_wire": "passed after correcting one trailing-space fixture: 14 tests, 0 failed",
+    "agentgraph_shell": "passed: 28 tests, 0 failed, including exact-100 fake benchmark, resource safety, replay, durable controls, real subagent backend, Ultra, and fake app-server lifecycle",
+    "focused_shell": "passed: Fast persistence 4, orchestration config 4, runtime sampling 3, Ultra 8, Fast summary round trip 1",
+    "broad_fmt": "failed due formatting drift in mixed concurrent account/context-compaction and fallback-provider files; unrelated files were not rewritten",
+    "broad_clippy_and_pager": "not executed because a concurrent task held Cargo's default build lock with a large pager build"
+  },
+  "source_stability": {
+    "stable_for_root_validation": true,
+    "meaning": "Owned implementation, docs, and focused validation are reconciled; the declared feature and broad-validation gaps remain."
+  },
+  "smooth_software": {
+    "used": false,
+    "reason": "Skipped because the working tree has mixed uncommitted edits from multiple agents; targeted polish was safer."
+  },
+  "non_goals_preserved": [
+    "No live 100-worker provider test.",
+    "No recursive model-agent fan-out.",
+    "No automatic Fast through Ultra or Swarm.",
+    "No fake completion for real /graph run.",
+    "No generated root Cargo.toml edit."
+  ],
+  "remaining": [
+    "Complete or explicitly defer settings modal controls for orchestration defaults.",
+    "Complete graph-wide runtime budget enforcement, retries, loops, compensation, fairness/rate adaptation, and automatic process-start recovery.",
+    "Add structured AgentGraph ACP/headless approval methods and concrete model-selector resolution.",
+    "Run broad clippy and pager command filters after the concurrent pager build releases Cargo's default build lock."
+  ]
+}

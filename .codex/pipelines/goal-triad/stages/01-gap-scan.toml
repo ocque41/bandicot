@@ -1,0 +1,42 @@
+name = "gap-scan"
+order = 1
+assigned_agents = ["gap-scanner"]
+assigned_packages = []
+required_skills = []
+acceptance_gates = ["source_truth_read", "source_truth_verified", "next_highest_value_gap_identified", "request_changes_or_approve_report_written"]
+
+[assigned_agent_paths]
+"gap-scanner" = "/Users/miguel/.codex/agents/gap-scanner.toml"
+
+[[inputs]]
+name = "active-goal"
+path = "/Users/miguel/.codex/attachments/27a8a857-af32-4137-bc21-345c476d8df5/pasted-text.txt"
+required = true
+truth_type = "goal_contract"
+
+[[inputs]]
+name = "implementation-ledger"
+path = "/Users/miguel/Documents/bandicot/docs/changes/2026-07-21-control-plane-implementation.md"
+required = true
+truth_type = "progress_claims"
+
+[[outputs]]
+name = "gap-scan-report"
+path = "/Users/miguel/Documents/bandicot/out/goal-triad/gap_scan.md"
+required = true
+
+[stage_manifest]
+path = "/Users/miguel/Documents/bandicot/out/goal-triad/stage_manifests/01-gap-scan.stage_manifest.json"
+format = "json"
+schema = "agent-pipeline.stage_manifest.v1"
+required_for_final_ready = true
+
+[blocker_policy]
+on_missing_input = "stop"
+on_failed_gate = "stop"
+on_agent_unavailable = "stop"
+
+[handoff_contract]
+summary = "Pass the source-backed gap report to strategist-solidify and sure-polish."
+next_stage = "strategist-solidify"
+required_evidence = ["gap_scan.md", "01-gap-scan.stage_manifest.json"]

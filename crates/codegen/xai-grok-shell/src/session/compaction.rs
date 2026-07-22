@@ -9,7 +9,10 @@ use super::SessionActor;
 use super::is_project_instructions;
 use crate::remote::DEFAULT_CONTEXT_WINDOW;
 use crate::session::compaction_config::{
-    AsyncCompactionCache, SUPPRESS_NONE, SUPPRESS_STICKY, SUPPRESS_TURN, SUPPRESS_UNTIL_SUCCESS,
+    AsyncCompactionCache, CompactionBoundaryState, CompactionPreflightAction, ContextPolicy,
+    ContextPressure, ContextSessionKind, SUPPRESS_NONE, SUPPRESS_STICKY, SUPPRESS_TURN,
+    SUPPRESS_UNTIL_SUCCESS, transition_after_model_sample, transition_after_tool_batch_committed,
+    transition_before_model_request,
 };
 use crate::session::helpers::CompactionStateContext;
 use crate::session::helpers::compaction_context::CompactionInputs;
@@ -159,6 +162,12 @@ impl SessionActor {
     /// Two-pass active for this session: flag resolved on at build AND not an
     /// agent that keeps its single short self-summary.
     pub(crate) fn two_pass_active(&self) -> bool {
+        // The universal policy ships with the simpler host-textual path. Keep
+        // the legacy two-pass implementation available only as an explicit
+        // operator experiment until it has equivalent boundary guarantees.
+        if std::env::var("BANDICOT_TWO_PASS_COMPACTION").as_deref() != Ok("1") {
+            return false;
+        }
         let agent = self.agent.borrow();
         agent.compaction_policy().two_pass_enabled
     }
@@ -989,14 +998,51 @@ impl SessionActor {
             .borrow()
             .compaction_policy()
             .wall_clock_budget_secs;
+        let context_policy = ContextPolicy::default();
+        let session_kind = if self.startup_hints.is_subagent {
+            ContextSessionKind::Subagent
+        } else {
+            ContextSessionKind::Main
+        };
+        let band = context_policy.band(session_kind);
+        let effective_window_tokens = band.effective_window_tokens(context_window, None);
+        let prompt_snapshot =
+            self.compaction
+                .prefire
+                .runtime_prompt_snapshot()
+                .map_err(|error| {
+                    acp::Error::internal_error()
+                        .data(format!("failed to load compaction prompt: {error}"))
+                })?;
+        let resolved_prompt = prompt_snapshot.bind(&xai_grok_compaction::SummaryPromptBindings {
+            summary_token_budget: band.summary_max_output_tokens,
+            session_kind: match session_kind {
+                ContextSessionKind::Main => xai_grok_compaction::RuntimeSessionKind::Main,
+                ContextSessionKind::Subagent => xai_grok_compaction::RuntimeSessionKind::Subagent,
+            },
+            effective_window_tokens,
+            trigger_tokens: band.soft_trigger_tokens(effective_window_tokens),
+        });
+        tracing::info!(
+            prompt_sha256 = prompt_snapshot.sha256(),
+            effective_window_tokens,
+            summary_token_budget = band.summary_max_output_tokens,
+            "resolved runtime compaction prompt"
+        );
+        let mut compaction_sampling_config = sampling_config.clone();
+        compaction_sampling_config.max_completion_tokens = Some(
+            u32::try_from(band.summary_max_output_tokens)
+                .expect("compaction summary token cap fits u32"),
+        );
         let sampler = crate::session::helpers::full_replace_compaction::ShellCompactionSampler::new(
             use_short_prompt,
             user_context.clone(),
-            compaction_tools.clone(),
-            compaction_hosted_tools.clone(),
+            Some(resolved_prompt),
+            Vec::new(),
+            Vec::new(),
             sampling_client,
             self.session_info.id.clone(),
-            sampling_config.clone(),
+            compaction_sampling_config,
             self.inference_idle_timeout,
             wall_clock_budget_secs,
         );
@@ -1546,6 +1592,22 @@ impl SessionActor {
                 summary_count,
             })
         };
+        let post_compaction_target_tokens = ContextPolicy::default()
+            .band(if self.startup_hints.is_subagent {
+                ContextSessionKind::Subagent
+            } else {
+                ContextSessionKind::Main
+            })
+            .post_compaction_target_tokens;
+        // Include normal-turn tool definitions because they return immediately
+        // after replacement even though tools are disabled for the summary call.
+        let replacement_tokens = xai_chat_state::estimate_conversation_tokens(&compacted_history)
+            .saturating_add(compaction_tool_tokens);
+        if replacement_tokens > post_compaction_target_tokens {
+            return Err(acp::Error::internal_error().data(format!(
+                "compaction replacement is ineffective: estimated {replacement_tokens} tokens exceeds low-water target {post_compaction_target_tokens}"
+            )));
+        }
         let prompt_index_at_compaction = self.chat_state_handle.get_prompt_index().await;
         self.chat_state_handle
             .record_compaction_at(prompt_index_at_compaction);
@@ -1569,7 +1631,8 @@ impl SessionActor {
             prompt_index_at_compaction,
             auto_continue,
             original_user_info,
-        );
+        )
+        .await?;
         let prefix_len = if self
             .compaction
             .prefix_released
@@ -1702,6 +1765,9 @@ impl SessionActor {
             }
         }
         compaction.complete(tokens_after);
+        self.compaction
+            .prefire
+            .set_boundary_state(CompactionBoundaryState::Healthy);
         Ok(())
     }
     /// Check if auto-compact should be triggered based on context window usage.
@@ -1726,6 +1792,50 @@ impl SessionActor {
         } else {
             None
         }
+    }
+
+    async fn universal_context_pressure(&self) -> Option<ContextPressure> {
+        let cfg = self.chat_state_handle.get_sampling_config().await?;
+        let rendered_input_tokens = self.chat_state_handle.get_estimated_total_tokens().await;
+        let kind = if self.startup_hints.is_subagent {
+            ContextSessionKind::Subagent
+        } else {
+            ContextSessionKind::Main
+        };
+        Some(ContextPolicy::default().pressure(
+            kind,
+            rendered_input_tokens,
+            cfg.context_window.get(),
+            None,
+        ))
+    }
+
+    pub(crate) fn record_compaction_model_sample(&self, emitted_tool_calls: bool) {
+        let next = transition_after_model_sample(
+            self.compaction.prefire.boundary_state(),
+            emitted_tool_calls,
+        );
+        self.compaction.prefire.set_boundary_state(next);
+    }
+
+    /// Complete the pending soft-boundary transition only after the whole tool
+    /// batch has returned and all results have been committed to chat state.
+    pub(crate) async fn check_compact_after_tool_batch(&self) -> Option<AutoCompactTriggerInfo> {
+        let transition =
+            transition_after_tool_batch_committed(self.compaction.prefire.boundary_state(), true);
+        self.compaction.prefire.set_boundary_state(transition.state);
+        if transition.action != CompactionPreflightAction::CompactNow {
+            return None;
+        }
+        let pressure = self.universal_context_pressure().await?;
+        Some(AutoCompactTriggerInfo {
+            tokens_used: pressure.rendered_input_tokens,
+            context_window: pressure.effective_window_tokens,
+            percentage: xai_token_estimation::usage_percentage_u8(
+                pressure.rendered_input_tokens,
+                pressure.effective_window_tokens,
+            ),
+        })
     }
     /// Returns true if the error response indicates tokens exceed the
     /// model's context window. Inspects only the model-metadata
@@ -1769,22 +1879,22 @@ impl SessionActor {
         {
             return None;
         }
-        let sampling_cfg = self.chat_state_handle.get_sampling_config().await;
-        let context_window = sampling_cfg.as_ref().map(|c| c.context_window)?;
-        let cw = context_window.get();
-        let model = sampling_cfg
-            .as_ref()
-            .map(|c| c.model.clone())
-            .unwrap_or_default();
-        let estimated_total = self.chat_state_handle.get_estimated_total_tokens().await;
-        self.signals_handle()
-            .update_context_usage(estimated_total, cw);
-        if self
+        let sampling_cfg = self.chat_state_handle.get_sampling_config().await?;
+        let model = sampling_cfg.model.clone();
+        let pressure = self.universal_context_pressure().await?;
+        self.signals_handle().update_context_usage(
+            pressure.rendered_input_tokens,
+            pressure.effective_window_tokens,
+        );
+        let suppressed = self
             .compaction
             .auto_compact_suppressed
             .load(std::sync::atomic::Ordering::Relaxed)
-            != SUPPRESS_NONE
-        {
+            != SUPPRESS_NONE;
+        if suppressed && !pressure.hard_guard {
+            self.compaction
+                .prefire
+                .set_boundary_state(CompactionBoundaryState::Suppressed);
             return None;
         }
         if self
@@ -1798,18 +1908,45 @@ impl SessionActor {
             )
             .is_ok()
         {
-            let percentage = xai_token_estimation::usage_percentage_u8(estimated_total, cw);
+            let percentage = xai_token_estimation::usage_percentage_u8(
+                pressure.rendered_input_tokens,
+                pressure.effective_window_tokens,
+            );
+            self.compaction
+                .prefire
+                .set_boundary_state(CompactionBoundaryState::Compacting);
             tracing::info!(
                 "Forced auto-compact trigger (debug): model={model}, \
-                 {percentage}% full ({estimated_total}/{cw} tokens)",
+                 {percentage}% full ({}/{} tokens)",
+                pressure.rendered_input_tokens,
+                pressure.effective_window_tokens,
             );
             return Some(AutoCompactTriggerInfo {
-                tokens_used: estimated_total,
-                context_window: cw,
+                tokens_used: pressure.rendered_input_tokens,
+                context_window: pressure.effective_window_tokens,
                 percentage,
             });
         }
-        if let Some(trigger_info) = self.should_auto_compact(estimated_total, context_window) {
+        let state = match self.compaction.prefire.boundary_state() {
+            CompactionBoundaryState::Suppressed if !suppressed => CompactionBoundaryState::Healthy,
+            state => state,
+        };
+        let transition = transition_before_model_request(
+            state,
+            pressure,
+            ContextPolicy::default().max_pending_model_calls,
+        );
+        self.compaction.prefire.set_boundary_state(transition.state);
+        if transition.action == CompactionPreflightAction::CompactNow {
+            let percentage = xai_token_estimation::usage_percentage_u8(
+                pressure.rendered_input_tokens,
+                pressure.effective_window_tokens,
+            );
+            let trigger_info = AutoCompactTriggerInfo {
+                tokens_used: pressure.rendered_input_tokens,
+                context_window: pressure.effective_window_tokens,
+                percentage,
+            };
             tracing::info!(
                 "Pre-sampling auto-compact trigger: model={model}, \
                  {}% full ({}/{} tokens)",
@@ -1832,16 +1969,24 @@ impl SessionActor {
         {
             return None;
         }
-        let estimated_total = self.chat_state_handle.get_estimated_total_tokens().await;
-        let cfg = self.chat_state_handle.get_sampling_config().await?;
-        let cw = cfg.context_window.get();
-        if estimated_total <= cw {
+        let pressure = self.universal_context_pressure().await?;
+        if !pressure.hard_guard {
             return None;
         }
-        let overflow = estimated_total.saturating_sub(cw);
+        let estimated_total = pressure.rendered_input_tokens;
+        let cw = pressure.effective_window_tokens;
+        let overflow = estimated_total
+            .saturating_add(ContextPolicy::default().minimum_output_reserve_tokens)
+            .saturating_add(ContextPolicy::default().hard_safety_margin_tokens)
+            .saturating_sub(cw);
         let percentage = xai_token_estimation::usage_percentage_u8(estimated_total, cw);
+        self.compaction
+            .prefire
+            .set_boundary_state(CompactionBoundaryState::Compacting);
         tracing::warn!(
-            estimated_total, context_window = cw, overflow, model = % cfg.model,
+            estimated_total,
+            context_window = cw,
+            overflow,
             "CONTEXT_OVERFLOW_PREFLIGHT: estimated tokens exceed context window \
              after tool call outputs"
         );
@@ -1975,6 +2120,21 @@ impl SessionActor {
                 Ok(())
             }
             Err(e) => {
+                let retry_state = if self
+                    .compaction
+                    .auto_compact_suppressed
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                    == SUPPRESS_NONE
+                {
+                    CompactionBoundaryState::Pending {
+                        crossed_at_tokens: trigger_info.tokens_used,
+                        model_calls_since_crossing: ContextPolicy::default()
+                            .max_pending_model_calls,
+                    }
+                } else {
+                    CompactionBoundaryState::Suppressed
+                };
+                self.compaction.prefire.set_boundary_state(retry_state);
                 let span = tracing::Span::current();
                 span.record("success", false);
                 span.record("error", e.to_string().as_str());
@@ -1993,7 +2153,8 @@ impl SessionActor {
             }
         }
     }
-    /// Persist a compaction request artifact for offline prompt iteration.
+    /// Persist a compaction request artifact for offline prompt iteration only
+    /// when the user explicitly enables raw diagnostic capture.
     ///
     /// Writes `{session_dir}/compaction_requests/{request_id}.json` containing
     /// the exact ConversationItem list sent to the compaction model plus the
@@ -2023,6 +2184,12 @@ impl SessionActor {
         attempt_details: Vec<CompactionAttempt>,
         started_at: String,
     ) {
+        if std::env::var("BANDICOT_CAPTURE_RAW_COMPACTION").as_deref() != Ok("1") {
+            tracing::debug!(
+                "raw compaction request capture disabled; set BANDICOT_CAPTURE_RAW_COMPACTION=1 to opt in"
+            );
+            return;
+        }
         use crate::extensions::notification::CompactionRequestFile;
         let request_id = uuid::Uuid::new_v4().to_string();
         let trigger_str = match trigger {
@@ -2073,15 +2240,16 @@ impl SessionActor {
     ///
     /// `auto_continue` should be `Some` when this compaction was triggered by auto-compact
     /// and an auto-continue prompt will follow.
-    fn persist_compaction_checkpoint(
+    async fn persist_compaction_checkpoint(
         &self,
         compacted_history: &[ConversationItem],
         prompt_index_at_compaction: usize,
         auto_continue: Option<crate::extensions::notification::AutoContinueInfo>,
         original_user_info: Option<String>,
-    ) {
+    ) -> Result<(), acp::Error> {
         use crate::extensions::notification::{
-            CompactionCheckpointFile, CompactionCheckpointInfo, SessionUpdate as XaiSessionUpdate,
+            CompactionCheckpointFile, CompactionCheckpointInfo,
+            SessionNotification as XaiSessionNotification, SessionUpdate as XaiSessionUpdate,
         };
         let checkpoint_id = uuid::Uuid::new_v4().to_string();
         let checkpoint_file = format!("compaction_checkpoints/{checkpoint_id}.json");
@@ -2095,14 +2263,6 @@ impl SessionActor {
             original_user_info,
             reread_file_paths: vec![],
         };
-        if self
-            .notifications
-            .persistence_tx
-            .send(PersistenceMsg::CompactionCheckpoint(file_data))
-            .is_err()
-        {
-            tracing::warn!("Failed to send compaction checkpoint file to persistence channel");
-        }
         let info = CompactionCheckpointInfo {
             checkpoint_id,
             prompt_index_at_compaction,
@@ -2111,11 +2271,38 @@ impl SessionActor {
             schema_version: 1,
             created_at,
         };
-        self.persist_xai_update_only(XaiSessionUpdate::CompactionCheckpoint(Box::new(info)));
+        let notification = XaiSessionNotification {
+            session_id: self.session_info.id.clone(),
+            update: XaiSessionUpdate::CompactionCheckpoint(Box::new(info)),
+            meta: Some(self.build_notification_meta()),
+        };
+        let update = crate::session::storage::SessionUpdate::Xai(Box::new(notification));
+        let (respond_to, ack) = tokio::sync::oneshot::channel();
+        self.notifications
+            .persistence_tx
+            .send(PersistenceMsg::CompactionCheckpointDurablyAndAck {
+                checkpoint: file_data,
+                update,
+                respond_to,
+            })
+            .map_err(|_| {
+                acp::Error::internal_error()
+                    .data("compaction checkpoint persistence channel is closed")
+            })?;
+        ack.await
+            .map_err(|_| {
+                acp::Error::internal_error()
+                    .data("compaction checkpoint persistence acknowledgement was dropped")
+            })?
+            .map_err(|error| {
+                acp::Error::internal_error()
+                    .data(format!("failed to persist compaction checkpoint: {error}"))
+            })?;
         tracing::info!(
             prompt_index_at_compaction,
-            "Persisted compaction checkpoint"
+            "Durably persisted compaction checkpoint before live replacement"
         );
+        Ok(())
     }
 }
 #[cfg(test)]
@@ -2184,6 +2371,8 @@ mod inline_auto_compact_flow_tests {
                 top_p: None,
                 api_backend: Default::default(),
                 extra_headers: Default::default(),
+                effective_service_tier: Default::default(),
+                hosted_multi_agent: Default::default(),
                 context_window: std::num::NonZeroU64::new(context_window)
                     .expect("test context_window must be non-zero"),
                 reasoning_effort: None,
@@ -2225,6 +2414,10 @@ mod inline_auto_compact_flow_tests {
             compaction_at_tokens: std::cell::Cell::new(None),
             doom_loop_recovery: None,
             doom_loop_turn_tally: Default::default(),
+            ultra_orchestration: std::sync::Arc::new(parking_lot::Mutex::new(
+                crate::control_plane::agent_graph::UltraOrchestrationConfig::default(),
+            )),
+            ultra_child_counts: Default::default(),
             file_state_tracker: Arc::new(FileStateTracker::new()),
             rewind_pending_prompt: std::sync::Mutex::new(None),
             startup_hints: StartupHints::default(),

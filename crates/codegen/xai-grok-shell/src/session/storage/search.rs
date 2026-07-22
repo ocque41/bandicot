@@ -1351,6 +1351,8 @@ mod tests {
             agent_name: None,
             sandbox_profile: None,
             reasoning_effort: None,
+            fast_service_tier: None,
+            ultra_orchestration: Default::default(),
         }
     }
 

@@ -584,6 +584,13 @@ impl AgentView {
                 InputOutcome::Changed
             }
             ArgPickerStep::Selected(item) => {
+                if command_clone == "connect" && item.insert_text.ends_with(char::is_whitespace) {
+                    let full = format!("/{} {}", command_clone, item.insert_text);
+                    self.active_modal = None;
+                    self.prompt.set_text(&full);
+                    self.set_active_pane(crate::views::agent::ActivePane::Prompt, false);
+                    return InputOutcome::Changed;
+                }
                 let chains_to_effort = matches!(command_clone.as_str(), "model" | "m")
                     && item.insert_text.ends_with(char::is_whitespace);
                 if chains_to_effort {
