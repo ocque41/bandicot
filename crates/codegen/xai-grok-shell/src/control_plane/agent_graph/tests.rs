@@ -584,6 +584,93 @@ fn graph_command_validates_spec_file() {
     assert!(output.contains("Effects:"), "{output}");
 }
 
+#[tokio::test]
+async fn completion_contract_captures_real_command_and_mock_swarm_output() {
+    let dir = tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join(".git/refs/heads")).unwrap();
+    std::fs::write(dir.path().join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+    std::fs::write(
+        dir.path().join(".git/refs/heads/main"),
+        "0123456789abcdef0123456789abcdef01234567\n",
+    )
+    .unwrap();
+    let graph = build_exact_100_worker_graph("completion-capture");
+    let path = dir.path().join("graph.json");
+    std::fs::write(&path, serde_json::to_string_pretty(&graph).unwrap()).unwrap();
+
+    let fast = crate::session::acp_session::format_fast_status(
+        &xai_grok_sampling_types::ResolvedServiceTier::fast(
+            xai_grok_sampling_types::ServiceTierSource::Session,
+        ),
+    );
+    let ultra = format_ultra_status(
+        &UltraOrchestrationConfig {
+            enabled: true,
+            max_children: 4,
+            policy_injected: true,
+            setting_source: UltraSettingSource::Session,
+        },
+        false,
+    );
+    let preview = graph_command_output(
+        &format!("preview {}", path.display()),
+        dir.path(),
+        Some("capture-session"),
+    );
+    let plan = swarm_command_output("plan --fake", dir.path(), Some("capture-session"));
+    let status = graph_command_output("status", dir.path(), Some("capture-session"));
+    let swarm_status = swarm_command_output("status", dir.path(), Some("capture-session"));
+
+    let control = AgentGraphControlPlane::new(dir.path(), Some("capture-session"));
+    let material: ApprovalBinding =
+        serde_json::from_str(&control.approval_material()).expect("approval material");
+    let approval = control.approve_active(&material.normalized_graph_hash);
+    let backend = Arc::new(ScriptedSubagentBackend::new(
+        ScriptedBackendMode::StructuredSuccess,
+    ));
+    let live = swarm_command_output_with_backend(
+        "run",
+        dir.path(),
+        Some("capture-session"),
+        Some(backend),
+        true,
+        None,
+    )
+    .await;
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let completed = loop {
+        let value = swarm_command_output("status", dir.path(), Some("capture-session"));
+        if value.contains("Completed") || std::time::Instant::now() >= deadline {
+            break value;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    let benchmark = swarm_command_output(
+        "benchmark --fake --limit 100",
+        dir.path(),
+        Some("capture-session"),
+    );
+
+    println!("\n=== /fast status ===\n{fast}");
+    println!("\n=== /ultra status ===\n{ultra}");
+    println!("\n=== /graph preview ===\n{preview}");
+    println!("\n=== /swarm plan ===\n{plan}");
+    println!("\n=== /graph status ===\n{status}");
+    println!("\n=== /swarm status ===\n{swarm_status}");
+    println!("\n=== approval ===\n{approval}");
+    println!("\n=== local mock live-Swarm start ===\n{live}");
+    println!("\n=== local mock live-Swarm final ===\n{completed}");
+    println!("\n=== exact-100 fake benchmark ===\n{benchmark}");
+
+    assert!(fast.contains("Effective wire value: priority"), "{fast}");
+    assert!(ultra.contains("Effective state: on"), "{ultra}");
+    assert!(preview.contains("Estimated tokens:"), "{preview}");
+    assert!(status.contains("AwaitingApproval"), "{status}");
+    assert!(live.contains("Backend: subagent"), "{live}");
+    assert!(completed.contains("Completed"), "{completed}");
+    assert!(benchmark.contains("Peak active: 100"), "{benchmark}");
+}
+
 #[test]
 fn graph_command_plan_run_and_pause_use_session_scoped_store() {
     let dir = tempdir().expect("tempdir");

@@ -123,6 +123,7 @@ use super::compaction_config;
 use super::helpers;
 use super::memory_state;
 use super::telemetry;
+pub(crate) use slash_exec::format_fast_status;
 #[path = "acp_session_impl/prompt_build.rs"]
 mod prompt_build;
 use prompt_build::*;

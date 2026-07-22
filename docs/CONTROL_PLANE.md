@@ -11,10 +11,10 @@ does not silently enable another.
 | Fast | Available for the current session and as a startup default |
 | Ultra | Available for user-facing root sessions and persisted with the session |
 | AgentGraph validation and preview | Available for JSON and YAML GraphSpec v1 files |
-| AgentGraph execution | Available only through the session subagent backend, with read-only workers |
+| AgentGraph execution | Available through the session subagent backend with read-only or isolated-worktree workers |
 | Swarm exact-100 benchmark | Available offline with the fake backend |
 | Live Swarm execution | Available through the session worker backend behind a separate opt-in gate and bound approval |
-| Automatic graph restart after a process crash | Unavailable |
+| Automatic graph restart after a process crash | Startup recovery scans nonterminal runs, expires stale leases, restores persisted retries, and enforces wall deadlines |
 | Codex app-server worker backend | Available as an optional adapter; disabled by default |
 
 All four slash commands are session commands. They are advertised to ACP
@@ -114,8 +114,10 @@ the session has no persisted non-default override.
 command surfaces. Setting either value to `true` enables the command surface;
 it does not add a missing execution backend.
 
-The settings interface does not yet expose these orchestration defaults. Edit
-configuration files or use the session slash commands.
+The settings interface exposes Fast startup tier, Ultra defaults, Graph and
+Swarm gates, the separate live-Swarm gate, the Swarm worker ceiling, and graph
+artifact retention. Settings marked “restart to apply” affect new sessions;
+Graph and Swarm gates are reloaded by the command path.
 
 ## AgentGraph
 
@@ -174,11 +176,14 @@ spec:
   edges: []
 ```
 
-This example deliberately omits a model selector. The current session backend
-resolves the built-in `worker-light`/`luna`, `reducer-balanced`/`terra`, and
-`critical-verifier`/`sol` selectors to their preferred model slugs; the child
-session performs the final catalog validation. It also accepts only read-only model workers. A graph may validate with broader
-capabilities, but the current real backend will reject those workers.
+This example deliberately omits a model selector. Immediately before dispatch,
+the session backend resolves built-in selectors against the live model catalog.
+`worker-light` requires Luna without a silent fallback,
+`reducer-balanced` prefers Terra, and `critical-verifier` prefers Sol with the
+declared GPT-5.6 fallback. Capability, provider, API backend, hidden-model,
+reasoning-effort, image, structured-output, tool, and service-tier constraints
+fail closed. Real workers accept read-only or isolated-worktree authority;
+unisolated writes and external effects are rejected.
 Real graph workers apply the node/default `serviceTier`; the exact-100
 benchmark profile pins workers to Standard even when the root session is Fast.
 
@@ -222,14 +227,21 @@ Real graph workers currently have these enforced limits:
 - Structured NodeOutput validation before output is accepted.
 - Stale attempt output is rejected by attempt number.
 
-The scheduler reserves configured input, output, model-call, tool-call, and
-attempt capacity before dispatch, so concurrently ready workers cannot all
-pass the same remaining-budget check. It reconciles reported child usage and
-conservatively charges the reservation when usage is missing. Persisted
-wall-time timers and every cost/percentage dimension are not yet complete.
-Node retries, loop execution,
-compensation, and `retry-failed` are also not complete end-to-end workflows in
-the current command surface.
+The scheduler atomically reserves persisted input, output, model-call,
+tool-call, attempt, and lease capacity before dispatch. It reconciles actual
+usage and conservatively charges the full reservation when usage is missing.
+Wall deadlines are absolute persisted timestamps. Retry classifications,
+chosen jittered deadlines, Retry-After values, and history are durable. Loop
+state, seen keys, deterministic expansion IDs, usage, artifacts, and bounds are
+durable. Required compensation runs as a reverse-order saga with its own
+leases, retries, budgets, and terminal states.
+
+Host admission uses weighted fair queues, atomic multi-resource claims,
+head-of-line bypass, and an interactive reserve. Provider admission starts
+conservatively, reserves estimated tokens, consumes typed rate-limit headers,
+honors Retry-After, reduces concurrency after 429s, recovers gradually, and
+opens a circuit after repeated authentication failures. Swarm starts with a
+small canary wave and doubles only after successful batches.
 
 ### State and crash recovery
 
@@ -239,12 +251,28 @@ by both session and repository, so two sessions do not overwrite each other's
 active-run selection. Pause, resume, drain, and cancel requests are durable and
 an active background scheduler observes them between worker batches.
 
-The store can be reopened and replayed, and expired leases can be marked stale
-by the storage layer. However, process-start recovery is not wired to restart a
-background scheduler or expire leases automatically. After a crash, inspect
-`/graph status`. A run left in `Running` may require manual database recovery;
-the current `/graph run` path treats it as already running. Do not claim crash
-recovery is complete until automatic reattachment is implemented.
+At process startup the runtime manager scans nonterminal runs, acquires a
+coordinator lease, enforces persisted wall deadlines, expires stale worker
+leases, reconciles conservative usage, and activates due persisted retries.
+The sweep continues in the background, so lease expiry does not require a
+manual command. Recovery is idempotent and stale attempts cannot overwrite a
+newer attempt.
+
+## Structured ACP and non-interactive control
+
+The same canonical graph service backs slash commands and the structured ACP
+methods under `x.ai/graph/`: `draft`, `validate`, `preview`, `run`, `status`,
+`explain`, `pause`, `drain`, `resume`, `cancel`, `retry`, `artifact`, `export`,
+and `cleanup`. Requests and responses are typed JSON. A required approval is a
+structured object bound to the normalized graph hash, revision, budget,
+effects, permissions, repository commit, and expiry. Missing or changed
+approval fails before dispatch and returns the exact material to sign; the
+approval contains no credentials.
+
+The optional Codex app-server adapter remains disabled by default. Its local
+fake-server test covers initialize/initialized, account and model preflight,
+thread lifecycle, turn lifecycle, structured output, interruption, and
+shutdown. A live private Codex executable check is external-only.
 
 ## Swarm and the exact-100 benchmark
 
@@ -275,17 +303,13 @@ ability to run 100 real agents.
 
 ## ACP and headless operation
 
-Fast, Ultra, AgentGraph, and Swarm are included in the shell's ACP command
-advertisement. ACP clients can submit the same slash-command text through a
-session prompt and receive textual command output through normal session
-updates. The pager forwards these commands to the shell instead of sending
-them to the model.
-
-There is no separate structured AgentGraph ACP method, noninteractive approval
-protocol, or headless hard-budget acknowledgment in the current build.
-Headless clients therefore have the same command limits as interactive
-sessions, and should not automate live graph execution as if those safety
-controls already existed.
+Fast, Ultra, AgentGraph, and Swarm remain in the shell's ACP command
+advertisement. The pager forwards slash commands to the shell rather than the
+model. Automation can instead use the structured `x.ai/graph/*` methods listed
+above. The structured `run` method accepts the same immutable
+`ExecutionApproval` record as the TUI. Without a required approval it returns
+the exact approval binding and dispatches no worker. A generic headless or
+non-interactive flag is never treated as high-cost approval.
 
 ## Optional Codex app-server backend
 

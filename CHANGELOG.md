@@ -35,6 +35,11 @@ Build release notes remain under `crates/codegen/xai-grok-shell/`.
 
 ### Added
 
+- Completed the host-owned Fast, Ultra, AgentGraph, and Swarm control plane:
+  durable budgets, leases, startup recovery, persisted retries, bounded loops,
+  saga compensation, fair host admission, adaptive provider capacity, live
+  catalog model routing, typed settings, structured ACP controls, bound
+  non-interactive approval, and offline exact-100 verification.
 - Added typed `/plan` + `/goal` + `/loop` composition with canonical
   `/loop 10m --plan --goal objective` and compatibility
   `/plan /goal /loop 10m objective` forms. Composed workflows reuse one approved

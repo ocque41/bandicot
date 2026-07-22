@@ -784,4 +784,13 @@ When the same server name comes from more than one source, it resolves highest-p
 2. **User** — `~/.grok/lsp.json`
 3. **Plugins** — file-based `.lsp.json`, then inline `lspServers`, in plugin load order
 
-Project and user entries replace lower-priority ones of the same name. Plugin entries only add servers whose names aren't already defined by a local file, so a local `lsp.json` always wins over a plugin. Plugin LSP servers load only after the plugin is trusted (see [Plugins](09-plugins.md)).
+Project and user entries replace lower-priority ones with the same name. Plugin entries only add servers whose names are not already defined by a local file, so a local `lsp.json` always wins over a plugin. Plugin LSP servers load only after the plugin is trusted (see [Plugins](09-plugins.md)).
+
+## Orchestration defaults
+
+The settings modal and `[orchestration]` table control Fast, Ultra, AgentGraph,
+and Swarm defaults. Live provider-backed Swarm uses a separate
+`live_swarm_enabled` gate and remains off unless explicitly enabled. The modal
+also exposes the active-worker ceiling and graph-artifact retention. See
+[`docs/CONTROL_PLANE.md`](../../../../../docs/CONTROL_PLANE.md#configuration)
+for the typed keys, defaults, precedence, and restart behavior.

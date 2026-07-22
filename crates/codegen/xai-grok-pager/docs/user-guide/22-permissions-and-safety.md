@@ -473,3 +473,10 @@ Recommended combination for untrusted code:
 - [14-headless-mode.md](14-headless-mode.md) — Headless flags, including permission-related ones
 - [18-sandbox.md](18-sandbox.md) — OS-level isolation profiles
 - [05-configuration.md](05-configuration.md) — Native `config.toml` structure
+## AgentGraph worker authority
+
+Graph workers receive only their declared tool allowlist and read-only or
+isolated-worktree authority. Nested Bandicot orchestration and provider-hosted
+multi-agent execution are forced off. Unisolated writes and external effects
+fail closed. Durable budgets, leases, retry deadlines, compensation state, and
+approval bindings remain host-owned and cannot be increased by worker output.

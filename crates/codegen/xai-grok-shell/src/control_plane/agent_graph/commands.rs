@@ -351,8 +351,41 @@ impl AgentGraphControlPlane {
             Ok(None) => return format!("{label}: no active run is attached to this session."),
             Err(err) => return err,
         };
-        match AgentGraphStore::open(&self.store_path).and_then(|store| store.run_status(&run_id)) {
-            Ok(status) => format!("{label}: active run {run_id}\nStatus: {status:?}"),
+        match super::service::AgentGraphService::new(&self.cwd).status(&run_id) {
+            Ok(status) => format!(
+                "{label}: active run {}\nGraph: {} revision {}\nHash: {}\nStatus: {:?}\nNodes: total={} active={} ready={} retrying={} succeeded={} failed={} timed_out={} cancelled={}\nBudget: input={} cached_input={} cache_write={} output={} model_calls={} tool_calls={} attempts={} cost_usd={:.6} reservations={} stopped={}\nProvider rate routes: {}\nApproval: {}\nWarnings: {}\nArtifacts: {}",
+                status.run_id,
+                status.graph_id,
+                status.graph_revision,
+                status.normalized_spec_hash,
+                status.status,
+                status.total_nodes,
+                status.active_count,
+                status.ready_count,
+                status.retrying_count,
+                status.succeeded_count,
+                status.failed_count,
+                status.timed_out_count,
+                status.cancelled_count,
+                status.budget_state.charged.input_tokens,
+                status.budget_state.charged.cached_input_tokens,
+                status.budget_state.charged.cache_write_tokens,
+                status.budget_state.charged.output_tokens,
+                status.budget_state.charged.model_calls,
+                status.budget_state.charged.tool_calls,
+                status.budget_state.charged.node_attempts,
+                status.budget_state.charged.estimated_cost_usd,
+                status.budget_state.reservations.len(),
+                status.budget_state.stopped.as_deref().unwrap_or("no"),
+                status.rate_limit_state.len(),
+                if status.approval.is_some() {
+                    "bound"
+                } else {
+                    "none"
+                },
+                status.warnings.len(),
+                status.artifacts.len(),
+            ),
             Err(err) => format!("{label}: active run {run_id} could not be loaded: {err}"),
         }
     }
@@ -970,55 +1003,55 @@ fn validate_graph_for_command(spec: &GraphSpec) -> Result<(), String> {
 }
 
 fn preview_valid_graph(spec: &GraphSpec) -> String {
-    let report = validate_graph_spec(spec, &ValidationOptions::default());
-    if !report.is_valid() {
-        return validate_or_preview_graph(spec, false);
-    }
-    let topology = report.topology;
-    let topology_lines = topology.map_or_else(
-        || "Topology: unavailable".to_string(),
-        |topology| {
-            format!(
-                "Nodes: {}\nEdges: {}\nInitial ready agents: {}\nMaximum theoretical width: {}\nCritical path length: {}",
-                topology.node_count,
-                topology.edge_count,
-                topology.initial_ready_agent_width,
-                topology.maximum_theoretical_width,
-                topology.critical_path_length
-            )
-        },
-    );
-    let defaults = &spec.spec.defaults;
-    let effects = spec
-        .spec
-        .nodes
-        .iter()
-        .map(|node| node.external_effects.len())
-        .sum::<usize>();
-    let write_capable = spec
-        .spec
-        .nodes
-        .iter()
-        .filter(|node| node.effective_capability(defaults) > super::types::CapabilityMode::ReadOnly)
-        .count();
+    let preview = match super::service::AgentGraphService::new(Path::new(".")).preview(spec) {
+        Ok(preview) => preview,
+        Err(error) => return format!("GraphSpec preview failed: {error}"),
+    };
+    let cost = preview
+        .estimated_cost_usd
+        .map(|value| format!("${value:.6}"))
+        .unwrap_or_else(|| "Unknown".to_string());
     format!(
-        "GraphSpec is valid.\nHash: {}\n{}\nBudget: wall={:?}, input={:?}, output={:?}, cost={:?}\nModels: defaults={:?}, selectors={:?}\nPermissions: default={:?}, write_capable_nodes={}, nested_agents_disabled={}, provider_multi_agent_disabled={}\nEffects: external_effects={}, resources={}",
-        report
-            .normalized_hash
-            .unwrap_or_else(|| "<unavailable>".to_string()),
-        topology_lines,
-        spec.spec.budgets.max_wall_time_seconds,
-        spec.spec.budgets.max_input_tokens,
-        spec.spec.budgets.max_output_tokens,
-        spec.spec.budgets.max_estimated_cost_usd,
-        defaults.model_selector,
-        spec.spec.model_selectors,
-        defaults.capability_mode,
-        write_capable,
-        spec.spec.execution.disable_nested_bandicot_agents,
-        spec.spec.execution.disable_provider_multi_agent_for_workers,
-        effects,
-        spec.spec.resources.len()
+        "GraphSpec is valid.\nGraph: {} revision {}\nHash: {}\nNodes: static={} maximum_dynamic={}\nInitial ready agents: {}\nMaximum theoretical width: {}\nCritical path length: {}\nEffective concurrency: {}\nEstimated model calls: {}\nEstimated tokens: input=0..{} output=0..{}\nEstimated cost: {}\nBudget: wall={:?} input={:?} output={:?} cost={:?}\nModels: selectors={:?} resolution={}\nService tiers: {:?}\nResource pressure: {:?}\nPermissions: write_capable_nodes={}\nEffects: reads={} writes={} network={} external={}\nRequired approval: {}\nRetry policies: {}\nJoin policies: {}\nLoop bounds: {}\nValidation errors: {}\nLinter warnings: {}",
+        preview.graph_id,
+        preview.graph_revision,
+        preview.normalized_spec_hash,
+        preview.total_static_nodes,
+        preview.maximum_dynamic_nodes,
+        preview.initial_ready_width,
+        preview.maximum_theoretical_width,
+        preview.critical_path_length,
+        preview.effective_concurrency,
+        preview.estimated_model_calls,
+        preview
+            .estimated_input_tokens
+            .maximum
+            .map_or_else(|| "Unknown".to_string(), |value| value.to_string()),
+        preview
+            .estimated_output_tokens
+            .maximum
+            .map_or_else(|| "Unknown".to_string(), |value| value.to_string()),
+        cost,
+        preview.budget_limits.max_wall_time_seconds,
+        preview.budget_limits.max_input_tokens,
+        preview.budget_limits.max_output_tokens,
+        preview.budget_limits.max_estimated_cost_usd,
+        preview.model_selectors,
+        serde_json::to_string(&preview.model_selector_resolution)
+            .unwrap_or_else(|_| "[]".to_string()),
+        preview.service_tiers,
+        preview.resource_pressure,
+        preview.write_capable_nodes,
+        preview.read_effect_count,
+        preview.write_effect_count,
+        preview.network_effect_count,
+        preview.external_effect_count,
+        preview.required_approval,
+        preview.retry_policies.len(),
+        preview.join_policies.len(),
+        preview.loop_bounds.len(),
+        preview.validation_errors.len(),
+        preview.warnings.len(),
     )
 }
 

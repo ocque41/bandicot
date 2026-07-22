@@ -49,21 +49,12 @@ pub enum ServiceTierSource {
     BuiltIn,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ServiceTierCapabilities {
     #[serde(default)]
     pub priority: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_service_tier: Option<EffectiveServiceTier>,
-}
-
-impl Default for ServiceTierCapabilities {
-    fn default() -> Self {
-        Self {
-            priority: false,
-            default_service_tier: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

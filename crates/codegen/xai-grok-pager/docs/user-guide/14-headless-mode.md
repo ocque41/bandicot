@@ -595,3 +595,11 @@ On SIGINT/SIGTERM:
 - Resume: `grok -p "continue" --resume "<id>"` or `grok -p "continue" --continue`
 
 See [Session Management in Headless Mode](#session-management-in-headless-mode) for details on named sessions and the `-s`/`-r`/`-c` flags.
+## Structured graph automation
+
+Headless and ACP clients can use the typed `x.ai/graph/*` methods for graph
+validation, preview, execution, status, transitions, retry, export, artifacts,
+and cleanup. High-cost or side-effecting execution fails closed unless the
+request supplies an unexpired structured approval bound to the graph, budget,
+effects, permissions, repository commit, and revision. A generic
+non-interactive flag is not approval.

@@ -431,4 +431,25 @@ Built-in commands always win over a skill with the same name. Name a skill "comp
 
 ## Autocomplete
 
-The menu supports fuzzy search: start typing after `/` to filter. Each entry shows the command name, its description, an argument hint when it takes arguments, and its source (builtin, skill scope, or plugin name). Press `Tab` or `Enter` to accept the highlighted command.
+The slash command menu supports fuzzy search. Start typing after `/` to filter available commands. The menu shows:
+
+- Command name
+- Description
+- Argument hint (if the command accepts arguments)
+- Source (builtin, skill scope, plugin name)
+
+Press `Tab` or `Enter` to select a command from the autocomplete menu.
+## Fast, Ultra, AgentGraph, and Swarm
+
+Bandicot provides four independent control-plane commands. `/fast` selects a
+provider service tier, `/ultra` enables bounded root-session delegation,
+`/graph` validates and runs a versioned graph, and `/swarm` runs an explicitly
+approved high-width graph. None of them enables another or weakens permissions.
+
+Use `/fast status`, `/ultra status`, `/graph status`, and `/swarm status` for
+the effective state. Use `/graph preview PATH` before planning a graph. Live
+Swarm is off by default and requires both the live gate and an approval bound
+to the normalized graph. `/swarm benchmark --fake` performs the offline
+exact-100 scheduler check without provider requests. See
+[`docs/CONTROL_PLANE.md`](../../../../../docs/CONTROL_PLANE.md) for the full
+command and GraphSpec reference.

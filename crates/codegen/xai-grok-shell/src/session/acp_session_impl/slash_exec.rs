@@ -1675,7 +1675,9 @@ impl SessionActor {
     }
 }
 
-fn format_fast_status(resolved: &xai_grok_sampling_types::ResolvedServiceTier) -> String {
+pub(crate) fn format_fast_status(
+    resolved: &xai_grok_sampling_types::ResolvedServiceTier,
+) -> String {
     let wire = resolved.responses_wire_value().unwrap_or("<standard>");
     let support = if resolved.supported {
         "supported"
