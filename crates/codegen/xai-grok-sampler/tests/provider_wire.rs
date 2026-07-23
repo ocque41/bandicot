@@ -643,10 +643,8 @@ async fn openai_compatible_responses_request_has_no_xai_wire_extensions() {
 
     let mut request = ConversationRequest::from_items(vec![ConversationItem::user("hello")]);
     request.hosted_tools = vec![
-        HostedTool::WebSearch {
-            allowed_domains: None,
-        },
-        HostedTool::XSearch,
+        HostedTool::WebSearch { options: None },
+        HostedTool::XSearch { options: None },
     ];
     request.tools.push(ToolSpec {
         name: "x_search".to_owned(),

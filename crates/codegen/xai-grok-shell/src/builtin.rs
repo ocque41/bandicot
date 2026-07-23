@@ -118,7 +118,10 @@ mod tests {
             std::fs::read_to_string(home.join("skills/check/SKILL.md")).unwrap(),
             "custom check"
         );
-        assert!(home.join("native/skills/create-workflow/SKILL.md").is_file());
+        assert!(
+            home.join("native/skills/create-workflow/SKILL.md")
+                .is_file()
+        );
     }
 
     #[test]
@@ -128,11 +131,9 @@ mod tests {
             .nth(2)
             .and_then(|tail| tail.split("```").next())
             .expect("minimal Rhai template");
-        let report = xai_workflow::validate_script(
-            template,
-            Some(serde_json::json!({ "target": "src" })),
-        )
-        .expect("the documented workflow template must validate");
+        let report =
+            xai_workflow::validate_script(template, Some(serde_json::json!({ "target": "src" })))
+                .expect("the documented workflow template must validate");
         assert_eq!(report.name, "review-changes");
     }
 }

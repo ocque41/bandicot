@@ -2524,14 +2524,9 @@ impl SamplingClient {
     /// later at the wire boundary.
     fn strip_non_xai_hosted_tools(&self, request: &mut ConversationRequest) {
         if !self.xai_wire_extensions {
-            request
-                .hosted_tools
-                .retain(|tool| {
-                    !matches!(
-                        tool,
-                        xai_grok_sampling_types::HostedTool::XSearch { .. }
-                    )
-                });
+            request.hosted_tools.retain(|tool| {
+                !matches!(tool, xai_grok_sampling_types::HostedTool::XSearch { .. })
+            });
         }
     }
 
@@ -2997,9 +2992,7 @@ mod tests {
             description: Some("provider-neutral function".to_owned()),
             parameters: serde_json::json!({"type": "object"}),
         });
-        request.hosted_tools = vec![xai_grok_sampling_types::HostedTool::XSearch {
-            options: None,
-        }];
+        request.hosted_tools = vec![xai_grok_sampling_types::HostedTool::XSearch { options: None }];
         client.strip_non_xai_hosted_tools(&mut request);
 
         let wrapper: CreateResponseWrapper = (&request).into();
@@ -3984,7 +3977,7 @@ mod tests {
     }
 
     #[test]
-    fn streaming_response_preserves_canonical_max_through_sdk_staging() {
+    fn streaming_response_preserves_native_max_through_sdk_staging() {
         let sse = r#"{
             "type": "response.completed",
             "sequence_number": 0,
@@ -4011,8 +4004,8 @@ mod tests {
                 .reasoning
                 .as_ref()
                 .and_then(|reasoning| reasoning.effort.clone()),
-            Some(rs::ReasoningEffort::Xhigh),
-            "async-openai 0.33 receives its supported staging value"
+            Some(rs::ReasoningEffort::Max),
+            "the SDK must preserve its native max reasoning-effort value"
         );
         assert_eq!(
             event
@@ -4021,7 +4014,8 @@ mod tests {
                 .as_ref()
                 .and_then(|metadata| metadata.get(CANONICAL_REASONING_EFFORT_METADATA_KEY))
                 .map(String::as_str),
-            Some("max")
+            None,
+            "native max no longer needs compatibility metadata"
         );
 
         let items = xai_grok_sampling_types::response_to_conversation_items(event.response);
@@ -4036,7 +4030,7 @@ mod tests {
     }
 
     #[test]
-    fn non_streaming_response_preserves_canonical_max_through_sdk_staging() {
+    fn non_streaming_response_preserves_native_max_through_sdk_staging() {
         let body = br#"{
             "id": "resp_max_body",
             "object": "response",
@@ -4053,8 +4047,8 @@ mod tests {
                 .reasoning
                 .as_ref()
                 .and_then(|reasoning| reasoning.effort.clone()),
-            Some(rs::ReasoningEffort::Xhigh),
-            "async-openai 0.33 receives its supported staging value"
+            Some(rs::ReasoningEffort::Max),
+            "the SDK must preserve its native max reasoning-effort value"
         );
         assert_eq!(
             response
@@ -4062,7 +4056,8 @@ mod tests {
                 .as_ref()
                 .and_then(|metadata| metadata.get(CANONICAL_REASONING_EFFORT_METADATA_KEY))
                 .map(String::as_str),
-            Some("max")
+            None,
+            "native max no longer needs compatibility metadata"
         );
 
         let items = xai_grok_sampling_types::response_to_conversation_items(response);

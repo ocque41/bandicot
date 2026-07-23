@@ -889,10 +889,7 @@ mod tests {
             }
             wait_ms(25);
         }
-        assert!(
-            saw_creation,
-            "parent watch sees first directory creation"
-        );
+        assert!(saw_creation, "parent watch sees first directory creation");
         assert!(watcher.refresh_new_discovery_dirs());
         assert!(watcher.refreshed_dirs.contains(&workflows));
     }

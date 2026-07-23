@@ -52,9 +52,6 @@ pub use read_file::ReadFileTool;
 pub use scheduler::create::{
     SCHEDULER_CREATE_TOOL_NAME, SchedulerCreateTool, loop_schedule_instruction, loop_usage_message,
 };
-pub use xai_grok_tools_api::slash_commands::{
-    ApprovedLoopWorkflow, parse_approved_loop_workflow, parse_explicit_loop,
-};
 pub use scheduler::delete::{SCHEDULER_DELETE_TOOL_NAME, SchedulerDeleteTool};
 pub use scheduler::list::SchedulerListTool;
 pub use search_replace::SearchReplaceTool;
@@ -70,3 +67,6 @@ pub use video_gen::{
 pub use web_fetch::{WebFetchClient, WebFetchConfig, WebFetchParams, WebFetchTool};
 pub use web_search::WebSearchTool;
 pub use workflow::{WORKFLOW_TOOL_NAME, WorkflowTool};
+pub use xai_grok_tools_api::slash_commands::{
+    ApprovedLoopWorkflow, parse_approved_loop_workflow, parse_explicit_loop,
+};

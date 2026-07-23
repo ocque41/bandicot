@@ -919,19 +919,19 @@ async fn model_auth_memo_serves_cached_status_and_keys_on_model() {
             )
             .await;
 
-            actor.model_auth_memo.replace(Some(
-                crate::session::acp_session::ModelAuthMemo {
+            actor
+                .model_auth_memo
+                .replace(Some(crate::session::acp_session::ModelAuthMemo {
                     model_id: "model-a".to_string(),
                     facts: ModelAuthFacts {
-                    byok: ModelByok::Byok,
-                    auth_scheme: Default::default(),
-                    capabilities: Default::default(),
-                    wire_quirks: Default::default(),
-                    transport: Default::default(),
+                        byok: ModelByok::Byok,
+                        auth_scheme: Default::default(),
+                        capabilities: Default::default(),
+                        wire_quirks: Default::default(),
+                        transport: Default::default(),
                     },
                     provider: None,
-                },
-            ));
+                }));
 
             // Cache hit: served without consulting config.
             assert_eq!(actor.model_auth_facts("model-a").byok, ModelByok::Byok);
@@ -966,19 +966,19 @@ async fn reconstruct_full_config_no_bearer_resolver_for_byok_model_on_session_me
                 .await
                 .map(|c| c.model)
                 .unwrap_or_default();
-            actor.model_auth_memo.replace(Some(
-                crate::session::acp_session::ModelAuthMemo {
+            actor
+                .model_auth_memo
+                .replace(Some(crate::session::acp_session::ModelAuthMemo {
                     model_id: model,
                     facts: ModelAuthFacts {
-                    byok: ModelByok::Byok,
-                    auth_scheme: Default::default(),
-                    capabilities: Default::default(),
-                    wire_quirks: Default::default(),
-                    transport: Default::default(),
+                        byok: ModelByok::Byok,
+                        auth_scheme: Default::default(),
+                        capabilities: Default::default(),
+                        wire_quirks: Default::default(),
+                        transport: Default::default(),
                     },
                     provider: None,
-                },
-            ));
+                }));
 
             let cfg = actor.reconstruct_full_config().await;
 
@@ -1017,19 +1017,19 @@ async fn set_session_model_invalidates_byok_memo_for_same_model_id() {
                 .map(|c| c.model)
                 .unwrap_or_default();
 
-            actor.model_auth_memo.replace(Some(
-                crate::session::acp_session::ModelAuthMemo {
+            actor
+                .model_auth_memo
+                .replace(Some(crate::session::acp_session::ModelAuthMemo {
                     model_id: model.clone(),
                     facts: ModelAuthFacts {
-                    byok: ModelByok::NotByok,
-                    auth_scheme: Default::default(),
-                    capabilities: Default::default(),
-                    wire_quirks: Default::default(),
-                    transport: Default::default(),
+                        byok: ModelByok::NotByok,
+                        auth_scheme: Default::default(),
+                        capabilities: Default::default(),
+                        wire_quirks: Default::default(),
+                        transport: Default::default(),
                     },
                     provider: None,
-                },
-            ));
+                }));
 
             // Switch to the same model_id, now a per-model BYOK model on a
             // third-party endpoint.

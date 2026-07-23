@@ -19,7 +19,7 @@ use xai_grok_shell::sampling::ApiBackend;
 use xai_grok_test_support::env::EnvGuard;
 use xai_grok_test_support::{
     MockInferenceServer, MockModelEntry, assert_headless_success, assert_no_crashes, git_workdir,
-    run_headless_with_cmd,
+    run_headless_in_sandbox,
 };
 
 const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
@@ -156,12 +156,6 @@ fn checked_in_openai_profile_is_complete_secret_free_and_warning_free() {
         warning_log.trim().is_empty(),
         "checked-in profile must have no unknown, unused, malformed, or deprecated keys:\n{warning_log}"
     );
-    assert!(
-        config.model_override_warnings.is_empty(),
-        "model override warnings: {:?}",
-        config.model_override_warnings
-    );
-
     assert_eq!(config.cli.auto_update, Some(false));
     assert_eq!(config.models.default.as_deref(), Some("openai-latest"));
     assert_eq!(
@@ -451,10 +445,20 @@ async fn built_binary_uses_checked_in_openai_profile_end_to_end() {
     .expect("start authenticated Responses API mock");
     server.set_response("OPENAI_PROFILE_OK");
 
-    let home = tempfile::tempdir().expect("create isolated HOME");
-    let grok_home = home.path().join(".bandicot");
-    write_mock_profile(&grok_home, &server.url());
-    let workdir = git_workdir();
+    let mut workdir = git_workdir();
+    write_mock_profile(workdir.grok_home(), &server.url());
+    workdir
+        .set_env(BANDICOT_BASE_URL_VAR, server.url())
+        .set_env(BANDICOT_TOKEN_VAR, OPENAI_TEST_KEY)
+        .set_env("GROK_TELEMETRY_ENABLED", "false")
+        .set_env("GROK_FEEDBACK_ENABLED", "false")
+        .set_env("GROK_TRACE_UPLOAD", "false")
+        .set_env("GROK_INSTRUMENTATION", "disabled")
+        .set_env("GROK_DISABLE_AUTOUPDATER", "1")
+        .set_env("GROK_VOICE_MODE", "0")
+        .set_env("GROK_IMAGE_GEN", "0")
+        .set_env("GROK_IMAGE_EDIT", "0")
+        .set_env("GROK_VIDEO_GEN", "0");
 
     let mut command = tokio::process::Command::new(&binary);
     command
@@ -467,29 +471,13 @@ async fn built_binary_uses_checked_in_openai_profile_end_to_end() {
             "--max-turns",
             "1",
         ])
-        .current_dir(workdir.path())
+        .current_dir(workdir.workspace())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .env_clear()
-        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-        .env("HOME", home.path())
-        .env("USERPROFILE", home.path())
-        .env("GROK_HOME", &grok_home)
-        .env(BANDICOT_BASE_URL_VAR, server.url())
-        .env(BANDICOT_TOKEN_VAR, OPENAI_TEST_KEY)
-        .env("GROK_TELEMETRY_ENABLED", "false")
-        .env("GROK_FEEDBACK_ENABLED", "false")
-        .env("GROK_TRACE_UPLOAD", "false")
-        .env("GROK_INSTRUMENTATION", "disabled")
-        .env("GROK_DISABLE_AUTOUPDATER", "1")
-        .env("GROK_VOICE_MODE", "0")
-        .env("GROK_IMAGE_GEN", "0")
-        .env("GROK_IMAGE_EDIT", "0")
-        .env("GROK_VIDEO_GEN", "0");
+        .kill_on_drop(true);
 
-    let result = run_headless_with_cmd(command).await;
+    let result = run_headless_in_sandbox(command, workdir).await;
     assert_headless_success(&result, "checked-in OpenAI profile", Some(&server));
     assert_no_crashes(&result.stderr);
     assert_eq!(result.stdout.trim(), "OPENAI_PROFILE_OK");

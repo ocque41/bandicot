@@ -1288,15 +1288,19 @@ mod tests {
             ReasoningEffort::Xhigh.to_responses_api(),
             crate::rs::ReasoningEffort::Xhigh
         );
-        // The 0.33 SDK has no `Max` variant; the sampler must replace this
-        // typed staging value with a literal `"max"` in the wire payload.
+        // The SDK exposes `Max` natively, so the typed conversion must keep it
+        // distinct from `Xhigh` all the way to the wire payload.
         assert_eq!(
             ReasoningEffort::Max.to_responses_api(),
-            crate::rs::ReasoningEffort::Xhigh
+            crate::rs::ReasoningEffort::Max
         );
         assert_eq!(
             ReasoningEffort::from_responses_api(crate::rs::ReasoningEffort::Xhigh),
             ReasoningEffort::Xhigh
+        );
+        assert_eq!(
+            ReasoningEffort::from_responses_api(crate::rs::ReasoningEffort::Max),
+            ReasoningEffort::Max
         );
         assert_eq!(ReasoningEffort::Xhigh.to_messages_api(), Some("max"));
         assert_eq!(ReasoningEffort::Max.to_messages_api(), Some("max"));

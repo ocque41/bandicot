@@ -5527,7 +5527,7 @@ mod tests {
     }
 
     #[test]
-    fn responses_wrapper_preserves_canonical_max_before_sdk_conversion() {
+    fn responses_wrapper_preserves_native_max_through_sdk_conversion() {
         let req = ConversationRequest {
             reasoning_effort: Some(crate::ReasoningEffort::Max),
             ..ConversationRequest::from_items(vec![ConversationItem::user("hi")]).with_model("test")
@@ -5539,8 +5539,8 @@ mod tests {
         assert_eq!(
             json.pointer("/reasoning/effort")
                 .and_then(serde_json::Value::as_str),
-            Some("xhigh"),
-            "async-openai 0.33 is only a typed staging layer; the wrapper must retain Max for the final wire patch",
+            Some("max"),
+            "the SDK now supports native max reasoning effort and must preserve it on the wire",
         );
     }
 

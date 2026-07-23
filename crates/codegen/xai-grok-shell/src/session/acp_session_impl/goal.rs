@@ -261,28 +261,29 @@ impl SessionActor {
             .into_iter()
             .map(|task| task.id)
             .collect::<std::collections::HashSet<_>>();
-        let should_reconcile =
-            {
-                let mut tracker = self.plan_mode.lock();
-                let Some(workflow) = tracker.approved_loop_mut() else {
-                    return;
-                };
-                if workflow.phase != ApprovedLoopPhase::Running || workflow.run_in_flight {
-                    false
-                } else {
-                    if workflow.pending_task_id.as_ref().is_some_and(|id| {
-                        !scheduled_ids.contains(id)
-                    }) {
-                        workflow.pending_task_id = None;
-                    }
-                    if goal_complete || workflow.pending_task_id.is_none() {
-                        workflow.run_in_flight = true;
-                        true
-                    } else {
-                        false
-                    }
-                }
+        let should_reconcile = {
+            let mut tracker = self.plan_mode.lock();
+            let Some(workflow) = tracker.approved_loop_mut() else {
+                return;
             };
+            if workflow.phase != ApprovedLoopPhase::Running || workflow.run_in_flight {
+                false
+            } else {
+                if workflow
+                    .pending_task_id
+                    .as_ref()
+                    .is_some_and(|id| !scheduled_ids.contains(id))
+                {
+                    workflow.pending_task_id = None;
+                }
+                if goal_complete || workflow.pending_task_id.is_none() {
+                    workflow.run_in_flight = true;
+                    true
+                } else {
+                    false
+                }
+            }
+        };
         if should_reconcile {
             self.persist_plan_mode_state();
             self.finish_approved_loop_run().await;
