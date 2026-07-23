@@ -269,22 +269,25 @@ jobs:
 
       - name: Update Homebrew tap
         env:
-          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          TAP_SSH_KEY: ${{ secrets.HOMEBREW_TAP_SSH_KEY }}
         run: |
-          test -n "$GH_TOKEN"
+          set -euo pipefail
+          test -n "$TAP_SSH_KEY"
           version=${GITHUB_REF_NAME#v}
-          formula="$RUNNER_TEMP/dist/bandicot.rb"
-          encoded=$(base64 <"$formula" | tr -d '\n')
-          current_sha=$(gh api \
-            repos/ocque41/homebrew-tap/contents/Formula/bandicot.rb \
-            --jq '.sha' 2>/dev/null || true)
-          args=(
-            --method PUT
-            repos/ocque41/homebrew-tap/contents/Formula/bandicot.rb
-            -f message="bandicot $version"
-            -f content="$encoded"
-          )
-          if [[ -n "$current_sha" ]]; then
-            args+=(-f sha="$current_sha")
-          fi
-          gh api "${args[@]}"
+          install -d -m 700 "$HOME/.ssh"
+          printf '%s\n' "$TAP_SSH_KEY" >"$HOME/.ssh/bandicot-tap"
+          chmod 600 "$HOME/.ssh/bandicot-tap"
+
+          ssh-keyscan -t ed25519 github.com >"$HOME/.ssh/known_hosts"
+          fingerprint=$(ssh-keygen -lf "$HOME/.ssh/known_hosts" -E sha256 | awk '{print $2}')
+          test "$fingerprint" = "SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zP9lYefA3DL+OFc"
+
+          export GIT_SSH_COMMAND="ssh -i $HOME/.ssh/bandicot-tap -o IdentitiesOnly=yes"
+          git clone git@github.com:ocque41/homebrew-tap.git "$RUNNER_TEMP/homebrew-tap"
+          mkdir -p "$RUNNER_TEMP/homebrew-tap/Formula"
+          cp "$RUNNER_TEMP/dist/bandicot.rb" "$RUNNER_TEMP/homebrew-tap/Formula/bandicot.rb"
+          git -C "$RUNNER_TEMP/homebrew-tap" config user.name "github-actions[bot]"
+          git -C "$RUNNER_TEMP/homebrew-tap" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C "$RUNNER_TEMP/homebrew-tap" add Formula/bandicot.rb
+          git -C "$RUNNER_TEMP/homebrew-tap" commit -m "bandicot $version"
+          git -C "$RUNNER_TEMP/homebrew-tap" push origin main
