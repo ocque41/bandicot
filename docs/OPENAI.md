@@ -30,9 +30,9 @@ official Grok Build installation.
   macOS-specific. No script modifies Terminal, Ghostty, tmux, shell startup
   files, macOS privacy settings, Homebrew, or Google Cloud SDK configuration.
 
-## Prerequisites
+## Source-build prerequisites
 
-The installer builds from source, so the host needs:
+The optional source installer needs:
 
 - the Rust toolchain selected by `rust-toolchain.toml` (normally managed by
   `rustup`);
@@ -45,7 +45,22 @@ An OpenAI Platform key can be created in the OpenAI Platform dashboard. Treat
 it as a password: never commit it, paste it into TOML, include it in an issue,
 or pass it as a command-line argument.
 
-## Install on macOS
+## Install on Apple Silicon macOS
+
+The low-storage installation uses the prebuilt GitHub release through
+Homebrew:
+
+```sh
+brew tap ocque41/tap
+brew install bandicot
+bandicot --version
+bandicot
+```
+
+This path does not require Rust, Cargo, or a source checkout. Homebrew preserves
+the runtime profile and session state under `~/.bandicot` during upgrades.
+
+## Install from source
 
 From the repository root:
 
@@ -72,7 +87,7 @@ required.
 `setup-openai-key.sh` invokes `/usr/bin/security` so Keychain performs the
 interactive secret prompt. The script does not read the key itself and places
 no key in an argument, configuration file, log, or repository file. The
-The canonical Keychain service is `bandicot.openai`. The launcher can read the
+canonical Keychain service is `bandicot.openai`. The launcher can read the
 legacy `ocque41.grok-build.openai` entry during migration, but new keys are
 stored only under the Bandicot service name.
 

@@ -1,0 +1,54 @@
+class Bandicot < Formula
+  desc "Source-built coding agent with OpenAI and ChatGPT support"
+  homepage "https://github.com/ocque41/bandicot"
+  url "https://github.com/ocque41/bandicot/releases/download/v@@VERSION@@/bandicot-@@VERSION@@-aarch64-apple-darwin.tar.gz"
+  sha256 "@@SHA256@@"
+  license "Apache-2.0"
+  version "@@VERSION@@"
+
+  depends_on arch: :arm64
+  depends_on :macos
+
+  def install
+    launcher = buildpath/"bin/bandicot"
+    inreplace launcher, "@@BANDICOT_LIBEXEC_DIR@@", libexec
+
+    bin.install launcher
+    libexec.install Dir["libexec/bandicot/*"]
+    pkgshare.install Dir["share/bandicot/*"]
+  end
+
+  def post_install
+    require "digest"
+    require "fileutils"
+
+    home = Pathname(Dir.home)/".bandicot"
+    odie "Refusing symbolic-link Bandicot home: #{home}" if home.symlink?
+
+    FileUtils.mkdir_p(home, mode: 0700)
+    source = pkgshare/"openai.toml"
+    config = home/"config.toml"
+    canonical = home/".canonical-config.toml"
+    hash_file = home/".installed-config.sha256"
+    new_hash = Digest::SHA256.file(source).hexdigest
+
+    replace_config = !config.exist?
+    if config.file? && hash_file.file?
+      recorded_hash = hash_file.read.strip
+      replace_config = recorded_hash == Digest::SHA256.file(config).hexdigest
+    end
+
+    canonical.atomic_write(source.read)
+    canonical.chmod(0600)
+    if replace_config
+      config.atomic_write(source.read)
+      config.chmod(0600)
+      hash_file.atomic_write("#{new_hash}\n")
+      hash_file.chmod(0600)
+    end
+  end
+
+  test do
+    assert_match "bandicot", shell_output("#{bin}/bandicot --version").downcase
+  end
+end

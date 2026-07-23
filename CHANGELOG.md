@@ -5,8 +5,15 @@ Build release notes remain under `crates/codegen/xai-grok-shell/`.
 
 ## Unreleased
 
+## [0.2.110] - 2026-07-23
+
 ### Changed
 
+- Added a prebuilt Apple Silicon macOS release archive, one-day remote
+  development builds, an attested GitHub release workflow, and Homebrew tap
+  packaging.
+- Added remote and ephemeral development commands so local source work does
+  not retain Cargo build output.
 - Made `install-bandicot.sh` canonical and retained `install-openai.sh` only as
   a compatibility wrapper.
 - Consolidated the installed command, payload, configuration, and sessions

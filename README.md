@@ -7,6 +7,7 @@
 OpenAI Platform or ChatGPT account.**
 
 [OpenAI quick start](#openai-quick-start) ·
+[Low-storage development](#low-storage-development) ·
 [Approved workflows](#approved-workflows) ·
 [Assumptions](#assumptions) ·
 [Building from source](#building-from-source) ·
@@ -40,8 +41,23 @@ Responses API distribution. The upstream source lives at
 ## OpenAI quick start
 
 Do **not** use the xAI release installer for this fork: it installs xAI's
-prebuilt binary and does not contain these OpenAI changes. Build and install
-the fork itself:
+prebuilt binary and does not contain these OpenAI changes.
+
+On Apple Silicon macOS, install the tested prebuilt Bandicot release through
+the dedicated Homebrew tap:
+
+```sh
+brew tap ocque41/tap
+brew install bandicot
+bandicot
+```
+
+Homebrew downloads a roughly 54 MB release archive and installs the binary
+without Rust, Cargo, or a local build directory. `brew upgrade bandicot`
+installs later releases. `brew cleanup bandicot` removes old Homebrew downloads
+and package versions.
+
+For a source-built installation, use:
 
 ```sh
 ./scripts/install-bandicot.sh
@@ -86,6 +102,35 @@ OPENAI_API_KEY="${OPENAI_API_KEY:?set it through your secret manager}" \
 The tracked [OpenAI profile](config/openai.toml) contains no secret. Detailed
 setup, model choices, security boundaries, and troubleshooting are in
 [docs/OPENAI.md](docs/OPENAI.md).
+
+## Low-storage development
+
+Keep this source checkout on the Mac and perform compilation on GitHub:
+
+```sh
+git add <changed-files>
+git commit -m "describe the change"
+git push
+./scripts/remote-macos-build.sh
+```
+
+The helper requires an authenticated GitHub CLI session. It starts the
+`macOS Apple Silicon` workflow for the pushed branch, waits for validation and
+packaging, downloads the one-day artifact into a temporary directory, and
+installs it. The temporary download is removed automatically. No local Cargo
+`target/` directory is created.
+
+If an emergency local Cargo command is required, run it through the disposable
+wrapper:
+
+```sh
+./scripts/cargo-ephemeral.sh check -p xai-grok-pager-bin
+```
+
+The wrapper disables incremental compilation and debug symbols, places the
+build under the system temporary directory, and deletes it when Cargo exits.
+Normal development should use the remote build because this workspace has a
+large dependency graph.
 
 ## Assumptions
 
@@ -193,6 +238,9 @@ cargo test -p xai-grok-config # per-crate tests
 cargo clippy -p <crate>       # lint config: clippy.toml at the repo root
 cargo fmt --all               # rustfmt.toml at the repo root
 ```
+
+Storage-constrained Apple Silicon development should use
+`scripts/remote-macos-build.sh` instead of these direct Cargo commands.
 
 ## Updating the fork
 
