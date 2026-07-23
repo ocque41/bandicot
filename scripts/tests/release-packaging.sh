@@ -77,4 +77,19 @@ grep -F '@@VERSION@@' "$FORMULA" >/dev/null 2>&1 && {
     exit 1
 }
 
+NOTES=$TEST_ROOT/release-notes.md
+"$REPO_ROOT/scripts/extract-release-notes.sh" 0.2.111 "$REPO_ROOT/CHANGELOG.md" >"$NOTES"
+grep -F '## [0.2.111]' "$NOTES" >/dev/null || {
+    printf '%s\n' 'FAIL: release notes heading missing' >&2
+    exit 1
+}
+if grep -F '## [0.2.110]' "$NOTES" >/dev/null 2>&1; then
+    printf '%s\n' 'FAIL: release notes included the next version' >&2
+    exit 1
+fi
+if "$REPO_ROOT/scripts/extract-release-notes.sh" 9.9.9 "$REPO_ROOT/CHANGELOG.md" >"$NOTES"; then
+    printf '%s\n' 'FAIL: missing release notes unexpectedly succeeded' >&2
+    exit 1
+fi
+
 printf '%s\n' 'Release packaging tests passed.'

@@ -252,11 +252,7 @@ jobs:
           test -f "$checksum"
           test -f "$formula"
           notes="$RUNNER_TEMP/release-notes.md"
-          awk -v version="$version" '
-            $0 ~ "^## \\[" version "\\]" { capture=1; print; next }
-            capture && /^## \\[/ { exit }
-            capture { print }
-          ' CHANGELOG.md >"$notes"
+          scripts/extract-release-notes.sh "$version" >"$notes"
           test -s "$notes"
           gh release create "v$version" \
             "$archive" \

@@ -5,6 +5,13 @@ Build release notes remain under `crates/codegen/xai-grok-shell/`.
 
 ## Unreleased
 
+## [0.2.111] - 2026-07-23
+
+### Fixed
+
+- Corrected the public `--version` product name to `bandicot`.
+- Corrected release-note extraction in the automated GitHub release job.
+
 ## [0.2.110] - 2026-07-23
 
 ### Changed
